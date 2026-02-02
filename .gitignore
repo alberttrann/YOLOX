@@ -6,10 +6,12 @@ YOLOX_outputs/
 datasets/
 # do not ignore datasets under yolox/data
 !*yolox/data/datasets/
+bdd100k/
 
 # temporary files which can be created if a process still has a handle open of a deleted file
 .fuse_hidden*
-
+bdd100k_labels_images_train.json
+bdd100k_labels_images_val.json
 # KDE directory preferences
 .directory
 
