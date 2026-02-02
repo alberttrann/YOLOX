@@ -12,6 +12,7 @@ bdd100k/
 .fuse_hidden*
 bdd100k_labels_images_train.json
 bdd100k_labels_images_val.json
+tde_train_coco.json
 # KDE directory preferences
 .directory
 
