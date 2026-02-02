@@ -9,14 +9,16 @@ class C2f_Tribrid(nn.Module):
     Branch A: Dense Local (Standard Bottlenecks)
     Branch B: Sparse Global (SimAM -> CA -> MBConv -> DSA)
     """
-    def __init__(self, c1, c2, n=1, shortcut=False, g=1, e=0.5):
+    def __init__(self, c1, c2, n=1, shortcut=False, depthwise=False, act="silu", e=0.5):
         super().__init__()
         self.c = int(c2 * e)
-        self.cv1 = BaseConv(c1, c2, 1, 1)
-        self.cv2 = BaseConv((2 + n) * self.c, c2, 1)
+        self.cv1 = BaseConv(c1, c2, 1, 1, act=act) 
+        self.cv2 = BaseConv((2 + n) * self.c, c2, 1, 1, act=act)
         
         # Branch A: Local Dense Bottlenecks
-        self.m = nn.ModuleList(Bottleneck(self.c, self.c, shortcut, g, k=(3, 3), e=1.0) for _ in range(n))
+        self.m = nn.ModuleList(
+            Bottleneck(self.c, self.c, shortcut, 1.0, depthwise, act) for _ in range(n)
+        )
         
         # Branch B: Tribrid Global Context Mixer
         self.global_mixer = nn.Sequential(
@@ -37,7 +39,7 @@ class C2f_Tribrid(nn.Module):
         y.extend(m(y[-1]) for m in self.m)
         
         # Global Sparse Path (Applied to the final local feature)
-        # This provides global reasoning on top of the deepest local features
+        # provides global reasoning on top of the deepest local features
         global_context = self.global_mixer(y[-1])
         
         # Gated Skip Connection

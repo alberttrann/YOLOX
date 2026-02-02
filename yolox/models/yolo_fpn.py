@@ -5,7 +5,7 @@
 import torch
 import torch.nn as nn
 
-from .darknet import Darknet
+from .darknet import CSPDarknet
 from .network_blocks import BaseConv
 
 
@@ -21,7 +21,7 @@ class YOLOFPN(nn.Module):
     ):
         super().__init__()
 
-        self.backbone = Darknet(depth)
+        self.backbone = CSPDarknet(depth)
         self.in_features = in_features
 
         # out 1

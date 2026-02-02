@@ -11,7 +11,7 @@ class CSPDarknet(nn.Module):
         out_features=("dark3", "dark4", "dark5"),
         depthwise=False,
         act="silu",
-        # ESSENTIAL ENHANCEMENTS FOR TDE-YOLOX
+        # FOR TDE-YOLOX
         ttt_lr=0.005,      # Meta-learning step size
         ttt_noise_std=0.05 # DINO-logic noise intensity
     ):
@@ -27,7 +27,7 @@ class CSPDarknet(nn.Module):
         self.stem = Focus(3, base_channels, ksize=3, act=act)
 
         # 1. The Adaptive Dark2 (Meta-TTT Stage)
-        # This is the ONLY stage that learns to adapt itself
+        # the ONLY stage that learns to adapt itself
         dark2_base = nn.Sequential(
             Conv(base_channels, base_channels * 2, 3, 2, act=act),
             CSPLayer(
@@ -43,7 +43,7 @@ class CSPDarknet(nn.Module):
             dark2_base, 
             in_channels=base_channels * 2,
             ttt_lr=ttt_lr,
-            noise_std=ttt_noise_std # Integrated Check 3 (Denoising)
+            noise_std=ttt_noise_std # (Denoising)
         )
 
         # 2. Dark3 (Deep Stage)
@@ -65,22 +65,18 @@ class CSPDarknet(nn.Module):
             CSPLayer(base_channels * 16, base_channels * 16, n=base_depth, shortcut=False, depthwise=depthwise, act=act),
         )
 
-    def forward(self, x):
+    def forward(self, x, force_ttt=False): 
         outputs = {}
-        
         # Step 0: Initial Pixel-to-Feature Stem
         x = self.stem(x)
-        
         # Step 1: ADAPTIVE FEATURE EXTRACTION
-        # Enhancement: Stochastic Meta-Learning (Training stability)
+        # Stochastic Meta-Learning (Training stability)
         run_ttt = True
-        if self.training:
-            # Only run the TTT loop 30% of the time during training to prevent over-specialization
-            # and to act as a powerful meta-regularizer.
+        if self.training and not force_ttt: 
             if torch.rand(1).item() > 0.3:
                 run_ttt = False
-        # During inference (eval mode), always run_ttt = True (determined by caller or default)
         
+        # Pass force_ttt / calculated run_ttt
         x = self.dark2(x, run_ttt=run_ttt)
         outputs["dark2"] = x
         

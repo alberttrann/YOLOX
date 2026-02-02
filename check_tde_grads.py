@@ -3,14 +3,14 @@ from yolox.exp import get_exp
 
 def check_meta_gradients():
     print("Initializing TDE-YOLOX...")
-    # Load your exp
+    # Load exp
     exp = get_exp("exps/default/tde_yolox_s.py", None)
     model = exp.get_model()
     model.train()
     
-    # Fake Input
+    # Mock Input
     x = torch.randn(2, 3, 640, 640) # Batch size 2
-    # Fake Targets (YOLOX expects list of tensors)
+    # Mock Targets (YOLOX expects list of tensors)
     targets = torch.zeros(2, 50, 5) # [batch, max_objs, 5]
     
     print("Running Forward Pass with Meta-TTT...")
@@ -26,7 +26,7 @@ def check_meta_gradients():
     loss.backward()
     
     # CHECK 1: Did gradients reach the TTT Projector?
-    # This confirms the Inner Loop is connected to Outer Loop
+    # confirms Inner Loop is connected to Outer Loop
     projector_grad = model.backbone.backbone.dark2.projector.net[0].weight.grad
     if projector_grad is not None:
         print("SUCCESS: Gradients reached TTT Projector (Meta-Learning Active)")

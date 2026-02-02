@@ -12,21 +12,64 @@ from .network_blocks import BaseConv, CSPLayer, DWConv
 from .tribrid_neck import C2f_Tribrid
 
 class YOLOPAFPN(nn.Module):
-    def __init__(self, depth=1.0, width=1.0, in_channels=[256, 512, 1024], act="silu"):
+    def __init__(
+        self,
+        depth=1.0,
+        width=1.0,
+        in_features=("dark3", "dark4", "dark5"),
+        in_channels=[256, 512, 1024],
+        depthwise=False,
+        act="silu",
+        # Passing TTT parameters to inner backbone
+        ttt_lr=0.005,
+        ttt_noise_std=0.05
+    ):
         super().__init__()
-        # Backbone (Now includes Phase 1 TTTAdaptiveStage)
-        self.backbone = CSPDarknet(depth, width, act=act)
-        
+        # Instantiate the TTT-Aware Backbone
+        self.backbone = CSPDarknet(
+            depth, width, out_features=in_features, 
+            depthwise=depthwise, act=act,
+            ttt_lr=ttt_lr, ttt_noise_std=ttt_noise_std
+        )
+        self.in_features = in_features
+        self.in_channels = in_channels
+
         self.upsample = nn.Upsample(scale_factor=2, mode="nearest")
         
-        # Replace every CSPLayer with C2f_Tribrid
-        # Top-Down Path
-        self.C3_p4 = C2f_Tribrid(int(in_channels[2]*width + in_channels[1]*width), int(in_channels[1]*width), round(3*depth))
-        self.C3_p3 = C2f_Tribrid(int(in_channels[1]*width + in_channels[0]*width), int(in_channels[0]*width), round(3*depth))
+        # Lateral convolutions
+        self.lateral_conv0 = BaseConv(int(in_channels[2] * width), int(in_channels[1] * width), 1, 1, act=act)
+        self.reduce_conv1 = BaseConv(int(in_channels[1] * width), int(in_channels[0] * width), 1, 1, act=act)
+        self.bu_conv2 = BaseConv(int(in_channels[0] * width), int(in_channels[0] * width), 3, 2, act=act)
+        self.bu_conv1 = BaseConv(int(in_channels[1] * width), int(in_channels[1] * width), 3, 2, act=act)
         
-        # Bottom-Up Path
-        self.C3_n3 = C2f_Tribrid(int(in_channels[0]*width + in_channels[0]*width), int(in_channels[1]*width), round(3*depth))
-        self.C3_n4 = C2f_Tribrid(int(in_channels[1]*width + in_channels[1]*width), int(in_channels[2]*width), round(3*depth))
+        # Replace every CSPLayer with C2f_Tribrid
+        # C3_p4: lateral_conv0(P5) [256] + P4 [256] = 512
+        self.C3_p4 = C2f_Tribrid(
+            int(2 * in_channels[1] * width), 
+            int(in_channels[1] * width), 
+            round(3 * depth), False, depthwise=depthwise, act=act
+        )
+        
+        # C3_p3: reduce_conv1(p4) [128] + P3 [128] = 256
+        self.C3_p3 = C2f_Tribrid(
+            int(2 * in_channels[0] * width), 
+            int(in_channels[0] * width), 
+            round(3 * depth), False, depthwise=depthwise, act=act
+        )
+        
+        # C3_n3: bu_conv2(p3) [128] + fpn_out1 [128] = 256
+        self.C3_n3 = C2f_Tribrid(
+            int(2 * in_channels[0] * width), 
+            int(in_channels[1] * width), 
+            round(3 * depth), False, depthwise=depthwise, act=act
+        )
+        
+        # C3_n4: bu_conv1(n3) [256] + fpn_out0 [256] = 512
+        self.C3_n4 = C2f_Tribrid(
+            int(2 * in_channels[1] * width), 
+            int(in_channels[2] * width), 
+            round(3 * depth), False, depthwise=depthwise, act=act
+        )
 
     def forward(self, input):
         """

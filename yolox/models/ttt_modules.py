@@ -31,6 +31,7 @@ class AugmentedLightningIndexer(nn.Module):
 class TTTProjector(nn.Module):
     def __init__(self, in_channels):
         super().__init__()
+        # mask_token here so it is tracked in named_parameters()
         self.mask_token = nn.Parameter(torch.randn(1, in_channels, 1, 1))
         hidden = in_channels // 2
         self.net = nn.Sequential(
@@ -42,6 +43,11 @@ class TTTProjector(nn.Module):
         )
     def forward(self, x): return self.net(x)
 
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from torch.func import functional_call
+
 class TTTAdaptiveStage(nn.Module):
     def __init__(self, stage_module, in_channels, ttt_lr=0.005, noise_std=0.05):
         super().__init__()
@@ -49,77 +55,70 @@ class TTTAdaptiveStage(nn.Module):
         self.projector = TTTProjector(in_channels)
         self.lightning_indexer = AugmentedLightningIndexer(in_channels)
         self.ttt_lr = ttt_lr
-        self.noise_std = noise_std # Intensity of synthetic OOD noise
+        self.noise_std = noise_std
 
     def _get_active_mask(self, feat, ratio=0.75):
-        B, C, H, W = feat.shape
-        saliency_map = self.lightning_indexer(feat.detach()) 
+        saliency_map = self.lightning_indexer(feat) 
         scores_blocked = F.avg_pool2d(saliency_map, 8, stride=8)
+        B = feat.shape[0]
         threshold = torch.quantile(scores_blocked.view(B, -1), ratio, dim=1, keepdim=True)
         mask_blocked = (scores_blocked >= threshold.view(B, 1, 1, 1)).float()
-        return F.interpolate(mask_blocked, size=(H, W), mode='nearest')
-
-    def inner_loss_fn(self, params, projector_params, x_in, mask, noise_map, clean_target):
-        """
-        THE CORE META-OBJECTIVE:
-        Reconstruct 'clean_target' from an input that is BOTH masked AND noisy.
-        """
-        # 1. Functional Forward Pass
-        feat = functional_call(self.backbone_stage, params, x_in)
-        
-        # 2. CONTRASTIVE DENOISING logic (DINO/DN-DETR philosophy)
-        # Apply noise to ALL pixels (restoration task)
-        feat_noisy = feat + noise_map
-        
-        # 3. MASKED MODELING logic (MAE philosophy)
-        # Apply mask to saliency regions (hallucination task)
-        feat_corrupted = feat_noisy * (1 - mask) + self.projector.mask_token * mask
-        
-        # 4. Reconstruction
-        rec = functional_call(self.projector, projector_params, feat_corrupted)
-        
-        # LOSS: Must match the ORIGINAL CLEAN feature map
-        return F.mse_loss(rec, clean_target)
+        return F.interpolate(mask_blocked, size=(feat.shape[2:]), mode='nearest')
 
     def forward(self, x_in, run_ttt=True):
         if not run_ttt:
             return self.backbone_stage(x_in)
 
+        # 1. Setup Param Groups
+        # manually separate params to use functional_call for the BACKBONE only
         all_params = dict(self.backbone_stage.named_parameters())
-        proj_params = dict(self.projector.named_parameters())
         
-        adaptable_params = {k: v for k, v in all_params.items() if 'bn' in k or 'norm' in k}
-        static_params = {k: v for k, v in all_params.items() if k not in adaptable_params}
-
-        # Step 1: Preliminary Pass to define targets and selection
-        with torch.no_grad():
-            feat_initial = self.backbone_stage(x_in)
-            clean_target = feat_initial.detach()
-            mask = self._get_active_mask(feat_initial)
-            # Create the synthetic 'Fog/Rain' noise map
-            noise_map = torch.randn_like(feat_initial) * self.noise_std
-
-        # Step 2: Meta-Gradient Computation (Inner Loop)
-        def inner_grad_fn(p_adapt, p_proj):
-            p_full = {**p_adapt, **static_params}
-            return self.inner_loss_fn(p_full, p_proj, x_in, mask, noise_map, clean_target)
-
-        # Functional grad ensures gradients flow through the update step (Meta-Learning)
-        grads_adapt = grad(inner_grad_fn)(adaptable_params, proj_params)
+        # Identify which params will be updated (Norms)
+        adapt_names = [n for n, p in self.backbone_stage.named_parameters() 
+                       if ('bn' in n or 'norm' in n) and p.requires_grad]
         
-        # Step 3: Purely Functional Update
-        # These adapted params exist only for this forward pass
-        updated_params = {name: p - self.ttt_lr * grads_adapt[name] 
-                         for name, p in adaptable_params.items()}
-        final_params = {**updated_params, **static_params}
+        # 2. Meta-Forward (Building the Graph)
+        # Standard forward to get features (graph connected to x_in and backbone weights)
+        feat = self.backbone_stage(x_in)
+        
+        # Generate Corruption
+        mask = self._get_active_mask(feat)
+        noise = torch.randn_like(feat) * self.noise_std
+        feat_corrupted = (feat + noise) * (1 - mask) + self.projector.mask_token * mask
+        
+        # Reconstruction (Standard call keeps Projector in the graph)
+        rec = self.projector(feat_corrupted)
+        
+        # Inner Loss
+        # Target must be detached to prevent "collapse to zero" solution
+        inner_loss = F.mse_loss(rec, feat.detach())
 
-        # Step 4: Final Adapted Forward Pass
-        if self.training:
-            # Graph is preserved for outer Detection Loss optimization
-            out = functional_call(self.backbone_stage, final_params, x_in)
-        else:
-            with torch.no_grad():
-                out = functional_call(self.backbone_stage, final_params, x_in)
+        # 3. Meta-Gradient Calculation
+        # need gradients of inner_loss w.r.t. the Norm parameters of self.backbone_stage
+        adapt_tensors = [all_params[n] for n in adapt_names]
+        
+        grads = torch.autograd.grad(
+            inner_loss, 
+            adapt_tensors, 
+            create_graph=True, 
+            retain_graph=True
+        )
+        
+        # 4. Functional Update
+        # Create the "fast weights" dictionary
+        fast_params = {}
+        grad_idx = 0
+        for name, p in all_params.items():
+            if name in adapt_names:
+                # The meta-learning update step
+                fast_params[name] = p - self.ttt_lr * grads[grad_idx]
+                grad_idx += 1
+            else:
+                fast_params[name] = p
+
+        # 5. Final Forward with Fast Weights
+        # functional_call applies the fast_params to the backbone structure
+        out = functional_call(self.backbone_stage, fast_params, x_in)
 
         return out
 
@@ -180,8 +179,8 @@ class MBConvConditioner(nn.Module):
 
 class DeepSeekSparseAttention(nn.Module):
     """
-    Literal DeepSeek-V3.2 DSA for Object Detection.
-    Uses an Augmented Lightning Indexer for saliency selection.
+    DeepSeek-V3.2 DSA for Object Detection.
+    Uses Augmented Lightning Indexer for saliency selection.
     """
     def __init__(self, dim, sparsity_ratio=0.1):
         super().__init__()
@@ -212,7 +211,7 @@ class DeepSeekSparseAttention(nn.Module):
         q, k, v = torch.chunk(qkv, 3, dim=1) # [B, C, HW]
         
         # Select sparse keys and values based on saliency
-        # This forces global context to focus only on informative regions
+        # forces global context to focus only on informative regions
         k_s = torch.gather(k, 2, topk_indices.unsqueeze(1).expand(-1, C, -1)) # [B, C, K]
         v_s = torch.gather(v, 2, topk_indices.unsqueeze(1).expand(-1, C, -1)) # [B, C, K]
 
@@ -238,7 +237,7 @@ class EngramMemoryBank(nn.Module):
         self.num_classes = num_classes
         self.latent_dim = latent_dim
         
-        # The Memory Bank: Prototypes for each class
+        # Memory Bank: Prototypes for each class
         # Initialized with orthogonal vectors to maximize identity separation
         self.prototypes = nn.Parameter(torch.randn(num_classes, latent_dim))
         nn.init.orthogonal_(self.prototypes)
@@ -250,7 +249,7 @@ class EngramMemoryBank(nn.Module):
         objectness_mask: [B, HW, 1] - Gating based on physical presence
         """
         # 1. Similarity Scoring (Soft-Attention Lookup)
-        # We compare observed latent vectors to all canonical prototypes
+        # compare observed latent vectors to all canonical prototypes
         # [B, HW, latent_dim] @ [latent_dim, num_classes] -> [B, HW, num_classes]
         attn_scores = torch.matmul(x_latent, self.prototypes.t())
         attn_weights = F.softmax(attn_scores, dim=-1)
@@ -268,14 +267,21 @@ class EngramMemoryBank(nn.Module):
         return memory_retrieved * restoration_mask
 
 class UncertaintyEstimator(nn.Module):
-    """Calculates feature entropy to drive the Engram gate."""
+    """
+    Expert Enhancement: 
+    Learns to predict uncertainty from the latent feature pattern itself.
+    """
     def __init__(self, dim):
         super().__init__()
-        self.classifier = nn.Linear(dim, 1) # Learns to predict uncertainty from features
+        # Input dim is 128 (latent_dim)
+        self.classifier = nn.Sequential(
+            nn.Linear(dim, 32),
+            nn.ReLU(),
+            nn.Linear(32, 1),
+            nn.Sigmoid()
+        )
 
     def forward(self, x):
-        # x: [B, HW, C]
-        # We use the standard deviation across channels as a proxy for feature entropy
-        # High variance across channels often indicates 'confused' activation patterns
-        entropy = torch.std(x, dim=-1, keepdim=True)
-        return torch.sigmoid(self.classifier(entropy))
+        # x: [B, HW, 128]
+        # process each token's latent vector to get its uncertainty score
+        return self.classifier(x) # Returns [B, HW, 1]
