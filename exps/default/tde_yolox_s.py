@@ -24,19 +24,36 @@ class Exp(MyExp):
         self.test_ann = "D:/YOLOX-3RD/bdd100k/bdd100k/bdd100k/images/annotations/tde_test_adverse_coco.json"
         
         # Training Schedule
-        self.max_epoch = 80 # TTT needs fewer epochs because meta-learning is efficient
+        #self.max_epoch = 80 # TTT needs fewer epochs because meta-learning is efficient
         self.warmup_epochs = 10    # Longer warmup for Engram stability
-        self.no_aug_epochs = 15    # Longer 'pure' training at the end
+        #self.no_aug_epochs = 15    # Longer 'pure' training at the end
         self.ema = True            # Keep EMA on to stabilize OOD features
         self.basic_lr_per_img = 0.01 / 64.0 # Standard YOLOX LR
         self.data_num_workers = 2
+        self.batch_size = 14
+
+        # --- 80++ RECONFIGURATION START ---
+        #self.max_epoch = 100        # Extend the timeline
+        #self.no_aug_epochs = 35     # Ensure Mosaic stays OFF for the rest of training
+        #self.min_lr_ratio = 0.05    # Lock LR at 5% floor (Precision Mode)
+        #self.weight_decay = 0.00025 # Reduce regularization to preserve identity
+
+        # --- GENTLE LANDING CONFIG (Resume from E79) ---
+        self.max_epoch = 100        
+        self.no_aug_epochs = 35     # Keep Augmentation OFF
+        
+        # RESTORE STANDARD REGULARIZATION
+        self.weight_decay = 0.0005 
+        
+        # LET LR DECAY TO ZERO (Remove the floor clamp)
+        self.min_lr_ratio = 0.0
 
     def get_dataset(self, cache: bool = False, cache_type: str = "ram"):
         from yolox.data import COCODataset, TrainTransform
         return COCODataset(
             data_dir=self.data_dir,
             json_file=self.train_ann,
-            name="", # <--- CRITICAL: Prevents appending 'train2017'
+            name="", 
             img_size=self.input_size,
             preproc=TrainTransform(
                 max_labels=50,
@@ -52,7 +69,7 @@ class Exp(MyExp):
         return COCODataset(
             data_dir=self.data_dir,
             json_file=self.val_ann,
-            name="", # <--- CRITICAL: Prevents appending 'val2017'
+            name="", 
             img_size=self.test_size,
             preproc=ValTransform(legacy=kwargs.get("legacy", False)),
         )

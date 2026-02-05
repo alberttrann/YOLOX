@@ -49,6 +49,15 @@ class YOLOX(nn.Module):
         - Epoch 11-40: Linear Ramp 0.1 -> 0.5 (Curriculum Learning)
         - Epoch 40+: Fixed 0.5 (High-fidelity Adaptation)
         """
+
+        # --- GENTLE LANDING ---
+        if self.current_epoch >= 79:
+            return 0.2  # Low probability to stabilize features
+
+        # --- 80++ STRESS TEST ---
+        #if self.current_epoch > 72:
+            #return 0.7 # Push to 70% TTT in final phase for stress testing
+
         if not self.training:
             return 1.0 # Always TTT during inference/validation
             
@@ -57,6 +66,7 @@ class YOLOX(nn.Module):
         
         if self.current_epoch >= self.ramp_end:
             return self.prob_end
+        
             
         # Linear Ramp
         progress = (self.current_epoch - self.warmup_end) / (self.ramp_end - self.warmup_end)
