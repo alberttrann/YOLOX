@@ -1,5 +1,5 @@
 import torch
-ckpt = torch.load("YOLOX_outputs/tde_yolox_s/epoch_79_ckpt.pth", map_location="cpu")
+ckpt = torch.load("YOLOX_outputs/tde_yolox_s/best_ckpt.pth", map_location="cpu")
 print(f"--- BEST MODEL IDENTITY ---")
 print(f"Epoch: {ckpt.get('epoch', 'N/A')}")
 print(f"AP:    {ckpt.get('best_ap', 0.0):.4f}")

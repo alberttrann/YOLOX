@@ -62,13 +62,13 @@ def generate_final_dashboard(df, output_name="TDE_YOLOX_Final_Research_Dashboard
     # 2. LR
     fig.add_trace(go.Scatter(x=x, y=df['lr'], name="LR", line=dict(color='yellow')), row=1, col=2)
 
-    # 3. TTT Conf (Crucial for OOD)
+    # 3. TTT Conf 
     fig.add_trace(go.Scatter(x=x, y=df['conf_loss'], name="Conf (TTT)", line=dict(color='red')), row=2, col=1)
 
     # 4. Engram CLS (Identity)
     fig.add_trace(go.Scatter(x=x, y=df['cls_loss'], name="CLS (Engram)", line=dict(color='green')), row=2, col=2)
 
-    # 5. Timing (Comparison) - Essential for bottlenecking
+    # 5. Timing (Comparison) 
     fig.add_trace(go.Scatter(x=x, y=df['iter_time'], name="Iter Time"), row=3, col=1)
     fig.add_trace(go.Scatter(x=x, y=df['data_time'], name="Data Time"), row=3, col=1)
 
@@ -85,14 +85,14 @@ def generate_final_dashboard(df, output_name="TDE_YOLOX_Final_Research_Dashboard
         height=1600, width=1400, 
         title_text=f"TDE-YOLOX Holistic Research Analytics (Last Update: {df['timestamp'].iloc[-1]})",
         template="plotly_dark",
-        showlegend=True #
+        showlegend=True 
     )
     
     fig.write_html(output_name)
     print(f"Dashboard generated: {output_name}")
 
 if __name__ == "__main__":
-    LOG_PATH = "D:\\YOLOX-3rd\\TDE_log.txt" 
+    LOG_PATH = "D:\\YOLOX-3rd\\TDE_log_to_79.txt" 
     df = parse_tde_yolox_log_complete(LOG_PATH)
     if not df.empty:
         generate_final_dashboard(df)

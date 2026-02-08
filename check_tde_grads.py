@@ -10,7 +10,7 @@ def check_meta_gradients():
     
     # Mock Input
     x = torch.randn(2, 3, 640, 640) # Batch size 2
-    # Mock Targets (YOLOX expects list of tensors)
+    # Mock Targets 
     targets = torch.zeros(2, 50, 5) # [batch, max_objs, 5]
     
     print("Running Forward Pass with Meta-TTT...")

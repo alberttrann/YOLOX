@@ -35,7 +35,7 @@ class YOLOX(nn.Module):
 
     def set_meta_training_state(self, epoch, max_epochs):
         """
-        Expert Hook: Called by the Trainer at the start of each epoch.
+        Called by the Trainer at the start of each epoch.
         Updates the internal state to calculate TTT probability.
         """
         self.current_epoch = epoch
@@ -54,9 +54,10 @@ class YOLOX(nn.Module):
         if self.current_epoch >= 79:
             return 0.2  # Low probability to stabilize features
 
-        # --- 80++ STRESS TEST ---
+        # --- 73++ STRESS TEST ---
         #if self.current_epoch > 72:
             #return 0.7 # Push to 70% TTT in final phase for stress testing
+        # --- 73++ STRESS TEST ---
 
         if not self.training:
             return 1.0 # Always TTT during inference/validation
@@ -92,7 +93,6 @@ class YOLOX(nn.Module):
                 "conf_loss": conf_loss,
                 "cls_loss": cls_loss,
                 "num_fg": num_fg,
-                # Optional: Log this to verify annealing is working
                 "ttt_prob": current_ttt_prob 
             }
         else:

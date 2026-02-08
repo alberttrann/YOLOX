@@ -44,89 +44,6 @@ class TTTProjector(nn.Module):
         )
     def forward(self, x): return self.net(x)
 
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-from torch.func import functional_call
-
-class TTTAdaptiveStage(nn.Module):
-    def __init__(self, stage_module, in_channels, ttt_lr=0.005, noise_std=0.05):
-        super().__init__()
-        self.backbone_stage = stage_module
-        self.projector = TTTProjector(in_channels)
-        self.lightning_indexer = AugmentedLightningIndexer(in_channels)
-        self.ttt_lr = ttt_lr
-        self.noise_std = noise_std
-
-    def _get_active_mask(self, feat, ratio=0.75):
-        saliency_map = self.lightning_indexer(feat) 
-        scores_blocked = F.avg_pool2d(saliency_map, 8, stride=8)
-        B = feat.shape[0]
-        threshold = torch.quantile(scores_blocked.view(B, -1), ratio, dim=1, keepdim=True)
-        mask_blocked = (scores_blocked >= threshold.view(B, 1, 1, 1)).float()
-        return F.interpolate(mask_blocked, size=(feat.shape[2:]), mode='nearest')
-
-    import torch
-import torch.nn as nn
-import torch.nn.functional as F
-from torch.func import functional_call, grad
-import contextlib # <--- New Import for Windows/PyTorch compatibility
-
-# ... (GRN, AugmentedLightningIndexer, TTTProjector classes stay the same) ...
-
-class TTTAdaptiveStage(nn.Module):
-    def __init__(self, stage_module, in_channels, ttt_lr=0.005, noise_std=0.05):
-        super().__init__()
-        self.backbone_stage = stage_module
-        self.projector = TTTProjector(in_channels)
-        self.lightning_indexer = AugmentedLightningIndexer(in_channels)
-        self.ttt_lr = ttt_lr
-        self.noise_std = noise_std
-
-    def _get_active_mask(self, feat, ratio=0.75):
-        B, C, H, W = feat.shape
-        
-        # 1. Lightning Indexer 
-        # (Indexer weights are usually float16 in --fp16 mode)
-        saliency_map = self.lightning_indexer(feat.detach()) 
-        
-        # 2. Block-wise Aggregation
-        scores_blocked = F.avg_pool2d(saliency_map, 8, stride=8)
-        
-        # --- PRECISION BRIDGE START ---
-        # 3. Top-K Selection 
-        # Move to float32 for quantile, as float16 is not supported
-        scores_flattened = scores_blocked.view(B, -1).float() 
-        
-        threshold = torch.quantile(scores_flattened, ratio, dim=1, keepdim=True)
-        
-        # Perform comparison in float32, then cast back to the original dtype 
-        # ensures the mask matches the precision of the backbone features
-        mask_blocked = (scores_blocked >= threshold.view(B, 1, 1, 1)).to(feat.dtype)
-        
-        return F.interpolate(mask_blocked, size=(H, W), mode='nearest')
-
-    def inner_loss_fn(self, params, projector_params, x_in, mask, noise_map, clean_target):
-        """
-        AMP-Optimized Inner Loss.
-        Uses autocast to speed up functional forward passes on RTX 30-series GPUs.
-        """
-        # Enable Mixed Precision inside the functional scope
-        with torch.cuda.amp.autocast(enabled=True):
-            # 1. Functional Forward through backbone
-            feat = functional_call(self.backbone_stage, params, x_in)
-            
-            # 2. Corruption logic
-            feat_noisy = feat + noise_map
-            feat_corrupted = feat_noisy * (1 - mask) + self.projector.mask_token * mask
-            
-            # 3. Reconstruction through projector
-            rec = functional_call(self.projector, projector_params, feat_corrupted)
-            
-            # 4. MSE calculation (autocast handles the scaling internally)
-            return F.mse_loss(rec, clean_target)
-
-
 class TTTAdaptiveStage(nn.Module):
     def __init__(self, stage_module, in_channels, ttt_lr=0.005, noise_std=0.05):
         super().__init__()
@@ -156,7 +73,6 @@ class TTTAdaptiveStage(nn.Module):
             
         return F.interpolate(mask_blocked, size=(feat.shape[2:]), mode='nearest')
     def inner_loss_fn(self, params, projector_params, x_in, mask, noise_map, clean_target):
-        # We run the inner loop in the precision provided by the caller (Training or Eval)
         # 1. Functional Forward through backbone
         feat = functional_call(self.backbone_stage, params, x_in)
         # 2. Denoising Logic
@@ -213,7 +129,7 @@ class TTTAdaptiveStage(nn.Module):
                 mask = self._get_active_mask(clean_target)
                 noise_map = torch.randn_like(clean_target) * self.noise_std
 
-            # 4. THE CORE META-LEARNING STEP
+            # 4. CORE META-LEARNING STEP
             def inner_grad_fn(p_adapt_b, p_adapt_p):
                 full_backbone = {**p_adapt_b, **fixed_backbone_state}
                 # Projector buffers (fixed_proj_state) is empty but included for safety

@@ -19,7 +19,7 @@ def perform_bdd100k_eda(json_path):
         "truncated": [],
         "trafficLightColor": []
     }
-    box_dimensions = [] # To check for small object distribution (relevant for DSA)
+    box_dimensions = [] # check for small object distribution (relevant for DSA)
 
     for img in tqdm(data):
         # 1. Image Level Metadata
@@ -51,11 +51,9 @@ def perform_bdd100k_eda(json_path):
                 if cat == "traffic light":
                     object_attributes['trafficLightColor'].append(l_attr.get('trafficLightColor', 'none'))
 
-    # Convert to DataFrames
     df_img = pd.DataFrame(image_metadata)
     df_boxes = pd.DataFrame(box_dimensions)
 
-    # --- REPORTING ---
     
     print("\n" + "="*30)
     print("GLOBAL IMAGE METADATA")
@@ -71,7 +69,7 @@ def perform_bdd100k_eda(json_path):
     for cat, count in cat_counts.most_common():
         print(f"{cat}: {count}")
 
-    # --- OOD VALIDATION FOR YOUR RESEARCH PLAN ---
+    # --- OOD VALIDATION ---
     train_weather = ['clear', 'overcast', 'partly cloudy']
     test_weather = ['rainy', 'snowy', 'undefined']
     
@@ -86,7 +84,6 @@ def perform_bdd100k_eda(json_path):
     print(f"Potential 'Adverse' Testing Images ({test_weather}): {test_count}")
     print(f"There are {fog_count} 'foggy' images")
 
-    # --- VISUALIZATION ---
     plt.figure(figsize=(15, 10))
     
     # Weather Plot

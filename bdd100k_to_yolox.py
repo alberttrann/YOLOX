@@ -109,7 +109,6 @@ def preprocess():
             
             img_id_counter += 1
 
-    # --- STEP 3: OUTPUT ---
     print(f"Step 3: Writing JSONs...")
     with open(os.path.join(ROOT_DIR, 'tde_train_coco.json'), 'w') as f:
         json.dump(train_coco, f)
