@@ -1,0 +1,469 @@
+# bdd100k:
+
+## ttt on:
+```
+026-02-06 13:34:26 | INFO     | __main__:165 - loading checkpoint from YOLOX_outputs/tde_yolox_s/epoch_73_ckpt.pth
+Average forward time: 2.48 ms, Average NMS time: 0.58 ms, Average inference time: 3.05 ms
+ Average Precision  (AP) @[ IoU=0.50:0.95 | area=   all | maxDets=100 ] = 0.299
+ Average Precision  (AP) @[ IoU=0.50      | area=   all | maxDets=100 ] = 0.554
+ Average Precision  (AP) @[ IoU=0.75      | area=   all | maxDets=100 ] = 0.274
+ Average Precision  (AP) @[ IoU=0.50:0.95 | area= small | maxDets=100 ] = 0.110
+ Average Precision  (AP) @[ IoU=0.50:0.95 | area=medium | maxDets=100 ] = 0.338
+ Average Precision  (AP) @[ IoU=0.50:0.95 | area= large | maxDets=100 ] = 0.517
+ Average Recall     (AR) @[ IoU=0.50:0.95 | area=   all | maxDets=  1 ] = 0.213
+ Average Recall     (AR) @[ IoU=0.50:0.95 | area=   all | maxDets= 10 ] = 0.397
+ Average Recall     (AR) @[ IoU=0.50:0.95 | area=   all | maxDets=100 ] = 0.425
+ Average Recall     (AR) @[ IoU=0.50:0.95 | area= small | maxDets=100 ] = 0.216
+ Average Recall     (AR) @[ IoU=0.50:0.95 | area=medium | maxDets=100 ] = 0.488
+ Average Recall     (AR) @[ IoU=0.50:0.95 | area= large | maxDets=100 ] = 0.623
+per class AP:
+| class   | AP     | class         | AP     | class        | AP     |
+|:--------|:-------|:--------------|:-------|:-------------|:-------|
+| car     | 47.223 | bus           | 42.290 | truck        | 42.320 |
+| person  | 27.864 | rider         | 18.810 | bike         | 18.831 |
+| motor   | 15.437 | traffic light | 22.965 | traffic sign | 33.258 |
+per class AR:
+| class   | AR     | class         | AR     | class        | AR     |
+|:--------|:-------|:--------------|:-------|:-------------|:-------|
+| car     | 54.476 | bus           | 55.034 | truck        | 59.743 |
+| person  | 40.927 | rider         | 28.971 | bike         | 35.351 |
+| motor   | 28.662 | traffic light | 34.049 | traffic sign | 45.539 |
+
+```
+
+## ttt off:
+
+```
+2026-02-06 13:40:26 | INFO     | __main__:165 - loading checkpoint from YOLOX_outputs/tde_yolox_s/epoch_73_ckpt.pth
+Average forward time: 1.91 ms, Average NMS time: 0.59 ms, Average inference time: 2.50 ms
+ Average Precision  (AP) @[ IoU=0.50:0.95 | area=   all | maxDets=100 ] = 0.299
+ Average Precision  (AP) @[ IoU=0.50      | area=   all | maxDets=100 ] = 0.554
+ Average Precision  (AP) @[ IoU=0.75      | area=   all | maxDets=100 ] = 0.274
+ Average Precision  (AP) @[ IoU=0.50:0.95 | area= small | maxDets=100 ] = 0.109
+ Average Precision  (AP) @[ IoU=0.50:0.95 | area=medium | maxDets=100 ] = 0.339
+ Average Precision  (AP) @[ IoU=0.50:0.95 | area= large | maxDets=100 ] = 0.517
+ Average Recall     (AR) @[ IoU=0.50:0.95 | area=   all | maxDets=  1 ] = 0.213
+ Average Recall     (AR) @[ IoU=0.50:0.95 | area=   all | maxDets= 10 ] = 0.397
+ Average Recall     (AR) @[ IoU=0.50:0.95 | area=   all | maxDets=100 ] = 0.425
+ Average Recall     (AR) @[ IoU=0.50:0.95 | area= small | maxDets=100 ] = 0.216
+ Average Recall     (AR) @[ IoU=0.50:0.95 | area=medium | maxDets=100 ] = 0.488
+ Average Recall     (AR) @[ IoU=0.50:0.95 | area= large | maxDets=100 ] = 0.623
+per class AP:
+| class   | AP     | class         | AP     | class        | AP     |
+|:--------|:-------|:--------------|:-------|:-------------|:-------|
+| car     | 47.222 | bus           | 42.298 | truck        | 42.328 |
+| person  | 27.862 | rider         | 18.805 | bike         | 18.815 |
+| motor   | 15.593 | traffic light | 22.966 | traffic sign | 33.266 |
+per class AR:
+| class   | AR     | class         | AR     | class        | AR     |
+|:--------|:-------|:--------------|:-------|:-------------|:-------|
+| car     | 54.475 | bus           | 55.043 | truck        | 59.746 |
+| person  | 40.922 | rider         | 28.971 | bike         | 35.251 |
+| motor   | 28.848 | traffic light | 34.048 | traffic sign | 45.549 |
+```
+
+---
+
+# udacity large:
+## ttt on
+
+```
+2026-02-06 14:01:58 | INFO     | __main__:165 - loading checkpoint from YOLOX_outputs/tde_yolox_s/epoch_73_ckpt.pth
+Average forward time: 3.22 ms, Average NMS time: 0.56 ms, Average inference time: 3.78 ms
+ Average Precision  (AP) @[ IoU=0.50:0.95 | area=   all | maxDets=100 ] = 0.184
+ Average Precision  (AP) @[ IoU=0.50      | area=   all | maxDets=100 ] = 0.380
+ Average Precision  (AP) @[ IoU=0.75      | area=   all | maxDets=100 ] = 0.158
+ Average Precision  (AP) @[ IoU=0.50:0.95 | area= small | maxDets=100 ] = 0.014
+ Average Precision  (AP) @[ IoU=0.50:0.95 | area=medium | maxDets=100 ] = 0.112
+ Average Precision  (AP) @[ IoU=0.50:0.95 | area= large | maxDets=100 ] = 0.278
+ Average Recall     (AR) @[ IoU=0.50:0.95 | area=   all | maxDets=  1 ] = 0.133
+ Average Recall     (AR) @[ IoU=0.50:0.95 | area=   all | maxDets= 10 ] = 0.295
+ Average Recall     (AR) @[ IoU=0.50:0.95 | area=   all | maxDets=100 ] = 0.312
+ Average Recall     (AR) @[ IoU=0.50:0.95 | area= small | maxDets=100 ] = 0.186
+ Average Recall     (AR) @[ IoU=0.50:0.95 | area=medium | maxDets=100 ] = 0.247
+ Average Recall     (AR) @[ IoU=0.50:0.95 | area= large | maxDets=100 ] = 0.404
+per class AP:
+| class   | AP     | class         | AP    | class        | AP     |
+|:--------|:-------|:--------------|:------|:-------------|:-------|
+| car     | 38.851 | bus           | nan   | truck        | 22.106 |
+| person  | 20.392 | rider         | nan   | bike         | 1.357  |
+| motor   | nan    | traffic light | 9.476 | traffic sign | nan    |
+per class AR:
+| class   | AR     | class         | AR     | class        | AR     |
+|:--------|:-------|:--------------|:-------|:-------------|:-------|
+| car     | 47.723 | bus           | nan    | truck        | 48.675 |
+| person  | 32.190 | rider         | nan    | bike         | 7.092  |
+| motor   | nan    | traffic light | 20.200 | traffic sign | nan    |
+```
+
+## ttt off:
+
+```
+2026-02-06 14:12:52 | INFO     | __main__:165 - loading checkpoint from YOLOX_outputs/tde_yolox_s/epoch_73_ckpt.pth
+Average forward time: 2.67 ms, Average NMS time: 0.60 ms, Average inference time: 3.27 ms
+ Average Precision  (AP) @[ IoU=0.50:0.95 | area=   all | maxDets=100 ] = 0.184
+ Average Precision  (AP) @[ IoU=0.50      | area=   all | maxDets=100 ] = 0.380
+ Average Precision  (AP) @[ IoU=0.75      | area=   all | maxDets=100 ] = 0.158
+ Average Precision  (AP) @[ IoU=0.50:0.95 | area= small | maxDets=100 ] = 0.014
+ Average Precision  (AP) @[ IoU=0.50:0.95 | area=medium | maxDets=100 ] = 0.112
+ Average Precision  (AP) @[ IoU=0.50:0.95 | area= large | maxDets=100 ] = 0.278
+ Average Recall     (AR) @[ IoU=0.50:0.95 | area=   all | maxDets=  1 ] = 0.133
+ Average Recall     (AR) @[ IoU=0.50:0.95 | area=   all | maxDets= 10 ] = 0.295
+ Average Recall     (AR) @[ IoU=0.50:0.95 | area=   all | maxDets=100 ] = 0.312
+ Average Recall     (AR) @[ IoU=0.50:0.95 | area= small | maxDets=100 ] = 0.186
+ Average Recall     (AR) @[ IoU=0.50:0.95 | area=medium | maxDets=100 ] = 0.247
+ Average Recall     (AR) @[ IoU=0.50:0.95 | area= large | maxDets=100 ] = 0.404
+per class AP:
+| class   | AP     | class         | AP    | class        | AP     |
+|:--------|:-------|:--------------|:------|:-------------|:-------|
+| car     | 38.852 | bus           | nan   | truck        | 22.106 |
+| person  | 20.392 | rider         | nan   | bike         | 1.357  |
+| motor   | nan    | traffic light | 9.476 | traffic sign | nan    |
+per class AR:
+| class   | AR     | class         | AR     | class        | AR     |
+|:--------|:-------|:--------------|:-------|:-------------|:-------|
+| car     | 47.723 | bus           | nan    | truck        | 48.675 |
+| person  | 32.190 | rider         | nan    | bike         | 7.092  |
+| motor   | nan    | traffic light | 20.200 | traffic sign | nan    |
+```
+
+---
+
+# udacity small:
+
+## ttt off
+
+```
+2026-02-06 14:49:04 | INFO     | yolox.evaluators.coco_evaluator:292 - Loading and preparing results...
+2026-02-06 14:49:15 | INFO     | yolox.evaluators.coco_evaluator:292 - DONE (t=10.87s)
+2026-02-06 14:49:15 | INFO     | pycocotools.coco:367 - creating index...
+2026-02-06 14:49:16 | INFO     | pycocotools.coco:367 - index created!
+2026-02-06 14:49:16 | INFO     | yolox.evaluators.coco_evaluator:297 - Running per image evaluation...
+2026-02-06 14:49:16 | INFO     | yolox.evaluators.coco_evaluator:297 - Evaluate annotation type *bbox*
+2026-02-06 14:51:00 | INFO     | yolox.evaluators.coco_evaluator:297 - DONE (t=103.82s).
+2026-02-06 14:51:00 | INFO     | yolox.evaluators.coco_evaluator:298 - Accumulating evaluation results...
+2026-02-06 14:51:22 | INFO     | yolox.evaluators.coco_evaluator:298 - DONE (t=22.03s).
+2026-02-06 14:51:25 | INFO     | __main__:196 - 
+Average forward time: 1.94 ms, Average NMS time: 0.57 ms, Average inference time: 2.51 ms
+ Average Precision  (AP) @[ IoU=0.50:0.95 | area=   all | maxDets=100 ] = 0.165
+ Average Precision  (AP) @[ IoU=0.50      | area=   all | maxDets=100 ] = 0.353
+ Average Precision  (AP) @[ IoU=0.75      | area=   all | maxDets=100 ] = 0.138
+ Average Precision  (AP) @[ IoU=0.50:0.95 | area= small | maxDets=100 ] = 0.087
+ Average Precision  (AP) @[ IoU=0.50:0.95 | area=medium | maxDets=100 ] = 0.229
+ Average Precision  (AP) @[ IoU=0.50:0.95 | area= large | maxDets=100 ] = 0.332
+ Average Recall     (AR) @[ IoU=0.50:0.95 | area=   all | maxDets=  1 ] = 0.122
+ Average Recall     (AR) @[ IoU=0.50:0.95 | area=   all | maxDets= 10 ] = 0.273
+ Average Recall     (AR) @[ IoU=0.50:0.95 | area=   all | maxDets=100 ] = 0.293
+ Average Recall     (AR) @[ IoU=0.50:0.95 | area= small | maxDets=100 ] = 0.221
+ Average Recall     (AR) @[ IoU=0.50:0.95 | area=medium | maxDets=100 ] = 0.360
+ Average Recall     (AR) @[ IoU=0.50:0.95 | area= large | maxDets=100 ] = 0.481
+per class AP:
+| class   | AP     | class         | AP     | class        | AP     |
+|:--------|:-------|:--------------|:-------|:-------------|:-------|
+| car     | 34.631 | bus           | nan    | truck        | 22.913 |
+| person  | 12.153 | rider         | nan    | bike         | 0.823  |
+| motor   | nan    | traffic light | 11.850 | traffic sign | nan    |
+per class AR:
+| class   | AR     | class         | AR     | class        | AR     |
+|:--------|:-------|:--------------|:-------|:-------------|:-------|
+| car     | 44.533 | bus           | nan    | truck        | 45.101 |
+| person  | 25.652 | rider         | nan    | bike         | 6.180  |
+| motor   | nan    | traffic light | 25.171 | traffic sign | nan    |
+
+```
+
+## ttt on
+
+```
+2026-02-06 14:52:47 | INFO     | __main__:165 - loading checkpoint from YOLOX_outputs/tde_yolox_s/epoch_73_ckpt.pth
+2026-02-06 14:52:48 | INFO     | __main__:169 - loaded checkpoint done.
+2026-02-06 14:52:48 | INFO     | __main__:175 -         Fusing model...
+D:\YOLOX-3rd\.venv\lib\site-packages\torch\nn\modules\module.py:831: UserWarning: The .grad attribute of a Tensor that is not a leaf Tensor is being accessed. Its .grad attribute won't be populated during autograd.backward(). If you indeed want the .grad field to be populated for a non-leaf Tensor, use .retain_grad() on the non-leaf Tensor. If you access the non-leaf Tensor by mistake, make sure you access the leaf Tensor instead. See github.com/pytorch/pytorch/pull/30531 for more informations. (Triggered internally at aten\src\ATen/core/TensorBody.h:491.)
+  if param.grad is not None:
+100%|##################################################################################################################################| 1863/1863 [02:55<00:00, 10.59it/s]
+2026-02-06 14:55:44 | INFO     | yolox.evaluators.coco_evaluator:259 - Evaluate in main process...
+2026-02-06 14:56:21 | INFO     | yolox.evaluators.coco_evaluator:292 - Loading and preparing results...
+2026-02-06 14:56:32 | INFO     | yolox.evaluators.coco_evaluator:292 - DONE (t=10.98s)
+2026-02-06 14:56:32 | INFO     | pycocotools.coco:367 - creating index...
+2026-02-06 14:56:34 | INFO     | pycocotools.coco:367 - index created!
+2026-02-06 14:56:34 | INFO     | yolox.evaluators.coco_evaluator:297 - Running per image evaluation...
+2026-02-06 14:56:34 | INFO     | yolox.evaluators.coco_evaluator:297 - Evaluate annotation type *bbox*
+2026-02-06 14:58:09 | INFO     | yolox.evaluators.coco_evaluator:297 - DONE (t=95.23s).
+2026-02-06 14:58:09 | INFO     | yolox.evaluators.coco_evaluator:298 - Accumulating evaluation results...
+2026-02-06 14:58:31 | INFO     | yolox.evaluators.coco_evaluator:298 - DONE (t=22.02s).
+2026-02-06 14:58:34 | INFO     | __main__:196 - 
+Average forward time: 2.38 ms, Average NMS time: 0.62 ms, Average inference time: 3.00 ms
+ Average Precision  (AP) @[ IoU=0.50:0.95 | area=   all | maxDets=100 ] = 0.165
+ Average Precision  (AP) @[ IoU=0.50      | area=   all | maxDets=100 ] = 0.354
+ Average Precision  (AP) @[ IoU=0.75      | area=   all | maxDets=100 ] = 0.137
+ Average Precision  (AP) @[ IoU=0.50:0.95 | area= small | maxDets=100 ] = 0.087
+ Average Precision  (AP) @[ IoU=0.50:0.95 | area=medium | maxDets=100 ] = 0.229
+ Average Precision  (AP) @[ IoU=0.50:0.95 | area= large | maxDets=100 ] = 0.332
+ Average Recall     (AR) @[ IoU=0.50:0.95 | area=   all | maxDets=  1 ] = 0.122
+ Average Recall     (AR) @[ IoU=0.50:0.95 | area=   all | maxDets= 10 ] = 0.272
+ Average Recall     (AR) @[ IoU=0.50:0.95 | area=   all | maxDets=100 ] = 0.293
+ Average Recall     (AR) @[ IoU=0.50:0.95 | area= small | maxDets=100 ] = 0.221
+ Average Recall     (AR) @[ IoU=0.50:0.95 | area=medium | maxDets=100 ] = 0.360
+ Average Recall     (AR) @[ IoU=0.50:0.95 | area= large | maxDets=100 ] = 0.481
+per class AP:
+| class   | AP     | class         | AP     | class        | AP     |
+|:--------|:-------|:--------------|:-------|:-------------|:-------|
+| car     | 34.631 | bus           | nan    | truck        | 22.903 |
+| person  | 12.152 | rider         | nan    | bike         | 0.825  |
+| motor   | nan    | traffic light | 11.853 | traffic sign | nan    |
+per class AR:
+| class   | AR     | class         | AR     | class        | AR     |
+|:--------|:-------|:--------------|:-------|:-------------|:-------|
+| car     | 44.536 | bus           | nan    | truck        | 45.092 |
+| person  | 25.655 | rider         | nan    | bike         | 6.201  |
+| motor   | nan    | traffic light | 25.174 | traffic sign | nan    |
+```
+
+# acdc fog
+## ttt on:
+
+```
+Average forward time: 20.02 ms, Average NMS time: 0.87 ms, Average inference time: 20.90 ms
+ Average Precision  (AP) @[ IoU=0.50:0.95 | area=   all | maxDets=100 ] = 0.337
+ Average Precision  (AP) @[ IoU=0.50      | area=   all | maxDets=100 ] = 0.524
+ Average Precision  (AP) @[ IoU=0.75      | area=   all | maxDets=100 ] = 0.346
+ Average Precision  (AP) @[ IoU=0.50:0.95 | area= small | maxDets=100 ] = 0.120
+ Average Precision  (AP) @[ IoU=0.50:0.95 | area=medium | maxDets=100 ] = 0.441
+ Average Precision  (AP) @[ IoU=0.50:0.95 | area= large | maxDets=100 ] = 0.449
+ Average Recall     (AR) @[ IoU=0.50:0.95 | area=   all | maxDets=  1 ] = 0.334
+ Average Recall     (AR) @[ IoU=0.50:0.95 | area=   all | maxDets= 10 ] = 0.455
+ Average Recall     (AR) @[ IoU=0.50:0.95 | area=   all | maxDets=100 ] = 0.466
+ Average Recall     (AR) @[ IoU=0.50:0.95 | area= small | maxDets=100 ] = 0.201
+ Average Recall     (AR) @[ IoU=0.50:0.95 | area=medium | maxDets=100 ] = 0.561
+ Average Recall     (AR) @[ IoU=0.50:0.95 | area= large | maxDets=100 ] = 0.495
+per class AP:
+| class   | AP     | class         | AP     | class        | AP     |
+|:--------|:-------|:--------------|:-------|:-------------|:-------|
+| car     | 60.383 | bus           | 59.545 | truck        | 28.402 |
+| person  | 23.463 | rider         | 17.180 | bike         | 34.902 |
+| motor   | 12.178 | traffic light | nan    | traffic sign | nan    |
+per class AR:
+| class   | AR     | class         | AR     | class        | AR     |
+|:--------|:-------|:--------------|:-------|:-------------|:-------|
+| car     | 66.897 | bus           | 74.000 | truck        | 48.293 |
+| person  | 41.774 | rider         | 25.455 | bike         | 48.182 |
+| motor   | 21.818 | traffic light | nan    | traffic sign | nan    |
+```
+
+## ttt off:
+
+```
+Average forward time: 11.68 ms, Average NMS time: 0.85 ms, Average inference time: 12.53 ms
+ Average Precision  (AP) @[ IoU=0.50:0.95 | area=   all | maxDets=100 ] = 0.337
+ Average Precision  (AP) @[ IoU=0.50      | area=   all | maxDets=100 ] = 0.524
+ Average Precision  (AP) @[ IoU=0.75      | area=   all | maxDets=100 ] = 0.346
+ Average Precision  (AP) @[ IoU=0.50:0.95 | area= small | maxDets=100 ] = 0.120
+ Average Precision  (AP) @[ IoU=0.50:0.95 | area=medium | maxDets=100 ] = 0.441
+ Average Precision  (AP) @[ IoU=0.50:0.95 | area= large | maxDets=100 ] = 0.449
+ Average Recall     (AR) @[ IoU=0.50:0.95 | area=   all | maxDets=  1 ] = 0.334
+ Average Recall     (AR) @[ IoU=0.50:0.95 | area=   all | maxDets= 10 ] = 0.455
+ Average Recall     (AR) @[ IoU=0.50:0.95 | area=   all | maxDets=100 ] = 0.466
+ Average Recall     (AR) @[ IoU=0.50:0.95 | area= small | maxDets=100 ] = 0.201
+ Average Recall     (AR) @[ IoU=0.50:0.95 | area=medium | maxDets=100 ] = 0.561
+ Average Recall     (AR) @[ IoU=0.50:0.95 | area= large | maxDets=100 ] = 0.495
+per class AP:
+| class   | AP     | class         | AP     | class        | AP     |
+|:--------|:-------|:--------------|:-------|:-------------|:-------|
+| car     | 60.383 | bus           | 59.545 | truck        | 28.402 |
+| person  | 23.463 | rider         | 17.180 | bike         | 34.902 |
+| motor   | 12.178 | traffic light | nan    | traffic sign | nan    |
+per class AR:
+| class   | AR     | class         | AR     | class        | AR     |
+|:--------|:-------|:--------------|:-------|:-------------|:-------|
+| car     | 66.897 | bus           | 74.000 | truck        | 48.293 |
+| person  | 41.774 | rider         | 25.455 | bike         | 48.182 |
+| motor   | 21.818 | traffic light | nan    | traffic sign | nan    |```
+
+---
+
+# acdc Night
+
+## ttt off:
+
+```
+Average forward time: 12.88 ms, Average NMS time: 0.61 ms, Average inference time: 13.49 ms
+ Average Precision  (AP) @[ IoU=0.50:0.95 | area=   all | maxDets=100 ] = 0.128
+ Average Precision  (AP) @[ IoU=0.50      | area=   all | maxDets=100 ] = 0.255
+ Average Precision  (AP) @[ IoU=0.75      | area=   all | maxDets=100 ] = 0.116
+ Average Precision  (AP) @[ IoU=0.50:0.95 | area= small | maxDets=100 ] = 0.058
+ Average Precision  (AP) @[ IoU=0.50:0.95 | area=medium | maxDets=100 ] = 0.221
+ Average Precision  (AP) @[ IoU=0.50:0.95 | area= large | maxDets=100 ] = 0.306
+ Average Recall     (AR) @[ IoU=0.50:0.95 | area=   all | maxDets=  1 ] = 0.162
+ Average Recall     (AR) @[ IoU=0.50:0.95 | area=   all | maxDets= 10 ] = 0.247
+ Average Recall     (AR) @[ IoU=0.50:0.95 | area=   all | maxDets=100 ] = 0.255
+ Average Recall     (AR) @[ IoU=0.50:0.95 | area= small | maxDets=100 ] = 0.076
+ Average Recall     (AR) @[ IoU=0.50:0.95 | area=medium | maxDets=100 ] = 0.429
+ Average Recall     (AR) @[ IoU=0.50:0.95 | area= large | maxDets=100 ] = 0.503
+per class AP:
+| class   | AP     | class         | AP    | class        | AP     |
+|:--------|:-------|:--------------|:------|:-------------|:-------|
+| car     | 37.236 | bus           | nan   | truck        | 11.373 |
+| person  | 13.903 | rider         | 5.533 | bike         | 3.935  |
+| motor   | 4.902  | traffic light | nan   | traffic sign | nan    |
+per class AR:
+| class   | AR     | class         | AR     | class        | AR     |
+|:--------|:-------|:--------------|:-------|:-------------|:-------|
+| car     | 45.194 | bus           | nan    | truck        | 46.250 |
+| person  | 20.962 | rider         | 13.077 | bike         | 9.737  |
+| motor   | 17.500 | traffic light | nan    | traffic sign | nan    |
+```
+
+## ttt on:
+
+```
+Average forward time: 15.08 ms, Average NMS time: 0.55 ms, Average inference time: 15.63 ms
+ Average Precision  (AP) @[ IoU=0.50:0.95 | area=   all | maxDets=100 ] = 0.128
+ Average Precision  (AP) @[ IoU=0.50      | area=   all | maxDets=100 ] = 0.255
+ Average Precision  (AP) @[ IoU=0.75      | area=   all | maxDets=100 ] = 0.116
+ Average Precision  (AP) @[ IoU=0.50:0.95 | area= small | maxDets=100 ] = 0.058
+ Average Precision  (AP) @[ IoU=0.50:0.95 | area=medium | maxDets=100 ] = 0.221
+ Average Precision  (AP) @[ IoU=0.50:0.95 | area= large | maxDets=100 ] = 0.306
+ Average Recall     (AR) @[ IoU=0.50:0.95 | area=   all | maxDets=  1 ] = 0.162
+ Average Recall     (AR) @[ IoU=0.50:0.95 | area=   all | maxDets= 10 ] = 0.247
+ Average Recall     (AR) @[ IoU=0.50:0.95 | area=   all | maxDets=100 ] = 0.255
+ Average Recall     (AR) @[ IoU=0.50:0.95 | area= small | maxDets=100 ] = 0.076
+ Average Recall     (AR) @[ IoU=0.50:0.95 | area=medium | maxDets=100 ] = 0.429
+ Average Recall     (AR) @[ IoU=0.50:0.95 | area= large | maxDets=100 ] = 0.503
+per class AP:
+| class   | AP     | class         | AP    | class        | AP     |
+|:--------|:-------|:--------------|:------|:-------------|:-------|
+| car     | 37.244 | bus           | nan   | truck        | 11.375 |
+| person  | 13.905 | rider         | 5.533 | bike         | 3.928  |
+| motor   | 4.911  | traffic light | nan   | traffic sign | nan    |
+per class AR:
+| class   | AR     | class         | AR     | class        | AR     |
+|:--------|:-------|:--------------|:-------|:-------------|:-------|
+| car     | 45.194 | bus           | nan    | truck        | 46.250 |
+| person  | 20.962 | rider         | 13.077 | bike         | 9.737  |
+| motor   | 17.500 | traffic light | nan    | traffic sign | nan    |
+```
+
+# acdc rain
+
+## ttt on:
+
+```
+Average forward time: 16.90 ms, Average NMS time: 0.62 ms, Average inference time: 17.53 ms
+ Average Precision  (AP) @[ IoU=0.50:0.95 | area=   all | maxDets=100 ] = 0.180
+ Average Precision  (AP) @[ IoU=0.50      | area=   all | maxDets=100 ] = 0.309
+ Average Precision  (AP) @[ IoU=0.75      | area=   all | maxDets=100 ] = 0.179
+ Average Precision  (AP) @[ IoU=0.50:0.95 | area= small | maxDets=100 ] = 0.049
+ Average Precision  (AP) @[ IoU=0.50:0.95 | area=medium | maxDets=100 ] = 0.173
+ Average Precision  (AP) @[ IoU=0.50:0.95 | area= large | maxDets=100 ] = 0.451
+ Average Recall     (AR) @[ IoU=0.50:0.95 | area=   all | maxDets=  1 ] = 0.161
+ Average Recall     (AR) @[ IoU=0.50:0.95 | area=   all | maxDets= 10 ] = 0.280
+ Average Recall     (AR) @[ IoU=0.50:0.95 | area=   all | maxDets=100 ] = 0.300
+ Average Recall     (AR) @[ IoU=0.50:0.95 | area= small | maxDets=100 ] = 0.104
+ Average Recall     (AR) @[ IoU=0.50:0.95 | area=medium | maxDets=100 ] = 0.336
+ Average Recall     (AR) @[ IoU=0.50:0.95 | area= large | maxDets=100 ] = 0.541
+per class AP:
+| class   | AP     | class         | AP     | class        | AP     |
+|:--------|:-------|:--------------|:-------|:-------------|:-------|
+| car     | 48.392 | bus           | 21.790 | truck        | 30.571 |
+| person  | 15.444 | rider         | 3.382  | bike         | 0.000  |
+| motor   | 6.231  | traffic light | nan    | traffic sign | nan    |
+per class AR:
+| class   | AR     | class         | AR     | class        | AR     |
+|:--------|:-------|:--------------|:-------|:-------------|:-------|
+| car     | 55.951 | bus           | 34.688 | truck        | 56.250 |
+| person  | 28.030 | rider         | 5.000  | bike         | 0.000  |
+| motor   | 30.000 | traffic light | nan    | traffic sign | nan    |
+```
+
+## ttt off:
+
+```
+Average forward time: 11.43 ms, Average NMS time: 1.07 ms, Average inference time: 12.50 ms
+ Average Precision  (AP) @[ IoU=0.50:0.95 | area=   all | maxDets=100 ] = 0.180
+ Average Precision  (AP) @[ IoU=0.50      | area=   all | maxDets=100 ] = 0.309
+ Average Precision  (AP) @[ IoU=0.75      | area=   all | maxDets=100 ] = 0.179
+ Average Precision  (AP) @[ IoU=0.50:0.95 | area= small | maxDets=100 ] = 0.049
+ Average Precision  (AP) @[ IoU=0.50:0.95 | area=medium | maxDets=100 ] = 0.173
+ Average Precision  (AP) @[ IoU=0.50:0.95 | area= large | maxDets=100 ] = 0.451
+ Average Recall     (AR) @[ IoU=0.50:0.95 | area=   all | maxDets=  1 ] = 0.161
+ Average Recall     (AR) @[ IoU=0.50:0.95 | area=   all | maxDets= 10 ] = 0.280
+ Average Recall     (AR) @[ IoU=0.50:0.95 | area=   all | maxDets=100 ] = 0.301
+ Average Recall     (AR) @[ IoU=0.50:0.95 | area= small | maxDets=100 ] = 0.104
+ Average Recall     (AR) @[ IoU=0.50:0.95 | area=medium | maxDets=100 ] = 0.338
+ Average Recall     (AR) @[ IoU=0.50:0.95 | area= large | maxDets=100 ] = 0.541
+per class AP:
+| class   | AP     | class         | AP     | class        | AP     |
+|:--------|:-------|:--------------|:-------|:-------------|:-------|
+| car     | 48.386 | bus           | 21.790 | truck        | 30.684 |
+| person  | 15.442 | rider         | 3.382  | bike         | 0.000  |
+| motor   | 6.231  | traffic light | nan    | traffic sign | nan    |
+per class AR:
+| class   | AR     | class         | AR     | class        | AR     |
+|:--------|:-------|:--------------|:-------|:-------------|:-------|
+| car     | 55.932 | bus           | 34.688 | truck        | 56.875 |
+| person  | 28.030 | rider         | 5.000  | bike         | 0.000  |
+| motor   | 30.000 | traffic light | nan    | traffic sign | nan    |
+```
+
+# acdc snow
+
+## ttt on:
+
+```
+Average forward time: 17.08 ms, Average NMS time: 0.69 ms, Average inference time: 17.77 ms
+ Average Precision  (AP) @[ IoU=0.50:0.95 | area=   all | maxDets=100 ] = 0.180
+ Average Precision  (AP) @[ IoU=0.50      | area=   all | maxDets=100 ] = 0.316
+ Average Precision  (AP) @[ IoU=0.75      | area=   all | maxDets=100 ] = 0.181
+ Average Precision  (AP) @[ IoU=0.50:0.95 | area= small | maxDets=100 ] = 0.061
+ Average Precision  (AP) @[ IoU=0.50:0.95 | area=medium | maxDets=100 ] = 0.240
+ Average Precision  (AP) @[ IoU=0.50:0.95 | area= large | maxDets=100 ] = 0.463
+ Average Recall     (AR) @[ IoU=0.50:0.95 | area=   all | maxDets=  1 ] = 0.147
+ Average Recall     (AR) @[ IoU=0.50:0.95 | area=   all | maxDets= 10 ] = 0.264
+ Average Recall     (AR) @[ IoU=0.50:0.95 | area=   all | maxDets=100 ] = 0.289
+ Average Recall     (AR) @[ IoU=0.50:0.95 | area= small | maxDets=100 ] = 0.102
+ Average Recall     (AR) @[ IoU=0.50:0.95 | area=medium | maxDets=100 ] = 0.376
+ Average Recall     (AR) @[ IoU=0.50:0.95 | area= large | maxDets=100 ] = 0.567
+per class AP:
+| class   | AP     | class         | AP    | class        | AP     |
+|:--------|:-------|:--------------|:------|:-------------|:-------|
+| car     | 48.779 | bus           | 1.861 | truck        | 39.152 |
+| person  | 19.758 | rider         | 0.158 | bike         | 1.026  |
+| motor   | 15.553 | traffic light | nan   | traffic sign | nan    |
+per class AR:
+| class   | AR     | class         | AR     | class        | AR     |
+|:--------|:-------|:--------------|:-------|:-------------|:-------|
+| car     | 56.565 | bus           | 19.167 | truck        | 48.049 |
+| person  | 29.107 | rider         | 5.000  | bike         | 20.000 |
+| motor   | 24.375 | traffic light | nan    | traffic sign | nan    |
+```
+
+## ttt off:
+
+```
+Average forward time: 12.10 ms, Average NMS time: 0.84 ms, Average inference time: 12.94 ms
+ Average Precision  (AP) @[ IoU=0.50:0.95 | area=   all | maxDets=100 ] = 0.180
+ Average Precision  (AP) @[ IoU=0.50      | area=   all | maxDets=100 ] = 0.316
+ Average Precision  (AP) @[ IoU=0.75      | area=   all | maxDets=100 ] = 0.181
+ Average Precision  (AP) @[ IoU=0.50:0.95 | area= small | maxDets=100 ] = 0.061
+ Average Precision  (AP) @[ IoU=0.50:0.95 | area=medium | maxDets=100 ] = 0.240
+ Average Precision  (AP) @[ IoU=0.50:0.95 | area= large | maxDets=100 ] = 0.463
+ Average Recall     (AR) @[ IoU=0.50:0.95 | area=   all | maxDets=  1 ] = 0.147
+ Average Recall     (AR) @[ IoU=0.50:0.95 | area=   all | maxDets= 10 ] = 0.264
+ Average Recall     (AR) @[ IoU=0.50:0.95 | area=   all | maxDets=100 ] = 0.289
+ Average Recall     (AR) @[ IoU=0.50:0.95 | area= small | maxDets=100 ] = 0.102
+ Average Recall     (AR) @[ IoU=0.50:0.95 | area=medium | maxDets=100 ] = 0.376
+ Average Recall     (AR) @[ IoU=0.50:0.95 | area= large | maxDets=100 ] = 0.567
+per class AP:
+| class   | AP     | class         | AP    | class        | AP     |
+|:--------|:-------|:--------------|:------|:-------------|:-------|
+| car     | 48.779 | bus           | 1.861 | truck        | 39.152 |
+| person  | 19.758 | rider         | 0.158 | bike         | 1.026  |
+| motor   | 15.553 | traffic light | nan   | traffic sign | nan    |
+per class AR:
+| class   | AR     | class         | AR     | class        | AR     |
+|:--------|:-------|:--------------|:-------|:-------------|:-------|
+| car     | 56.565 | bus           | 19.167 | truck        | 48.049 |
+| person  | 29.107 | rider         | 5.000  | bike         | 20.000 |
+| motor   | 24.375 | traffic light | nan    | traffic sign | nan    |
+
+```

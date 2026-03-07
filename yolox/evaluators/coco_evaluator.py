@@ -155,11 +155,23 @@ class COCOEvaluator:
             model(x)
             model = model_trt
 
+        # Detect if we are running the TTT architecture
+        unwrapped_model = model.module if hasattr(model, "module") else model
+        is_tde_model = hasattr(unwrapped_model, "set_meta_training_state")
+        
+        # Determine context: Allow gradients if TDE, otherwise standard no_grad
+        import contextlib
+        context_manager = torch.enable_grad() if is_tde_model else torch.no_grad()
+
         for cur_iter, (imgs, _, info_imgs, ids) in enumerate(
             progress_bar(self.dataloader)
         ):
-            with torch.no_grad():
+            with context_manager:
                 imgs = imgs.type(tensor_type)
+                
+                # If TDE, we must explicitly allow gradients to flow from the input
+                if is_tde_model:
+                    imgs.requires_grad_(True)
 
                 # skip the last iters since batchsize might be not enough for batch inference
                 is_time_record = cur_iter < len(self.dataloader) - 1
@@ -167,6 +179,16 @@ class COCOEvaluator:
                     start = time.time()
 
                 outputs = model(imgs)
+                
+                # --- CRITICAL MEMORY LEAK PREVENTION FOR TDE ---
+                # The model built a gradient graph for TTT. We MUST detach the output
+                # before passing it to the postprocessor/evaluator, or we will OOM.
+                if is_tde_model:
+                    if isinstance(outputs, torch.Tensor):
+                        outputs = outputs.detach()
+                    elif isinstance(outputs, (list, tuple)):
+                        outputs = [v.detach() if isinstance(v, torch.Tensor) else v for v in outputs]
+
                 if decoder is not None:
                     outputs = decoder(outputs, dtype=outputs.type())
 
@@ -181,10 +203,15 @@ class COCOEvaluator:
                     nms_end = time_synchronized()
                     nms_time += nms_end - infer_end
 
+            # Note: convert_to_coco_format is outside the context manager to save memory
             data_list_elem, image_wise_data = self.convert_to_coco_format(
                 outputs, info_imgs, ids, return_outputs=True)
             data_list.extend(data_list_elem)
             output_data.update(image_wise_data)
+            
+            # Force cleanup of the graph built by TTT during this iteration
+            if is_tde_model:
+                torch.cuda.empty_cache()
 
         statistics = torch.cuda.FloatTensor([inference_time, nms_time, n_samples])
         if distributed:

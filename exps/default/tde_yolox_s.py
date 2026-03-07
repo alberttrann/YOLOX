@@ -1,92 +1,114 @@
 #!/usr/bin/env python3
 # -*- coding:utf-8 -*-
 import os
+import torch
 import torch.nn as nn
 from yolox.exp import Exp as MyExp
 
 class Exp(MyExp):
     def __init__(self):
         super(Exp, self).__init__()
-        # Model Scale: Small (Standard YOLOX-S)
+        # --- MODEL SCALE: SMALL (YOLOX-S) ---
         self.depth = 0.33  
         self.width = 0.50 
         self.exp_name = os.path.split(os.path.realpath(__file__))[1].split(".")[0]
+        self.act = "silu"
+
+        # --- TDE-YOLOX RESEARCH CONFIG ---
+        self.num_classes = 9       # BDD Detection categories
+        self.init_ttt_lr = 0.02    # Aggressive start for Norm adaptation
+        self.ttt_noise_std = 0.08  # Hard contrastive denoising task
         
-        # --- TDE-YOLOX Research Config ---
-        self.num_classes = 9 # BDD Detection categories filtered in preprocessing
-        self.ttt_lr = 0.005        
-        self.ttt_noise_std = 0.05  
-        
-        # --- DATASET OVERRIDES ---
         self.data_dir = "D:/YOLOX-3RD/bdd100k/bdd100k/bdd100k/images"
         self.train_ann = "D:/YOLOX-3RD/bdd100k/bdd100k/bdd100k/images/annotations/tde_train_coco.json"
         self.val_ann = "D:/YOLOX-3RD/bdd100k/bdd100k/bdd100k/images/annotations/tde_test_adverse_coco.json"
         self.test_ann = "D:/YOLOX-3RD/bdd100k/bdd100k/bdd100k/images/annotations/tde_test_adverse_coco.json"
-        
-        self.warmup_epochs = 10    # Longer warmup for Engram stability
-        self.ema = True            # Keep EMA on to stabilize OOD features
-        self.basic_lr_per_img = 0.01 / 64.0 # Standard YOLOX LR
-        self.data_num_workers = 2
-        self.batch_size = 14
 
-        # --- e1->e72 ---
-        """
-        This phase is also paired with an annealing ramp of TTT probability from 10% to 50%:
-        Schedule:
-        - Epoch 0-10: Fixed 0.1 (Warmup stability)
-        - Epoch 11-40: Linear Ramp 0.1 -> 0.5 (Curriculum Learning)
-        - Epoch 40-72: Fixed 0.5 (High-fidelity Adaptation)
-
-        if not self.training:
-            return 1.0 # Always TTT during inference/validation
-            
-        if self.current_epoch < self.warmup_end:
-            return self.prob_start
-        
-        if self.current_epoch >= self.ramp_end:
-            return self.prob_end
-        
-            
-        # Linear Ramp
-        progress = (self.current_epoch - self.warmup_end) / (self.ramp_end - self.warmup_end)
-        return self.prob_start + (self.prob_end - self.prob_start) * progress
-        """
-        #self.max_epoch = 80 # TTT needs fewer epochs because meta-learning is efficient
-        #self.max_epoch = 80 # TTT needs fewer epochs because meta-learning is efficient
-        #self.no_aug_epochs = 15    # Longer 'pure' training at the end
-        # --- e1->e72 ---
-
-        # --- 73++ RECONFIGURATION ---
-        """
-        This phase simulates a stress-test by pushing TTT probability to 70% in the final epochs:
-        # --- 73++ STRESS TEST ---
-        #if self.current_epoch > 72:
-            #return 0.7 # Push to 70% TTT in final phase for stress testing
-        # --- 73++ STRESS TEST ---
-        """
-        #self.max_epoch = 100        # Extend the timeline
-        #self.no_aug_epochs = 35     # Ensure Mosaic stays OFF for the rest of training
-        #self.min_lr_ratio = 0.05    # Lock LR at 5% floor (Precision Mode)
-        #self.weight_decay = 0.00025 # Reduce regularization to preserve identity
-        # --- 73++ RECONFIGURATION ---
-
-        # --- 80++ RECONFIGURATION ---
-        """
-        This phase implements a 'gentle landing', with the intention to stabilize the Engram memory:
-        - From Epoch 80 onwards, reduce TTT probability to 20% to avoid feature
-        # --- GENTLE LANDING ---
-        if self.current_epoch >= 79:
-            return 0.2  # Low probability to stabilize features
-        """
-        self.max_epoch = 100        
-        self.no_aug_epochs = 35     # Keep Augmentation OFF       
-        # RESTORE STANDARD REGULARIZATION
+        # --- TRAINING SCHEDULE ---
+        self.max_epoch = 80        
+        self.warmup_epochs = 10
+        self.no_aug_epochs = 15
+        self.min_lr_ratio = 0.05     
+        self.basic_lr_per_img = 0.01 / 64.0
         self.weight_decay = 0.0005 
-        # LET LR DECAY TO ZERO (Remove the floor clamp)
-        self.min_lr_ratio = 0.0
-        # --- 80++ RECONFIGURATION ---
+        self.momentum = 0.9
+        self.print_interval = 10
+        self.eval_interval = 1     
+        self.ema = True            
 
-    def get_dataset(self, cache: bool = False, cache_type: str = "ram"):
+        self.data_num_workers = 0
+        self.batch_size = 16
+        self.accum_steps = 8
+
+        self.multiscale_range = 5    
+        self.test_size = (640, 640)
+        self.test_conf = 0.01        
+        self.nmsthre = 0.65
+
+    def get_model(self):
+        """
+        Wires Stage 1 (TTT) -> Neck (Tribrid) -> Head (Engram).
+        """
+        from yolox.models import YOLOX, YOLOPAFPN
+        from yolox.models.engram_head import TDE_Head
+        from yolox.models.darknet import CSPDarknet
+
+        def init_yolo(M):
+            for m in M.modules():
+                if isinstance(m, nn.BatchNorm2d):
+                    m.eps = 1e-3
+                    m.momentum = 0.03
+
+        if getattr(self, "model", None) is None:
+            # P3, P4, P5 Channels for YOLOX-S (Width = 0.5)
+            # Standard YOLOX-S outputs: 128, 256, 512
+            in_channels = [128, 256, 512] 
+            
+            # 1. THE ADAPTIVE BACKBONE (Phase 1)
+            # Uses GroupNorm + Functional TTT + Learnable LRs
+            backbone = CSPDarknet(
+                self.depth, 
+                self.width, 
+                depthwise=False, 
+                act=self.act,
+                ttt_lr=self.init_ttt_lr,           
+                ttt_noise_std=self.ttt_noise_std 
+            )
+            
+            # 2. THE TRIBRID NECK (Phase 2)
+            # Replaces standard CSPLayer with C2f_Tribrid (DSA + SimAM + MBConv)
+            # pass the backbone to PAFPN to maintain YOLOX structure
+            neck = YOLOPAFPN(
+                self.depth, 
+                self.width, 
+                in_channels=[256, 512, 1024], # Darknet stages before width multiplier
+                act=self.act,
+            )
+            # Override the internal backbone with TTT version
+            neck.backbone = backbone
+            
+            # 3. THE ENGRAM HEAD (Phase 3)
+            # Differentiable Identity Restoration + Uncertainty Gating
+            head = TDE_Head(
+                self.num_classes, 
+                self.width, 
+                in_channels=[256, 512, 1024], 
+                act=self.act
+            )
+            
+            # 4. THE UNIFIED TDE-YOLOX WRAPPER
+            # Manages the TTT annealing schedule and Memory Anchor Loss
+            self.model = YOLOX(neck, head)
+
+        self.model.apply(init_yolo)
+        self.model.head.initialize_biases(1e-2)
+        
+        # Set the total training epochs for the TTT probability scheduler
+        self.model.max_epochs = self.max_epoch
+        
+        return self.model
+
+    def get_dataset(self, cache=False, cache_type="ram"):
         from yolox.data import COCODataset, TrainTransform
         return COCODataset(
             data_dir=self.data_dir,
@@ -111,54 +133,53 @@ class Exp(MyExp):
             img_size=self.test_size,
             preproc=ValTransform(legacy=kwargs.get("legacy", False)),
         )
+    
+    """
+    def get_optimizer(self, batch_size):
+        if "optimizer" not in self.__dict__:
+            if self.warmup_epochs > 0:
+                lr = self.warmup_lr
+            else:
+                lr = self.basic_lr_per_img * batch_size
 
-    def get_model(self):
-        from yolox.models import YOLOX, YOLOPAFPN
-        from yolox.models.engram_head import TDE_Head
-        from yolox.models.darknet import CSPDarknet
+            # BASE LR for AdamW (usually 1e-3 or 5e-4)
+            base_lr = lr 
 
-        def init_yolo(M):
-            for m in M.modules():
-                if isinstance(m, nn.BatchNorm2d):
-                    m.eps = 1e-3
-                    m.momentum = 0.03
+            # Parameter Groups
+            pg_backbone = [] # Pre-trained (Low LR)
+            pg_neck_head = [] # Scratch (High LR)
+            pg_norms = []    # No Decay
 
-        if getattr(self, "model", None) is None:
-            # P3, P4, P5 Channels for YOLOX-S
-            in_channels = [128, 256, 512] 
-            
-            # 1. Instantiate TTT-Aware Backbone (Phase 1)
-            # Operates Functional Meta-Learning on Stage 1 Features
-            backbone = CSPDarknet(
-                self.depth, 
-                self.width, 
-                depthwise=False, 
-                act=self.act,
-                ttt_lr=self.ttt_lr,           
-                ttt_noise_std=self.ttt_noise_std 
-            )
-            
-            # 2. Instantiate Tribrid Neck (Phase 2)
-            # Replaces standard CSPLayer with C2f_Tribrid (MaxViT + DSA + SimAM)
-            neck = YOLOPAFPN(
-                self.depth, 
-                self.width, 
-                in_channels=[256, 512, 1024], # Input from darknet stages
-                act=self.act,
-            )
-            
-            # 3. Instantiate the Engram Head (Phase 3)
-            # Differentiable Associative Memory restoration
-            head = TDE_Head(
-                self.num_classes, 
-                self.width, 
-                in_channels=[256, 512, 1024], 
-                act=self.act
-            )
-            
-            # backbone here is neck because YOLOPAFPN wraps the backbone
-            self.model = YOLOX(neck, head)
+            for k, v in self.model.named_parameters():
+                if not v.requires_grad:
+                    continue
+                
+                # group by component
+                if "backbone" in k and "dark2" not in k: # Static Backbone parts
+                    target_group = pg_backbone
+                else:
+                    # Dark2 (Adaptive), Neck, Head are all "Active Learning" components
+                    target_group = pg_neck_head
 
-        self.model.apply(init_yolo)
-        self.model.head.initialize_biases(1e-2)
-        return self.model
+                # handle weight decay
+                if "bias" in k or "bn" in k or "norm" in k or "gn" in k:
+                     # Add to Norm group (No Decay) but keep LR scaling
+                     pg_norms.append(v)
+                else:
+                    target_group.append(v)
+
+            optimizer = torch.optim.AdamW([
+                # 1. Static Backbone: Low LR, Standard Decay
+                {"params": pg_backbone, "lr": base_lr * 0.1, "weight_decay": self.weight_decay},
+                
+                # 2. Active Components (TTT/Neck/Head): High LR, Standard Decay
+                {"params": pg_neck_head, "lr": base_lr, "weight_decay": self.weight_decay},
+                
+                # 3. Norms/Biases: Base LR, NO Decay
+                {"params": pg_norms, "lr": base_lr, "weight_decay": 0.0},
+            ])
+            
+            self.optimizer = optimizer
+
+        return self.optimizer
+        """

@@ -60,22 +60,25 @@ class TTTAdaptiveStage(nn.Module):
         mask = (v_fusion >= threshold.view(B, 1, 1, 1)).to(feat.dtype)
         return F.interpolate(mask, size=(H, W), mode='nearest')
 
-    def inner_loss_fn(self, params, projector_params, x_in, mask, noise_map, clean_target):
-        # Ensure precision consistency between inputs and functional parameters
-        b_dtype = next(iter(params.values())).dtype
-        p_dtype = next(iter(projector_params.values())).dtype
-
-        feat = functional_call(self.backbone_stage, params, x_in.to(b_dtype))
+    def inner_loss_fn(self, params, projector_params, x_in, mask, clean_target):
+        feat = functional_call(self.backbone_stage, params, x_in)
         
-        feat_noisy = feat + noise_map.to(b_dtype)
-        # Access mask_token from functional params to maintain grad tracking
-        m_token = projector_params.get('mask_token', self.projector.mask_token).to(b_dtype)
-        feat_corrupted = feat_noisy * (1 - mask) + m_token * mask
+        # SAFETY LOCK 1: Bounded Stochastic Fog
+        # Prevents the model from memorizing a constant inverse scalar.
+        # Forces true adaptive contrast restoration.
+        alpha = 0.5 + 0.5 * torch.rand(1, device=feat.device, dtype=feat.dtype)
+        feat_foggy = feat * alpha 
         
-        rec = functional_call(self.projector, projector_params, feat_corrupted.to(p_dtype))
+        # Gaussian Noise (Simulate Rain/Snow)
+        noise_map = torch.randn_like(feat) * self.noise_std
+        feat_noisy = feat_foggy + noise_map
         
-        # Reverted to Pure MSE (Forces magnitude correction for Fog)
-        return F.mse_loss(rec, clean_target.to(p_dtype))
+        # Masking
+        feat_corrupted = feat_noisy * (1 - mask) + self.projector.mask_token * mask
+        rec = functional_call(self.projector, projector_params, feat_corrupted)
+        
+        # TDE 2.0 Pure MSE
+        return F.mse_loss(rec, clean_target)
 
     def forward(self, x_in, run_ttt=True):
         # 0. EXPLICIT Profiler Bypass
@@ -116,15 +119,16 @@ class TTTAdaptiveStage(nn.Module):
         self.projector.eval()
 
         with context_manager:
+            # Generate Adaptation Targets
             with torch.no_grad():
                 feat_initial = self.backbone_stage(x_curr)
                 clean_target = feat_initial.detach()
                 mask = self._get_robust_variance_mask(clean_target)
-                noise_map = torch.randn_like(clean_target) * self.noise_std 
 
+            # --- CORE FUNCTIONAL TTT STEP ---
             def inner_grad_fn(p_adapt_b, p_adapt_p):
                 full_backbone = {**p_adapt_b, **fixed_backbone_state}
-                return self.inner_loss_fn(full_backbone, p_adapt_p, x_curr, mask, noise_map, clean_target)
+                return self.inner_loss_fn(full_backbone, p_adapt_p, x_curr, mask, clean_target)
 
             # Compute d_Loss / d_BackboneNorms
             # Note: also pass proj_params to grad to allow joint optimization
@@ -229,10 +233,7 @@ class DeepSeekSparseAttention(nn.Module):
     def forward(self, x):
         B, C, H, W = x.shape
         num_tokens = H * W
-        
-
-        K = max(1, int(num_tokens * self.ratio))  
-        # ---------------------------------------------------------
+        K = max(1, int(num_tokens * self.ratio))
 
         # 1. Saliency Scoring (Lightning Indexer)
         scores = self.indexer(x).view(B, -1) # [B, HW]
@@ -258,7 +259,7 @@ class DeepSeekSparseAttention(nn.Module):
         # Aggregate context
         context = (v_s @ attn.transpose(-2, -1)).view(B, C, H, W) # [B, C, H, W]
         return self.proj(context)
-
+    
 #PHASE 3
 
 class EngramMemoryBank(nn.Module):
@@ -296,16 +297,49 @@ class EngramMemoryBank(nn.Module):
         return memory_retrieved * restoration_mask
 
 class UncertaintyEstimator(nn.Module):
-    """Reverted to TDE 2.0 Blind Latent Gate"""
-    def __init__(self, dim):
+    """
+    TDE 3.0 DUAL-HEAD GATE + SAFETY LOCK:
+    Independently evaluates Semantic Anomalies and Physical Anomalies.
+    Guarantees a minimum gradient flow to prevent Memory Bank death.
+    """
+    def __init__(self, in_channels, latent_dim=128):
         super().__init__()
-        self.classifier = nn.Sequential(
-            nn.Linear(dim, 32),
+        self.semantic_critic = nn.Sequential(
+            nn.Linear(latent_dim, 32),
             nn.ReLU(),
             nn.Linear(32, 1),
             nn.Sigmoid()
         )
+        self.physical_critic = nn.Sequential(
+            nn.Linear(2, 16),
+            nn.ReLU(),
+            nn.Linear(16, 1),
+            nn.Sigmoid()
+        )
 
-    def forward(self, x):
-        # x: [B, HW, 128]
-        return self.classifier(x)
+    def forward(self, x_feat, x_latent):
+        B, C, H, W = x_feat.shape
+        
+        gate_semantic = self.semantic_critic(x_latent) 
+        
+        variance = torch.var(x_feat, dim=1, keepdim=True)
+        spatial_variance = F.max_pool2d(variance, kernel_size=3, stride=1, padding=1)
+        
+        magnitude = torch.norm(x_feat, p=2, dim=1, keepdim=True)
+        spatial_magnitude = F.avg_pool2d(magnitude, kernel_size=3, stride=1, padding=1)
+        
+        stats = torch.cat([spatial_variance, spatial_magnitude], dim=1)
+        stats_flat = stats.view(B, 2, H * W).permute(0, 2, 1)
+        
+        gate_physical = self.physical_critic(stats_flat) 
+        
+        # Probabilistic OR
+        gate_final = gate_semantic + gate_physical - (gate_semantic * gate_physical)
+        
+        # SAFETY LOCK 2: Minimum Information Flow
+        # Ensures the Memory Bank always receives a 1% gradient trickle during training
+        # to prevent prototype collapse in early epochs.
+        if self.training:
+            gate_final = torch.clamp(gate_final, min=0.01)
+            
+        return gate_final

@@ -25,7 +25,7 @@ class C2f_Tribrid(nn.Module):
             SimAM(),
             CoordinateAttention(self.c),
             MBConvConditioner(self.c),
-            DeepSeekSparseAttention(self.c)
+            DeepSeekSparseAttention(self.c) 
         )
         
         # D-YOLO Gated Fusion: Initialized at 0.01 to allow safe warm-up

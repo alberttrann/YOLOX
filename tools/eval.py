@@ -17,11 +17,97 @@ from yolox.exp import get_exp
 from yolox.utils import (
     configure_module,
     configure_nccl,
-    fuse_model,
     get_local_rank,
     get_model_info,
     setup_logger
 )
+
+import torch
+import torch.nn as nn
+from loguru import logger
+
+def fuse_conv_bn(conv, bn):
+    """
+    Fuses Convolution and BatchNorm2d weights mathematically.
+    Formula: W_fused = W * (gamma / sqrt(var + eps))
+             B_fused = (B - mean) * (gamma / sqrt(var + eps)) + beta
+    """
+    fused_conv = nn.Conv2d(
+        conv.in_channels,
+        conv.out_channels,
+        kernel_size=conv.kernel_size,
+        stride=conv.stride,
+        padding=conv.padding,
+        dilation=conv.dilation,
+        groups=conv.groups,
+        bias=True,
+    ).requires_grad_(False).to(conv.weight.device)
+
+    # Prepare parameters
+    w_conv = conv.weight.clone().view(conv.out_channels, -1)
+    w_bn = torch.diag(bn.weight.div(torch.sqrt(bn.eps + bn.running_var)))
+    
+    # Calculate fused weights
+    fused_conv.weight.copy_(torch.mm(w_bn, w_conv).view(fused_conv.weight.shape))
+    
+    # Calculate fused bias
+    if conv.bias is not None:
+        b_conv = conv.bias
+    else:
+        b_conv = torch.zeros(conv.out_channels).to(conv.weight.device)
+        
+    b_bn = bn.bias - bn.weight.mul(bn.running_mean).div(torch.sqrt(bn.running_var + bn.eps))
+    
+    # Corrected Bias Fusion Logic:
+    # (b_conv * scale) + b_bn
+    # Note: w_bn is diagonal scale factor.
+    fused_bias = torch.mm(w_bn, b_conv.reshape(-1, 1)).reshape(-1) + b_bn
+    fused_conv.bias.copy_(fused_bias)
+
+    return fused_conv
+
+def fuse_tde_model(model):
+    """
+    SUPREME SELECTIVE FUSION: 
+    Fuses high-compute towers while protecting Meta-Learning parameters.
+    """
+    from yolox.models.ttt_modules import TTTAdaptiveStage
+    from yolox.models.network_blocks import BaseConv, BaseConvGN
+
+    def recursive_fuse(module):
+        # 1. PROTECT TTT STAGE: Adaptation requires original GN layers
+        if isinstance(module, TTTAdaptiveStage):
+            logger.info("  -> Protected: TTTAdaptiveStage (Dark2)")
+            return module
+
+        # 2. SELECTIVE FUSION: Identify fuseable Conv-BN pairs
+        for name, child in module.named_children():
+            if isinstance(child, BaseConv):
+                # Standard YOLOX BaseConv uses BN. We can fuse this.
+                if isinstance(child.bn, nn.BatchNorm2d):
+                    # Perform Mathematical Fusion
+                    fused_conv = fuse_conv_bn(child.conv, child.bn)
+                    # Replace Conv+BN with FusedConv
+                    child.conv = fused_conv
+                    # Remove BN by replacing with Identity
+                    child.bn = nn.Identity()
+                    # Update forward logic via the module's fuseforward method
+            
+            elif isinstance(child, BaseConvGN):
+                # BaseConvGN uses GroupNorm. 
+                # GN depends on current instance stats, so it CANNOT be fused statically.
+                # skip to preserve mathematical accuracy.
+                continue
+                
+            else:
+                # Recursively descend into Bottlenecks, CSPLayers, PAFPN, and Head
+                recursive_fuse(child)
+        return module
+
+    model.eval()
+    logger.info("Executing High-Fidelity TDE-YOLOX Fusion...")
+    fused_model = recursive_fuse(model)
+    return fused_model
 
 
 def make_parser():
@@ -125,6 +211,7 @@ def main(exp, args, num_gpu):
     is_distributed = num_gpu > 1
 
     # set environment variables for distributed training
+    from yolox.utils import configure_nccl
     configure_nccl()
     cudnn.benchmark = True
 
@@ -145,10 +232,21 @@ def main(exp, args, num_gpu):
     if args.tsize is not None:
         exp.test_size = (args.tsize, args.tsize)
 
+    # 1. Instantiate the Model
     model = exp.get_model()
+    
+    # --- TRIGGER FULL ADAPTATION MODE ---
+    # unwrap the model to reach the TDE-YOLOX specific methods
+    m = model.module if hasattr(model, "module") else model
+    if hasattr(m, "set_meta_training_state"):
+        # set current_epoch to max_epoch to ensure ttt_prob = 1.0 (End of ramp)
+        # guarantees every image in the Adverse test set is adapted.
+        logger.info("TDE-YOLOX: Setting Meta-Inference state (Probability 1.0)...")
+        m.set_meta_training_state(exp.max_epoch, exp.max_epoch)
+    
     logger.info("Model Summary: {}".format(get_model_info(model, exp.test_size)))
-    logger.info("Model Structure:\n{}".format(str(model)))
 
+    # 2. Setup Evaluator with Per-Class Metrics
     evaluator = exp.get_evaluator(args.batch_size, is_distributed, args.test, args.legacy)
     evaluator.per_class_AP = True
     evaluator.per_class_AR = True
@@ -157,6 +255,7 @@ def main(exp, args, num_gpu):
     model.cuda(rank)
     model.eval()
 
+    # 3. Load Research Weights
     if not args.speed and not args.trt:
         if args.ckpt is None:
             ckpt_file = os.path.join(file_name, "best_ckpt.pth")
@@ -170,10 +269,12 @@ def main(exp, args, num_gpu):
 
     if is_distributed:
         model = DDP(model, device_ids=[rank])
-
+    
+    # 4. SELECTIVE HIGH-FIDELITY FUSION
     if args.fuse:
-        logger.info("\tFusing model...")
-        model = fuse_model(model)
+        # call custom fusion logic instead of standard YOLOX logic
+        # protects the Adaptive Norms and Engram weights
+        model = fuse_tde_model(model)
 
     if args.trt:
         assert (
@@ -189,10 +290,15 @@ def main(exp, args, num_gpu):
         trt_file = None
         decoder = None
 
-    # start evaluate
+    # 5. START OOD EVALUATION
+    logger.info("Starting TDE-YOLOX OOD Forensic Evaluation...")
+    # The TTT loop runs internally inside Dark2 if run_ttt is enabled
+    # The Engram head restores identities in the Classification branch
     *_, summary = evaluator.evaluate(
         model, is_distributed, args.fp16, trt_file, decoder, exp.test_size
     )
+    
+    # Log the full results including the Class AP/AR table 
     logger.info("\n" + summary)
 
 

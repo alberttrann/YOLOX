@@ -50,32 +50,43 @@ class TTTAdaptiveStage(nn.Module):
 
         self._is_profiling_mode = False
 
-    def _get_robust_variance_mask(self, feat, ratio=0.85):
-        """TDE 2.0 Single-Scale Aggressive Masking"""
+    def _get_robust_variance_mask(self, feat, ratio=0.75):
+        """Multi-Scale Variance Pyramid"""
         B, C, H, W = feat.shape
         var = torch.var(feat, dim=1, keepdim=True)
-        v_fusion = F.avg_pool2d(var, 4, stride=4)
+        
+        v2 = F.avg_pool2d(var, 2, stride=2)
+        v4 = F.avg_pool2d(var, 4, stride=4)
+        v8 = F.avg_pool2d(var, 8, stride=8)
+        
+        v_fusion = (
+            F.interpolate(v2, size=(H, W), mode='nearest') +
+            F.interpolate(v4, size=(H, W), mode='nearest') +
+            F.interpolate(v8, size=(H, W), mode='nearest')
+        )
+        
         scores_fp32 = v_fusion.view(B, -1).float()
         threshold = torch.quantile(scores_fp32, ratio, dim=1, keepdim=True)
         mask = (v_fusion >= threshold.view(B, 1, 1, 1)).to(feat.dtype)
-        return F.interpolate(mask, size=(H, W), mode='nearest')
+        return mask
 
     def inner_loss_fn(self, params, projector_params, x_in, mask, noise_map, clean_target):
-        # Ensure precision consistency between inputs and functional parameters
-        b_dtype = next(iter(params.values())).dtype
-        p_dtype = next(iter(projector_params.values())).dtype
-
-        feat = functional_call(self.backbone_stage, params, x_in.to(b_dtype))
+        feat = functional_call(self.backbone_stage, params, x_in)
         
-        feat_noisy = feat + noise_map.to(b_dtype)
-        # Access mask_token from functional params to maintain grad tracking
-        m_token = projector_params.get('mask_token', self.projector.mask_token).to(b_dtype)
-        feat_corrupted = feat_noisy * (1 - mask) + m_token * mask
+        # Scrapped the redundant 'haze' attenuation. Gaussian noise is sufficient.
+        feat_noisy = feat + noise_map
+        feat_corrupted = feat_noisy * (1 - mask) + self.projector.mask_token * mask
+        rec = functional_call(self.projector, projector_params, feat_corrupted)
         
-        rec = functional_call(self.projector, projector_params, feat_corrupted.to(p_dtype))
+        # Normalized Cosine-MSE Hybrid
+        mse_loss = F.mse_loss(rec, clean_target)
+        cos_loss = 1.0 - F.cosine_similarity(
+            F.normalize(rec.flatten(1), dim=1), 
+            F.normalize(clean_target.flatten(1), dim=1), 
+            dim=1
+        ).mean()
         
-        # Reverted to Pure MSE (Forces magnitude correction for Fog)
-        return F.mse_loss(rec, clean_target.to(p_dtype))
+        return mse_loss + 0.5 * cos_loss
 
     def forward(self, x_in, run_ttt=True):
         # 0. EXPLICIT Profiler Bypass
@@ -116,12 +127,14 @@ class TTTAdaptiveStage(nn.Module):
         self.projector.eval()
 
         with context_manager:
+            # Generate Adaptation Targets
             with torch.no_grad():
                 feat_initial = self.backbone_stage(x_curr)
                 clean_target = feat_initial.detach()
                 mask = self._get_robust_variance_mask(clean_target)
-                noise_map = torch.randn_like(clean_target) * self.noise_std 
+                noise_map = torch.randn_like(clean_target) * self.noise_std
 
+            # --- CORE FUNCTIONAL TTT STEP ---
             def inner_grad_fn(p_adapt_b, p_adapt_p):
                 full_backbone = {**p_adapt_b, **fixed_backbone_state}
                 return self.inner_loss_fn(full_backbone, p_adapt_p, x_curr, mask, noise_map, clean_target)
@@ -229,10 +242,7 @@ class DeepSeekSparseAttention(nn.Module):
     def forward(self, x):
         B, C, H, W = x.shape
         num_tokens = H * W
-        
-
-        K = max(1, int(num_tokens * self.ratio))  
-        # ---------------------------------------------------------
+        K = max(1, int(num_tokens * self.ratio))
 
         # 1. Saliency Scoring (Lightning Indexer)
         scores = self.indexer(x).view(B, -1) # [B, HW]
@@ -258,7 +268,7 @@ class DeepSeekSparseAttention(nn.Module):
         # Aggregate context
         context = (v_s @ attn.transpose(-2, -1)).view(B, C, H, W) # [B, C, H, W]
         return self.proj(context)
-
+    
 #PHASE 3
 
 class EngramMemoryBank(nn.Module):
@@ -296,16 +306,55 @@ class EngramMemoryBank(nn.Module):
         return memory_retrieved * restoration_mask
 
 class UncertaintyEstimator(nn.Module):
-    """Reverted to TDE 2.0 Blind Latent Gate"""
-    def __init__(self, dim):
+    """
+    THE DUAL-HEAD PROBABILISTIC GATE:
+    Independently evaluates Semantic Anomalies (Snow/Rain) and Physical Anomalies (Fog).
+    If EITHER head detects an anomaly, the Engram Memory is triggered.
+    """
+    def __init__(self, in_channels, latent_dim=128):
         super().__init__()
-        self.classifier = nn.Sequential(
-            nn.Linear(dim, 32),
+        
+        # Head 1: The Semantic Critic (TDE 2.0 Legacy)
+        # Detects out-of-distribution features (Snow/Rain)
+        self.semantic_critic = nn.Sequential(
+            nn.Linear(latent_dim, 32),
             nn.ReLU(),
             nn.Linear(32, 1),
             nn.Sigmoid()
         )
+        
+        # Head 2: The Physical Critic (The Fog Solver)
+        # Detects loss of contrast (Fog) or extreme variance (Noise)
+        self.physical_critic = nn.Sequential(
+            nn.Linear(2, 16),
+            nn.ReLU(),
+            nn.Linear(16, 1),
+            nn.Sigmoid()
+        )
 
-    def forward(self, x):
-        # x: [B, HW, 128]
-        return self.classifier(x)
+    def forward(self, x_feat, x_latent):
+        B, C, H, W = x_feat.shape
+        
+        # 1. Semantic Uncertainty (TDE 2.0 Logic)
+        gate_semantic = self.semantic_critic(x_latent) # [B, HW, 1]
+        
+        # 2. Physical Statistics Calculation
+        variance = torch.var(x_feat, dim=1, keepdim=True)
+        spatial_variance = F.max_pool2d(variance, kernel_size=3, stride=1, padding=1)
+        
+        magnitude = torch.norm(x_feat, p=2, dim=1, keepdim=True)
+        spatial_magnitude = F.avg_pool2d(magnitude, kernel_size=3, stride=1, padding=1)
+        
+        stats = torch.cat([spatial_variance, spatial_magnitude], dim=1)
+        stats_flat = stats.view(B, 2, H * W).permute(0, 2, 1)
+        
+        # 3. Physical Uncertainty (Fog Logic)
+        gate_physical = self.physical_critic(stats_flat) # [B, HW, 1]
+        
+        # 4. THE PROBABILISTIC OR FUSION
+        # If gate_semantic is 0.9 and gate_physical is 0.1 -> Final is 0.91 (Gate Open)
+        # If gate_semantic is 0.1 and gate_physical is 0.9 -> Final is 0.91 (Gate Open)
+        # If both are 0.1 -> Final is 0.19 (Gate Closed)
+        gate_final = gate_semantic + gate_physical - (gate_semantic * gate_physical)
+        
+        return gate_final

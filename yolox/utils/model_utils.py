@@ -4,7 +4,7 @@
 
 import contextlib
 from copy import deepcopy
-from typing import Sequence
+from typing import Sequence, Iterator
 
 import torch
 import torch.nn as nn
@@ -24,11 +24,39 @@ def get_model_info(model: nn.Module, tsize: Sequence[int]) -> str:
 
     stride = 64
     img = torch.zeros((1, 3, stride, stride), device=next(model.parameters()).device)
-    flops, params = profile(deepcopy(model), inputs=(img,), verbose=False)
+    
+    # 1. TURN ON BYPASS
+    # We must set this on the *original* model before deepcopy, 
+    # so the copied model inherits the True flag.
+    for m in model.modules():
+        if m.__class__.__name__ == 'TTTAdaptiveStage':
+            m._is_profiling_mode = True
+
+    try:
+        # Create a deepcopy for profiling to avoid modifying the original model's hooks/stats
+        model_for_profiling = deepcopy(model)
+        flops, params = profile(model_for_profiling, inputs=(img,), verbose=False)
+    except Exception as e:
+        # Fallback if thop still crashes (e.g. due to other custom layers)
+        print(f"Warning: thop profile failed with error: {e}. Calculating params only.")
+        flops = 0.0
+        params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    finally:
+        # 3. TURN OFF BYPASS (Crucial!)
+        # Using a finally block guarantees the model is restored to active state 
+        # even if thop crashes or is interrupted.
+        for m in model.modules():
+            if m.__class__.__name__ == 'TTTAdaptiveStage':
+                m._is_profiling_mode = False
+
     params /= 1e6
-    flops /= 1e9
-    flops *= tsize[0] * tsize[1] / stride / stride * 2  # Gflops
-    info = "Params: {:.2f}M, Gflops: {:.2f}".format(params, flops)
+    if flops > 0:
+        flops /= 1e9
+        flops *= tsize[0] * tsize[1] / stride / stride * 2  # Gflops
+        info = "Params: {:.2f}M, Gflops: {:.2f}".format(params, flops)
+    else:
+        info = "Params: {:.2f}M, Gflops: N/A (Profiler Error)".format(params)
+        
     return info
 
 
@@ -157,7 +185,7 @@ def freeze_module(module: nn.Module, name=None) -> nn.Module:
 
 
 @contextlib.contextmanager
-def adjust_status(module: nn.Module, training: bool = False) -> nn.Module:
+def adjust_status(module: nn.Module, training: bool = False) -> Iterator[nn.Module]:
     """Adjust module to training/eval mode temporarily.
 
     Args:
