@@ -48,7 +48,6 @@ class YOLOPAFPN(nn.Module):
             int(2 * in_channels[1] * width), 
             int(in_channels[1] * width), 
             round(3 * depth), False, depthwise=depthwise, act=act,
-            fpn_level='p4' # Special flag to indicate this is the p4 level for potential internal adjustments
         )
         
         # C3_p3: reduce_conv1(p4) [128] + P3 [128] = 256
@@ -56,7 +55,6 @@ class YOLOPAFPN(nn.Module):
             int(2 * in_channels[0] * width), 
             int(in_channels[0] * width), 
             round(3 * depth), False, depthwise=depthwise, act=act,
-            fpn_level='p3' # Special flag to indicate this is the p3 level for potential internal adjustments
         )
         
         # C3_n3: bu_conv2(p3) [128] + fpn_out1 [128] = 256
@@ -64,7 +62,6 @@ class YOLOPAFPN(nn.Module):
             int(2 * in_channels[0] * width), 
             int(in_channels[1] * width), 
             round(3 * depth), False, depthwise=depthwise, act=act,
-            fpn_level='p4'
         )
         
         # C3_n4: bu_conv1(n3) [256] + fpn_out0 [256] = 512
@@ -72,7 +69,6 @@ class YOLOPAFPN(nn.Module):
             int(2 * in_channels[1] * width), 
             int(in_channels[2] * width), 
             round(3 * depth), False, depthwise=depthwise, act=act,
-            fpn_level='p5'
         )
 
     def forward(self, input, ttt_prob=0.0):
