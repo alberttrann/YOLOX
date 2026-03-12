@@ -28,37 +28,64 @@ class YOLOX(nn.Module):
         # --- META-LEARNING ENGINE STATE ---
         self.current_epoch = 0
         self.max_epochs = 80 
+        self.no_aug_epochs = 15 # Sync this with your Exp file
         
-        # Annealing Schedule 
+        # --- ANNEALING SCHEDULE CONFIG ---
         self.warmup_end = 10
-        self.ramp_end = 80 # Extended ramp (was 50) - Slower increase
+        self.ramp_end = 65 # Ramps up until the exact moment Mosaic turns off
+        
+        # Probability Schedule
         self.prob_start = 0.1
-        self.prob_end = 0.7 # Lower cap (was 0.6) - Less noise injection
+        self.prob_end = 0.7 
+        
+        # Noise Schedule (Task Hardening)
+        self.noise_start_scale = 0.5 
+        self.noise_end_scale = 2.0   
 
     def set_meta_training_state(self, epoch, max_epochs):
         """Called by Trainer at epoch start to drive the adaptation schedule."""
         self.current_epoch = epoch
         self.max_epochs = max_epochs
 
-    def _get_ttt_probability(self):
-        """Calculates Stochastic Meta-Learning Probability."""
+    def _get_ttt_schedule(self):
+        """
+        Calculates Stochastic Meta-Learning Probability AND Dynamic Noise Scale.
+        Implements the Marathon Strategy.
+        """
         if not self.training:
-            return 1.0 # Always adapt during inference/validation
+            return 1.0, 1.0 # Inference: Always TTT, Standard Noise
             
+        # 1. Warmup Phase (Easy)
         if self.current_epoch < self.warmup_end:
-            return self.prob_start
+            return self.prob_start, self.noise_start_scale
             
-        # Unified Linear Ramp - NO GENTLE LANDING
-        progress = (self.current_epoch - self.warmup_end) / (self.ramp_end - self.warmup_end)
+        # 2. The 'No-Aug' Fine-Tuning Phase (The Bridge Phase)
+        # CRITICAL: Keep TTT active (0.5) to maintain feature distribution.
+        # Drop noise (0.5) to allow high-precision regression learning.
+        if self.current_epoch >= self.max_epochs - self.no_aug_epochs:
+            return 0.5, 0.5 
+            
+        # 3. The Curriculum Ramp (Increasing Difficulty)
+        # Scale progress from WarmupEnd -> RampEnd (Epoch 65)
+        # Clamp between 0 and 1 to be safe
+        denom = self.ramp_end - self.warmup_end
+        if denom <= 0: denom = 1 # Safety
         
-        # Clamp progress to 1.0 just in case current_epoch > ramp_end
+        progress = (self.current_epoch - self.warmup_end) / denom
         progress = max(0.0, min(1.0, progress))
         
-        return self.prob_start + (self.prob_end - self.prob_start) * progress
+        curr_prob = self.prob_start + (self.prob_end - self.prob_start) * progress
+        curr_noise = self.noise_start_scale + (self.noise_end_scale - self.noise_start_scale) * progress
+        
+        return curr_prob, curr_noise
 
     def forward(self, x, targets=None):
-        current_ttt_prob = self._get_ttt_probability()
-        fpn_outs = self.backbone(x, ttt_prob=current_ttt_prob)
+        # Get current curriculum values
+        current_ttt_prob, current_noise_scale = self._get_ttt_schedule()
+        
+        # Pass both prob and noise scale to backbone
+        # NOTE: You must update CSPDarknet.forward to accept ttt_noise_scale!
+        fpn_outs = self.backbone(x, ttt_prob=current_ttt_prob, ttt_noise_scale=current_noise_scale)
 
         if self.training:
             (det_loss, iou_l, conf_l, cls_l, l1_l, num_fg, 

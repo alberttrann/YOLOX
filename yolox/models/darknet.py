@@ -181,37 +181,28 @@ class CSPDarknet(nn.Module):
             ),
         )
 
-    def forward(self, x, ttt_prob=None): 
-        """
-        Args:
-            x: Input image tensor
-            ttt_prob: Probability [0.0, 1.0] of running TTT loop. 
-                      If None, defaults to behavior based on self.training.
-        """
+    def forward(self, x, ttt_prob=None, ttt_noise_scale=1.0): 
         outputs = {}
-        
-        # Step 0: Input Stem
         x = self.stem(x)
-        outputs["stem"] = x
         
-        # Step 1: ADAPTIVE FEATURE EXTRACTION (TTT)
         run_ttt = False
-        
         if not self.training:
-            # Inference Mode:
-            # Default to True unless explicitly disabled (ttt_prob=0.0)
-            if ttt_prob is None or ttt_prob > 0.0:
-                run_ttt = True
+            if ttt_prob is None or ttt_prob > 0.0: run_ttt = True
         else:
-            # Training Mode:
-            # Use stochastic probability if provided, else default to 0.0 (off)
             prob = ttt_prob if ttt_prob is not None else 0.0
-            if prob > 0.0 and torch.rand(1).item() < prob:
-                run_ttt = True
+            if prob > 0.0 and torch.rand(1).item() < prob: run_ttt = True
         
-        # Execute the Adaptive Stage
-        # The TTTAdaptiveStage handles the inner optimization loop internally
-        x = self.dark2(x, run_ttt=run_ttt)
+        # Pass the dynamic noise scale to the adaptive stage
+        # We multiply the base noise_std by the schedule scale
+        if run_ttt:
+            # We temporarily override the noise_std just for this forward pass
+            original_noise = self.dark2.noise_std
+            self.dark2.noise_std = original_noise * ttt_noise_scale
+            x = self.dark2(x, run_ttt=True)
+            self.dark2.noise_std = original_noise # Restore
+        else:
+            x = self.dark2(x, run_ttt=False)
+            
         outputs["dark2"] = x
         
         # Step 2-4: Standard Forward pass through Deep Backbone

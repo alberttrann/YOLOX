@@ -61,21 +61,27 @@ class TTTAdaptiveStage(nn.Module):
         return F.interpolate(mask, size=(H, W), mode='nearest')
 
     def inner_loss_fn(self, params, projector_params, x_in, mask, noise_map, clean_target):
-        # Ensure precision consistency between inputs and functional parameters
-        b_dtype = next(iter(params.values())).dtype
-        p_dtype = next(iter(projector_params.values())).dtype
-
-        feat = functional_call(self.backbone_stage, params, x_in.to(b_dtype))
+        feat = functional_call(self.backbone_stage, params, x_in)
         
-        feat_noisy = feat + noise_map.to(b_dtype)
-        # Access mask_token from functional params to maintain grad tracking
-        m_token = projector_params.get('mask_token', self.projector.mask_token).to(b_dtype)
-        feat_corrupted = feat_noisy * (1 - mask) + m_token * mask
+        feat_noisy = feat + noise_map
+        feat_corrupted = feat_noisy * (1 - mask) + self.projector.mask_token * mask
+        rec = functional_call(self.projector, projector_params, feat_corrupted)
         
-        rec = functional_call(self.projector, projector_params, feat_corrupted.to(p_dtype))
+        # 1. Base spatial accuracy (MSE)
+        mse_loss = F.mse_loss(rec, clean_target)
         
-        # Reverted to Pure MSE (Forces magnitude correction for Fog)
-        return F.mse_loss(rec, clean_target.to(p_dtype))
+        # 2. Structural Direction (Cosine) - Replaces the dangerous Variance Penalty.
+        # This forces the features to have the correct 'shape' and 'contrast pattern' 
+        # without encouraging random high-variance noise.
+        cos_loss = 1.0 - F.cosine_similarity(
+            F.normalize(rec.flatten(1), dim=1), 
+            F.normalize(clean_target.flatten(1), dim=1), 
+            dim=1
+        ).mean()
+        
+        # 0.2 is a safe weight. It guides the MSE out of the "flat gray" trap 
+        # without dominating the spatial reconstruction.
+        return mse_loss + 0.2 * cos_loss
 
     def forward(self, x_in, run_ttt=True):
         # 0. EXPLICIT Profiler Bypass
