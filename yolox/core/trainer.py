@@ -5,6 +5,7 @@ import datetime
 import os
 import time
 from loguru import logger
+import torch.nn.functional as F
 
 import torch
 from torch.nn.parallel import DistributedDataParallel as DDP
@@ -95,7 +96,6 @@ class Trainer:
 
     def train_one_iter(self):
         iter_start_time = time.time()
-
         inps, targets = self.prefetcher.next()
         inps = inps.to(self.data_type)
         targets = targets.to(self.data_type)
@@ -109,8 +109,23 @@ class Trainer:
         loss = self.outputs["total_loss"]
 
         self.optimizer.zero_grad()
+        self.engram_optimizer.zero_grad()
+        
         self.scaler.scale(loss).backward()
+        # Safe probe regardless of DDP wrapping
+        raw_model = self.model.module if hasattr(self.model, 'module') else self.model
+        proto = raw_model.head.memory_banks[1].prototypes
+        logger.info(
+            f"[PROBE E{self.epoch}I{self.iter}] "
+            f"grad={'None' if proto.grad is None else f'{proto.grad.norm().item():.8f}'} "
+            f"param_norm={proto.data.norm().item():.6f}"
+        )
+
+        self.scaler.unscale_(self.optimizer)
+        self.scaler.unscale_(self.engram_optimizer)
+        
         self.scaler.step(self.optimizer)
+        self.scaler.step(self.engram_optimizer)
         self.scaler.update()
 
         if self.use_model_ema:
@@ -119,6 +134,8 @@ class Trainer:
         lr = self.lr_scheduler.update_lr(self.progress_in_iter + 1)
         for param_group in self.optimizer.param_groups:
             param_group["lr"] = lr
+        # Note: engram_optimizer lr is NOT tied to the cosine schedule
+        # It uses AdamW's own adaptive rates, fixed base lr=1e-3
 
         iter_end_time = time.time()
         self.meter.update(
@@ -142,7 +159,48 @@ class Trainer:
 
         # solver related init
         self.optimizer = self.exp.get_optimizer(self.args.batch_size)
+        self.engram_optimizer = self.exp.engram_optimizer  # set in get_optimizer above
 
+        # Add to before_train in trainer.py, after optimizer is built
+        logger.info("\n[PARAM AUDIT] Parameter group summary:")
+        group_names = ['norm', 'weight', 'bias', 'ttt_lrs', 'engram', 'gates']
+        total_grouped = 0
+        for i, (name, group) in enumerate(zip(group_names, 
+                                            self.optimizer.param_groups)):
+            total_grouped += len(group['params'])
+            n_params = sum(p.numel() for p in group['params'])
+            logger.info(f"  Group {i} ({name}): "
+                f"{len(group['params'])} tensors, "
+                f"{n_params:,} parameters, "
+                f"lr={group['lr']:.2e}")
+        # Also verify the assert passed (if it didn't, training would have crashed)
+        total_grouped += sum(len(g['params']) for g in self.engram_optimizer.param_groups)
+        total_params = sum(1 for p in model.parameters() if p.requires_grad)
+        logger.info(
+            f"  TOTAL: {total_grouped}/{total_params} parameters grouped "
+            f"({'OK' if total_grouped == total_params else 'MISMATCH — CHECK GROUPING'})"
+        )
+        optimized_ids = set()
+        for group in self.optimizer.param_groups:
+            for p in group['params']:
+                optimized_ids.add(id(p))
+        # Also check engram optimizer
+        for group in self.engram_optimizer.param_groups:
+            for p in group['params']:
+                optimized_ids.add(id(p))
+
+        logger.info("[PARAM AUDIT] Missing parameters:")
+        missing_count = 0
+        for name, param in model.named_parameters():
+            if param.requires_grad and id(param) not in optimized_ids:
+                logger.info(f"  MISSING: {name} | shape={list(param.shape)}")
+                missing_count += 1
+        logger.info(f"  Total missing: {missing_count}")
+        engram_params = sum(
+            p.numel() for g in self.engram_optimizer.param_groups 
+            for p in g['params']
+        )
+        logger.info(f"  Engram AdamW: {engram_params:,} parameters")
         # value of epoch will be set in `resume_train`
         model = self.resume_train(model)
 
@@ -252,6 +310,25 @@ class Trainer:
 
         if (self.epoch + 1) % self.exp.eval_interval == 0:
             all_reduce_norm(self.model)
+            if self.rank == 0:
+                raw_model = self.model.module if hasattr(self.model, 'module') \
+                            else self.model
+                proto = raw_model.head.memory_banks[1].prototypes.data
+                
+                # Direction health: mean off-diagonal cosine similarity
+                p_norm = F.normalize(proto, p=2, dim=-1)
+                sim_matrix = torch.mm(p_norm, p_norm.t())
+                mask = ~torch.eye(9, dtype=torch.bool)
+                mean_off_diag = sim_matrix[mask].mean().item()
+                max_off_diag = sim_matrix[mask].abs().max().item()
+                
+                logger.info(
+                    f"[ENGRAM E{self.epoch}] "
+                    f"param_norm={proto.norm().item():.4f} | "
+                    f"mean_off_diag_sim={mean_off_diag:.4f} | "
+                    f"max_off_diag_sim={max_off_diag:.4f} | "
+                    f"engram_lr={self.engram_optimizer.param_groups[0]['lr']:.2e}"
+                )
             self.evaluate_and_save_model()
 
     def before_iter(self):

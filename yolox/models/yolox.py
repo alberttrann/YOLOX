@@ -87,15 +87,23 @@ class YOLOX(nn.Module):
         
     def _calculate_supervised_memory_loss(self, aux_mem_logits, cls_targets, fg_masks):
         """
-        The 'Holy Grail' Supervised Identity Loss.
-        Ensures the Memory retrieval queries are supervised by GT labels.
-        """
-        # aux_mem_logits: list of [B, HW, num_classes]
-        # cls_targets: [Total_FG_Pixels, num_classes] - The targets assigned by SimOTA
-        # fg_masks: [B, Total_Pixels] - Boolean mask of which pixels are objects
+        FIXED: Correct ordering to match fg_masks anchor grid layout.
         
-        # 1. Flatten all scales into one long sequence
-        all_logits = torch.cat([l.view(-1, self.num_classes) for l in aux_mem_logits], dim=0)
+        aux_mem_logits: list of 3 tensors, each [B, HW_k, num_classes]
+        fg_masks: [B * total_anchors] boolean, ordered as:
+                [img0: P3+P4+P5 | img1: P3+P4+P5 | ...]
+        """
+
+        # BEFORE (incorrect - scale-first ordering):
+        # all_logits = torch.cat(
+        #     [l.view(-1, self.num_classes) for l in aux_mem_logits], dim=0
+        # )
+        
+        # AFTER (correct - batch-first ordering matching fg_masks):
+        all_logits = torch.cat(aux_mem_logits, dim=1).view(-1, self.num_classes)
+        # aux_mem_logits: list of [B, HW_k, 9]
+        # cat(dim=1): [B, HW_P3+HW_P4+HW_P5, 9]  <- scales within each image
+        # view(-1, 9): [B*total_anchors, 9]  <- matches fg_masks ordering exactly
         
         # 2. Extract retrieval scores for Foreground (Object) pixels only
         # matches the dimension of cls_targets [num_fg, num_classes]

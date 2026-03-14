@@ -183,3 +183,86 @@ class Exp(MyExp):
 
         return self.optimizer
         """
+    
+    def get_optimizer(self, batch_size):
+        if "optimizer" not in self.__dict__:
+            if self.warmup_epochs > 0:
+                lr = self.warmup_lr
+            else:
+                lr = self.basic_lr_per_img * batch_size
+
+            optimized_ids = set()
+            pg_norm, pg_weight, pg_bias = [], [], []
+            pg_ttt_lrs, pg_gates = [], []
+            pg_engram = []  # Will use separate AdamW
+
+            for name, param in self.model.named_parameters():
+                if not param.requires_grad:
+                    continue
+                if id(param) in optimized_ids:
+                    continue
+                optimized_ids.add(id(param))
+
+                if 'ttt_lrs' in name:
+                    pg_ttt_lrs.append(param)
+                elif any(k in name for k in [
+                    'prototypes', 'latent_projectors',
+                    'uncertainty_gates', 'memory_banks',
+                ]):
+                    pg_engram.append(param)
+                elif any(k in name for k in [
+                    'gate', 'gamma', 'beta', 'mask_token',
+                ]):
+                    pg_gates.append(param)
+                elif any(k in name for k in [
+                    'bn.', 'gn.', '.bn', '.gn'
+                ]) or name.endswith('.bn.weight') or \
+                name.endswith('.bn.bias') or \
+                name.endswith('.gn.weight') or \
+                name.endswith('.gn.bias'):
+                    pg_norm.append(param)
+                elif name.endswith('.bias'):
+                    pg_bias.append(param)
+                else:
+                    pg_weight.append(param)
+
+            # --- SGD for all standard + TTT parameters ---
+            optimizer = torch.optim.SGD(
+                pg_norm, lr=lr,
+                momentum=self.momentum, nesterov=True,
+                weight_decay=0.0
+            )
+            optimizer.add_param_group({
+                "params": pg_weight, "lr": lr,
+                "momentum": self.momentum, "nesterov": True,
+                "weight_decay": self.weight_decay,
+            })
+            optimizer.add_param_group({
+                "params": pg_bias, "lr": lr,
+                "momentum": self.momentum, "nesterov": True,
+                "weight_decay": 0.0,
+            })
+            optimizer.add_param_group({
+                "params": pg_ttt_lrs, "lr": lr * 0.1,
+                "momentum": self.momentum, "nesterov": True,
+                "weight_decay": 0.0,
+            })
+            optimizer.add_param_group({
+                "params": pg_gates, "lr": lr * 0.1,
+                "momentum": self.momentum, "nesterov": True,
+                "weight_decay": 0.0,
+            })
+            self.optimizer = optimizer
+
+            # --- Separate AdamW exclusively for Engram parameters ---
+            # AdamW handles sparse, high-variance, competing gradients correctly
+            # lr=1e-3 is AdamW's natural scale, independent of SGD's lr schedule
+            self.engram_optimizer = torch.optim.AdamW(
+                pg_engram,
+                lr=1e-3,
+                betas=(0.9, 0.999),
+                weight_decay=0.0,  # no decay on prototypes
+                eps=1e-8
+            )
+
+        return self.optimizer
