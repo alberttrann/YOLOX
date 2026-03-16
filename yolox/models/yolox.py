@@ -69,9 +69,21 @@ class YOLOX(nn.Module):
                 aux_mem_logits, cls_targets, fg_masks
             )
             
-            # Dropped the dangerous Orthogonal Loss. 
-            # 0.05 weight allows detection to lead, memory to follow safely.
-            total_loss = det_loss + (0.05 * memory_anchor_loss) 
+            # Separation loss: sum across all 3 scales
+            # Each scale has its own memory bank with potentially different
+            # prototype collapse dynamics — supervise all three
+            sep_loss = sum(
+                bank.separation_loss(margin=0.05) 
+                for bank in self.head.memory_banks
+            ) / len(self.head.memory_banks)
+
+            # Weight hierarchy:
+            # det_loss:            1.0  (primary objective, unchanged)
+            # memory_anchor_loss:  0.05 (identity supervision)
+            # sep_loss:            0.02 (structural regularization, lightest weight)
+            # sep_loss weight deliberately lower than anchor weight —
+            # supervised identity signal should dominate over structural push
+            total_loss = det_loss + (0.05 * memory_anchor_loss) + (0.02 * sep_loss)
 
             return {
                 "total_loss": total_loss,
@@ -80,7 +92,8 @@ class YOLOX(nn.Module):
                 "conf_loss": conf_l,
                 "cls_loss": cls_l,
                 "mem_loss": memory_anchor_loss,
-                "ttt_prob": current_ttt_prob 
+                "sep_loss": sep_loss,        # log separately for monitoring
+                "ttt_prob": current_ttt_prob
             }
         else:
             return self.head(fpn_outs)

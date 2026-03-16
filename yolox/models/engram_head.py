@@ -56,7 +56,7 @@ class TDE_Head(YOLOXHead):
             
             # 2. HYBRID UNCERTAINTY ESTIMATION
             # Pass BOTH the 2D feature map and the 1D latent vector
-            uncertainty = self.uncertainty_gates[k](latent_vec)
+            uncertainty = self.uncertainty_gates[k](cls_feat,latent_vec)
             obj_mask = torch.sigmoid(obj_output.view(B, 1, -1).permute(0, 2, 1))
             
             # Step C: Retrieve Clean Identity from Memory

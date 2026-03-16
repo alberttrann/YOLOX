@@ -127,6 +127,13 @@ class Trainer:
         self.scaler.step(self.optimizer)
         self.scaler.step(self.engram_optimizer)
         self.scaler.update()
+        # Snap prototypes back to unit hypersphere after each update
+        # The gradient hook keeps movement tangential during the step,
+        # this corrects residual numerical drift
+        raw_model = self.model.module if hasattr(self.model, 'module') else self.model
+
+        for bank in raw_model.head.memory_banks:
+            bank.normalize_prototypes()
 
         if self.use_model_ema:
             self.ema_model.update(self.model)
@@ -310,18 +317,42 @@ class Trainer:
 
         if (self.epoch + 1) % self.exp.eval_interval == 0:
             all_reduce_norm(self.model)
+            
             if self.rank == 0:
+                # --- EMA HEALTH CHECK ---
                 raw_model = self.model.module if hasattr(self.model, 'module') \
                             else self.model
-                proto = raw_model.head.memory_banks[1].prototypes.data
+                ema_model = self.ema_model.ema
+
+                # Compare one parameter that should be actively changing
+                # Use a cls_conv weight from head — actively trained every iter
+                try:
+                    raw_param = raw_model.head.cls_convs[0][0].conv.weight.data
+                    ema_param = ema_model.head.cls_convs[0][0].conv.weight.data
+                    
+                    # If EMA is updating, these should differ but be correlated
+                    # If EMA is frozen, they will diverge increasingly each epoch
+                    diff_norm = (raw_param - ema_param).norm().item()
+                    raw_norm = raw_param.norm().item()
+                    ema_norm = ema_param.norm().item()
+                    
+                    logger.info(
+                        f"[EMA CHECK E{self.epoch}] "
+                        f"raw_norm={raw_norm:.6f} | "
+                        f"ema_norm={ema_norm:.6f} | "
+                        f"diff_norm={diff_norm:.6f} | "
+                        f"relative_diff={diff_norm/raw_norm:.6f}"
+                    )
+                except Exception as e:
+                    logger.info(f"[EMA CHECK] Failed: {e}")
                 
-                # Direction health: mean off-diagonal cosine similarity
+                # --- ENGRAM LOG ---
+                proto = raw_model.head.memory_banks[1].prototypes.data
                 p_norm = F.normalize(proto, p=2, dim=-1)
                 sim_matrix = torch.mm(p_norm, p_norm.t())
                 mask = ~torch.eye(9, dtype=torch.bool)
                 mean_off_diag = sim_matrix[mask].mean().item()
                 max_off_diag = sim_matrix[mask].abs().max().item()
-                
                 logger.info(
                     f"[ENGRAM E{self.epoch}] "
                     f"param_norm={proto.norm().item():.4f} | "
@@ -329,7 +360,9 @@ class Trainer:
                     f"max_off_diag_sim={max_off_diag:.4f} | "
                     f"engram_lr={self.engram_optimizer.param_groups[0]['lr']:.2e}"
                 )
+            
             self.evaluate_and_save_model()
+
 
     def before_iter(self):
         pass
@@ -340,7 +373,7 @@ class Trainer:
         """
         # Unified Metric Unpacking 
         for k, v in self.outputs.items():
-            if k in ["total_loss", "iou_loss", "l1_loss", "conf_loss", "cls_loss", "mem_loss", "ttt_prob"]:
+            if k in ["total_loss", "iou_loss", "l1_loss", "conf_loss", "cls_loss", "mem_loss", "sep_loss", "ttt_prob"]:
                 if torch.is_tensor(v):
                     val = v.detach().cpu().item()
                 else:
@@ -425,6 +458,9 @@ class Trainer:
             # resume the model/optimizer state dict
             model.load_state_dict(ckpt["model"])
             self.optimizer.load_state_dict(ckpt["optimizer"])
+            # ADD THIS:
+            if "engram_optimizer" in ckpt:
+                self.engram_optimizer.load_state_dict(ckpt["engram_optimizer"])
             self.best_ap = ckpt.pop("best_ap", 0)
             # resume the training states variables
             start_epoch = (
@@ -455,6 +491,15 @@ class Trainer:
             evalmodel = self.model
             if is_parallel(evalmodel):
                 evalmodel = evalmodel.module
+        # --- EVAL MODEL FINGERPRINT ---
+        if self.rank == 0:
+            # Hash the first conv weight to confirm evalmodel changes each epoch
+            fingerprint_param = evalmodel.head.cls_convs[0][0].conv.weight.data
+            fingerprint = fingerprint_param.sum().item()
+            logger.info(
+                f"[EVAL FINGERPRINT E{self.epoch}] "
+                f"cls_conv_weight_sum={fingerprint:.8f}"
+            )
 
         with adjust_status(evalmodel, training=False):
             (ap50_95, ap50, summary), predictions = self.exp.eval(
@@ -509,6 +554,7 @@ class Trainer:
                 "start_epoch": self.epoch + 1,
                 "model": save_model.state_dict(),
                 "optimizer": self.optimizer.state_dict(),
+                "engram_optimizer": self.engram_optimizer.state_dict(),
                 "best_ap": self.best_ap,
                 "curr_ap": ap,
             }

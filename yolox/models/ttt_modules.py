@@ -276,6 +276,69 @@ class EngramMemoryBank(nn.Module):
         self.prototypes = nn.Parameter(torch.randn(num_classes, latent_dim))
         nn.init.orthogonal_(self.prototypes)
 
+        # Register post-step normalization hook
+        # This fires after each optimizer.step() call
+        self.prototypes.register_hook(self._project_gradient_to_sphere)
+
+    def separation_loss(self, margin=0.1):
+        """
+        Hyperspherical separation loss.
+        Penalizes cosine similarity between different class prototypes
+        that exceeds a margin threshold.
+        
+        margin=0.1 means: prototypes are allowed to be up to 0.1 similar,
+        only penalized beyond that. This prevents over-separation that
+        would force semantically similar classes (car/truck) to be
+        maximally distant when moderate similarity is natural.
+        """
+        # Normalize to unit sphere
+        p_norm = F.normalize(self.prototypes, p=2, dim=-1)  # [C, D]
+        
+        # Full similarity matrix
+        sim_matrix = torch.matmul(p_norm, p_norm.t())  # [C, C]
+        
+        # Mask diagonal (self-similarity = 1.0, don't penalize)
+        mask = 1.0 - torch.eye(
+            self.num_classes, 
+            device=self.prototypes.device, 
+            dtype=self.prototypes.dtype
+        )
+        
+        # Only penalize similarities that exceed the margin
+        # hinge loss: max(0, sim - margin)
+        excess_similarity = torch.clamp(sim_matrix * mask - margin, min=0.0)
+        
+        # Mean over off-diagonal pairs
+        num_pairs = self.num_classes * (self.num_classes - 1)
+        return excess_similarity.sum() / num_pairs
+    def _project_gradient_to_sphere(self, grad):
+        """
+        Projects gradient to the tangent space of the unit hypersphere.
+        For a point p on the sphere, the tangent space projection is:
+        grad_tangent = grad - (grad · p) * p
+        This ensures the optimizer step moves along the sphere surface
+        rather than away from it.
+        """
+        # self.prototypes: [num_classes, latent_dim]
+        # grad: [num_classes, latent_dim]
+        with torch.no_grad():
+            # Normalize current prototypes to unit sphere for projection
+            p_norm = F.normalize(self.prototypes.data, p=2, dim=-1)
+            # Project: remove the radial component of the gradient
+            # dot product per class: [num_classes, 1]
+            radial_component = (grad * p_norm).sum(dim=-1, keepdim=True)
+            grad_tangent = grad - radial_component * p_norm
+        return grad_tangent
+    
+    def normalize_prototypes(self):
+        """
+        Call after optimizer step to snap prototypes back to unit sphere.
+        The gradient hook keeps movement tangential, this corrects
+        any numerical drift from finite step sizes.
+        """
+        with torch.no_grad():
+            self.prototypes.data = F.normalize(self.prototypes.data, p=2, dim=-1)
+
     def forward(self, x_latent, uncertainty_gate, objectness_mask):
         # 1. Hyperspherical Projection (Crucial for OOD)
         # Normalize both input and prototypes to unit length
@@ -296,16 +359,44 @@ class EngramMemoryBank(nn.Module):
         return memory_retrieved * restoration_mask
 
 class UncertaintyEstimator(nn.Module):
-    """Reverted to TDE 2.0 Blind Latent Gate"""
-    def __init__(self, dim):
+    """
+    TDE 3.0 DUAL-HEAD GATE + SAFETY LOCK:
+    Independently evaluates Semantic Anomalies and Physical Anomalies.
+    Guarantees a minimum gradient flow to prevent Memory Bank death.
+    """
+    def __init__(self, in_channels, latent_dim=128):
         super().__init__()
-        self.classifier = nn.Sequential(
-            nn.Linear(dim, 32),
+        self.semantic_critic = nn.Sequential(
+            nn.Linear(latent_dim, 32),
             nn.ReLU(),
             nn.Linear(32, 1),
             nn.Sigmoid()
         )
+        self.physical_critic = nn.Sequential(
+            nn.Linear(2, 16),
+            nn.ReLU(),
+            nn.Linear(16, 1),
+            nn.Sigmoid()
+        )
 
-    def forward(self, x):
-        # x: [B, HW, 128]
-        return self.classifier(x)
+    def forward(self, x_feat, x_latent):
+        B, C, H, W = x_feat.shape
+        gate_semantic = self.semantic_critic(x_latent)
+        
+        # Physical stats computation doesn't need gradients
+        # x_feat gradients flow through cls_feat path, not through the gate stats
+        with torch.no_grad() if not self.training else contextlib.nullcontext():
+            variance = torch.var(x_feat.detach(), dim=1, keepdim=True)
+            spatial_variance = F.max_pool2d(variance, kernel_size=3, stride=1, padding=1)
+            magnitude = torch.norm(x_feat.detach(), p=2, dim=1, keepdim=True)
+            spatial_magnitude = F.avg_pool2d(magnitude, kernel_size=3, stride=1, padding=1)
+        
+        stats = torch.cat([spatial_variance, spatial_magnitude], dim=1)
+        stats_flat = stats.view(B, 2, H * W).permute(0, 2, 1)
+        gate_physical = self.physical_critic(stats_flat)
+        
+        gate_final = gate_semantic + gate_physical - (gate_semantic * gate_physical)
+        
+        if self.training:
+            gate_final = torch.clamp(gate_final, min=0.01)
+        return gate_final
