@@ -41,18 +41,16 @@ class YOLOX(nn.Module):
         self.max_epochs = max_epochs
 
     def _get_ttt_probability(self):
-        """Calculates Stochastic Meta-Learning Probability based on training progress."""
         if not self.training:
-            return 1.0 # Always adapt during inference/validation
+            return 1.0
             
         if self.current_epoch < self.warmup_end:
             return self.prob_start
-        if self.current_epoch >= self.ramp_end:
-            return self.prob_end
             
-        # Linear Ramp for curriculum meta-learning
-        progress = (self.current_epoch - self.warmup_end) / (self.ramp_end - self.warmup_end)
-        return self.prob_start + (self.prob_end - self.prob_start) * progress
+        # Linear Ramp - NO GENTLE LANDING
+        # probability continues to climb to 0.7-0.8 at the end
+        progress = (self.current_epoch - self.warmup_end) / (self.max_epochs - self.warmup_end)
+        return self.prob_start + (0.7 - self.prob_start) * progress
 
     def forward(self, x, targets=None):
         current_ttt_prob = self._get_ttt_probability()

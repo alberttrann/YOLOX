@@ -55,8 +55,14 @@ def fuse_conv_bn(conv, bn):
         b_conv = conv.bias
     else:
         b_conv = torch.zeros(conv.out_channels).to(conv.weight.device)
+        
     b_bn = bn.bias - bn.weight.mul(bn.running_mean).div(torch.sqrt(bn.running_var + bn.eps))
-    fused_conv.bias.copy_(torch.apply_along_axis(lambda x: x, 0, torch.mm(w_bn, b_conv.reshape(-1, 1)).reshape(-1) + b_bn))
+    
+    # Corrected Bias Fusion Logic:
+    # (b_conv * scale) + b_bn
+    # Note: w_bn is diagonal scale factor.
+    fused_bias = torch.mm(w_bn, b_conv.reshape(-1, 1)).reshape(-1) + b_bn
+    fused_conv.bias.copy_(fused_bias)
 
     return fused_conv
 

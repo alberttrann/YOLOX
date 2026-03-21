@@ -57,12 +57,23 @@ class TDE_Head(YOLOXHead):
             uncertainty = self.uncertainty_gates[k](latent_vec)
             obj_mask = torch.sigmoid(obj_output.view(B, 1, -1).permute(0, 2, 1))
             
-            # Memory Retrieval
+            # Step C: Retrieve Clean Identity from Memory
             memory_feat = self.memory_banks[k](latent_vec, uncertainty, obj_mask)
             
-            # IDENTITY RESTORATION (Pattern Completion)
+            # Step D: CONVEX SWITCH FUSION (The Nuclear Move)
+            # Force the model to choose between noisy observation and clean memory
+            # restored_feat = (1 - Gate) * Observed + (Gate) * Memory
             memory_inflated = F.linear(memory_feat, self.latent_projectors[k].weight.t())
-            restored_cls_feat = (cls_feat_flat + memory_inflated).reshape(B, H, W, C).permute(0, 3, 1, 2)
+            
+            # Use the uncertainty gate as a hard convex mixer
+            # Reshape gate to [B, HW, 1] -> [B, H, W, 1] -> [B, 1, H, W]
+            gate_spatial = uncertainty.view(B, H, W, 1).permute(0, 3, 1, 2)
+            
+            # COMBINATION:
+            # When gate is high (uncertain), the noisy cls_feat is suppressed 
+            # and replaced by the 'perfect' memory identity.
+            restored_cls_feat = (1.0 - gate_spatial) * cls_feat + gate_spatial * memory_inflated.reshape(B, H, W, C).permute(0, 3, 1, 2)
+            
             cls_output = self.cls_preds[k](restored_cls_feat)
 
             # Record retrieval scores for supervision

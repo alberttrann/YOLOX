@@ -33,42 +33,29 @@ class TTTProjector(nn.Module):
 
 class TTTAdaptiveStage(nn.Module):
     """
-    Meta-Adaptive Darknet Stage.
-    Features: Learnable Per-Parameter LRs + Adaptive Denoising.
+    NUCLEAR VERSION: Adversarial Adaptation Engine.
+    Uses 85% Masking to force extreme structural reasoning.
     """
-    def __init__(self, stage_module, in_channels, init_ttt_lr=0.05, noise_std=0.08):
+    def __init__(self, stage_module, in_channels, init_ttt_lr=0.08, noise_std=0.12):
         super().__init__()
         self.backbone_stage = stage_module
         self.projector = TTTProjector(in_channels)
         self.noise_std = noise_std
         
-        # --- Learnable LR Map ---
-        # Instead of one LR, we have a unique learnable LR for every adaptable parameter.
-        # allows the model to learn 'Update Sensitivities'.
         self.ttt_lrs = nn.ParameterDict()
         for name, param in self.backbone_stage.named_parameters():
             if 'gn' in name or 'norm' in name:
-                # Initialize with the provided scalar, but allow meta-optimization
+                # Meta-LR is now significantly more aggressive (0.08)
                 self.ttt_lrs[name.replace('.', '_')] = nn.Parameter(torch.tensor(init_ttt_lr))
 
-    def _get_robust_variance_mask(self, feat, ratio=0.75):
-        """Multi-scale variance masking for robust saliency detection."""
+    def _get_robust_variance_mask(self, feat, ratio=0.85): # Extreme 85% Mask
         B, C, H, W = feat.shape
-        # combine 4x4 and 8x8 variance to catch both fine textures and coarse parts
         var = torch.var(feat, dim=1, keepdim=True)
-        
-        v4 = F.avg_pool2d(var, 4, stride=4)
-        v8 = F.avg_pool2d(var, 8, stride=8)
-        
-        # Upsample v8 back to v4 scale for fusion
-        v_fusion = v4 + F.interpolate(v8, size=(H//4, W//4), mode='nearest')
-        
-        # Top-K Selection
+        v_fusion = F.avg_pool2d(var, 4, stride=4) # Fine-grained focus
         scores_fp32 = v_fusion.view(B, -1).float()
         threshold = torch.quantile(scores_fp32, ratio, dim=1, keepdim=True)
-        mask_fusion = (v_fusion >= threshold.view(B, 1, 1, 1)).to(feat.dtype)
-        
-        return F.interpolate(mask_fusion, size=(H, W), mode='nearest')
+        mask = (v_fusion >= threshold.view(B, 1, 1, 1)).to(feat.dtype)
+        return F.interpolate(mask, size=(H, W), mode='nearest')
 
     def inner_loss_fn(self, params, projector_params, x_in, mask, noise_map, clean_target):
         feat = functional_call(self.backbone_stage, params, x_in)
@@ -268,22 +255,35 @@ class DeepSeekSparseAttention(nn.Module):
 #PHASE 3
 
 class EngramMemoryBank(nn.Module):
-    def __init__(self, num_classes, latent_dim=128, temperature=10.0): # NEW ARG
+    """
+    NUCLEAR VERSION: Hyperspherical Associative Memory.
+    Forces hard-decision identity restoration.
+    """
+    def __init__(self, num_classes, latent_dim=128, temperature=50.0):
         super().__init__()
         self.num_classes = num_classes
         self.latent_dim = latent_dim
-        self.temperature = temperature # Store temp
+        self.temperature = temperature
         
+        # Prototypes are now unit vectors on a hypersphere
         self.prototypes = nn.Parameter(torch.randn(num_classes, latent_dim))
         nn.init.orthogonal_(self.prototypes)
 
     def forward(self, x_latent, uncertainty_gate, objectness_mask):
-        # Scale scores by temperature before softmax
-        # This makes the distribution "peakier" -> Lower entropy -> Higher gradients if wrong
-        attn_scores = torch.matmul(x_latent, self.prototypes.t()) * self.temperature 
+        # 1. Hyperspherical Projection (Crucial for OOD)
+        # Normalize both input and prototypes to unit length
+        x_norm = F.normalize(x_latent, p=2, dim=-1)
+        p_norm = F.normalize(self.prototypes, p=2, dim=-1)
+        
+        # 2. Hard-Attention Lookup (Temperature 50)
+        # Dot product similarity in hypersphere
+        attn_scores = torch.matmul(x_norm, p_norm.t()) * self.temperature
         attn_weights = F.softmax(attn_scores, dim=-1)
         
+        # 3. Memory Retrieval
         memory_retrieved = torch.matmul(attn_weights, self.prototypes)
+        
+        # Restoration mask (Gating)
         restoration_mask = uncertainty_gate * objectness_mask
         
         return memory_retrieved * restoration_mask
