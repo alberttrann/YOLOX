@@ -263,6 +263,8 @@ class EngramMemoryBank(nn.Module):
         super().__init__()
         self.num_classes = num_classes
         self.latent_dim = latent_dim
+
+        self.temperature = 5.0 # Gentle temperature for stable gradients (No extreme sharpening)
         
         # The Prototypes (Learnable Anchors)
         self.prototype_layer = nn.Linear(latent_dim, num_classes, bias=False)
@@ -275,7 +277,8 @@ class EngramMemoryBank(nn.Module):
         
         # 2. Smooth Attention Lookup (No extreme temperature)
         # We use a gentle temperature (e.g., 5.0) to keep gradients flowing
-        attn_scores = torch.matmul(x_norm, p_norm.t()) * 5.0
+        # Multiplied by saved temperature
+        attn_scores = torch.matmul(x_norm, p_norm.t()) * self.temperature
         attn_weights = F.softmax(attn_scores, dim=-1)
         
         # 3. Memory Retrieval
