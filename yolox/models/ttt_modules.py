@@ -268,40 +268,22 @@ class DeepSeekSparseAttention(nn.Module):
 #PHASE 3
 
 class EngramMemoryBank(nn.Module):
-    """
-    Differentiable Associative Memory Bank.
-    Stores 'Canonical Prototypes' of object classes.
-    """
-    def __init__(self, num_classes, latent_dim=128):
+    def __init__(self, num_classes, latent_dim=128, temperature=10.0): # NEW ARG
         super().__init__()
         self.num_classes = num_classes
         self.latent_dim = latent_dim
+        self.temperature = temperature # Store temp
         
-        # Memory Bank: Prototypes for each class
-        # Initialized with orthogonal vectors to maximize identity separation
         self.prototypes = nn.Parameter(torch.randn(num_classes, latent_dim))
         nn.init.orthogonal_(self.prototypes)
 
     def forward(self, x_latent, uncertainty_gate, objectness_mask):
-        """
-        x_latent: [B, HW, latent_dim] - Observed features
-        uncertainty_gate: [B, HW, 1] - beta value based on entropy
-        objectness_mask: [B, HW, 1] - Gating based on physical presence
-        """
-        # 1. Similarity Scoring (Soft-Attention Lookup)
-        # compare observed latent vectors to all canonical prototypes
-        # [B, HW, latent_dim] @ [latent_dim, num_classes] -> [B, HW, num_classes]
-        attn_scores = torch.matmul(x_latent, self.prototypes.t())
+        # Scale scores by temperature before softmax
+        # This makes the distribution "peakier" -> Lower entropy -> Higher gradients if wrong
+        attn_scores = torch.matmul(x_latent, self.prototypes.t()) * self.temperature 
         attn_weights = F.softmax(attn_scores, dim=-1)
         
-        # 2. Retrieval: Weighted sum of prototypes
-        # [B, HW, num_classes] @ [num_classes, latent_dim] -> [B, HW, latent_dim]
         memory_retrieved = torch.matmul(attn_weights, self.prototypes)
-        
-        # 3. Closed-Loop Restoration
-        # Memory is only inlayed if:
-        # a) Uncertainty is high (gate)
-        # b) An object is physically present (objectness)
         restoration_mask = uncertainty_gate * objectness_mask
         
         return memory_retrieved * restoration_mask
