@@ -63,19 +63,46 @@ def mem_usage():
 
 
 class AverageMeter:
-    """Track a series of values and provide access to smoothed values over a
-    window or the global series average.
     """
+    TDE-YOLOX METER: 
+    Stateless, Windowed, and CUDA-Safe.
+    """
+    def __init__(self, window_size=20):
+        self.window_size = window_size
+        # Call clear() to initialize all underscored attributes
+        self.clear() 
 
-    def __init__(self, window_size=50):
-        self._deque = deque(maxlen=window_size)
-        self._total = 0.0
+    def clear(self):
+        """
+        YOLOX's internal call site in MeterBuffer.
+        """
+        self._deque = deque(maxlen=self.window_size)
+        self._sum = 0.0
         self._count = 0
+        self.current_val = 0.0
 
-    def update(self, value):
-        self._deque.append(value)
+    def update(self, val):
+        """
+        Force-converts any input to a CPU scalar before storage.
+        Prevents VRAM leaks and NumPy/CUDA collisions.
+        """
+        if val is None:
+            return
+            
+        # 1. Forensic Extraction
+        if torch.is_tensor(val):
+            # detach() is critical to stop Meta-Learning graph growth
+            clean_val = val.detach().cpu().item()
+        elif hasattr(val, "item"): 
+            clean_val = val.item()
+        else:
+            clean_val = float(val)
+
+        # 2. Update stats
+        self.current_val = clean_val
+        self._deque.append(clean_val)
+        self._sum += clean_val
         self._count += 1
-        self._total += value
 
     @property
     def median(self):
@@ -84,29 +111,25 @@ class AverageMeter:
 
     @property
     def avg(self):
-        # if deque is empty, nan will be returned.
-        d = np.array(list(self._deque))
-        return d.mean()
+        """Windowed average."""
+        if len(self._deque) == 0:
+            return 0.0
+        return np.mean(list(self._deque))
 
     @property
     def global_avg(self):
-        return self._total / max(self._count, 1e-5)
-
+        """Running average across the whole epoch."""
+        if self._count == 0:
+            return 0.0
+        return self._sum / self._count
+    
     @property
     def latest(self):
-        return self._deque[-1] if len(self._deque) > 0 else None
+        return self.current_val
 
     @property
     def total(self):
-        return self._total
-
-    def reset(self):
-        self._deque.clear()
-        self._total = 0.0
-        self._count = 0
-
-    def clear(self):
-        self._deque.clear()
+        return self._sum
 
 
 class MeterBuffer(defaultdict):
@@ -120,8 +143,20 @@ class MeterBuffer(defaultdict):
         for v in self.values():
             v.reset()
 
-    def get_filtered_meter(self, filter_key="time"):
-        return {k: v for k, v in self.items() if filter_key in k}
+    # In MeterBuffer class:
+    def get_filtered_meter(self, filter_key="loss"):
+            """
+            Handles YOLOX versions where MeterBuffer is a dict subclass.
+            """
+            tde_metrics = ["mem_loss", "ttt_prob"]
+            filtered_dict = {}
+            
+            source = getattr(self, "meters", self)
+            
+            for k, v in source.items():
+                if filter_key in k or k in tde_metrics:
+                    filtered_dict[k] = v
+            return filtered_dict
 
     def update(self, values=None, **kwargs):
         if values is None:

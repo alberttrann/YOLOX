@@ -215,6 +215,19 @@ class Trainer:
                                                 metadata=metadata)
 
     def before_epoch(self):
+        """
+        SYNC: 
+        Tell the TDE-YOLOX engine which epoch we are in.
+        This drives the Saliency Annealing (the curriculum of the Holy Grail).
+        """
+        # 1. Access the raw YOLOX model (unwrapping DDP if necessary)
+        model = self.model.module if hasattr(self.model, "module") else self.model
+        
+        # 2. Update the Meta-Learning Engine state
+        if hasattr(model, "set_meta_training_state"):
+            model.set_meta_training_state(self.epoch, self.max_epoch)
+            
+        # Standard YOLOX logic follows
         logger.info("---> start train epoch{}".format(self.epoch + 1))
 
         if self.epoch + 1 == self.max_epoch - self.exp.no_aug_epochs or self.no_aug:
@@ -246,42 +259,52 @@ class Trainer:
 
     def after_iter(self):
         """
-        `after_iter` contains two parts of logic:
-            * log information
-            * reset setting of resize
+        Safe value unpacking + Optimizer-linked LR logging.
         """
-        # log needed information
+        # Unified Metric Unpacking 
+        for k, v in self.outputs.items():
+            if k in ["total_loss", "iou_loss", "l1_loss", "conf_loss", "cls_loss", "mem_loss", "ttt_prob"]:
+                if torch.is_tensor(v):
+                    val = v.detach().cpu().item()
+                else:
+                    try:
+                        val = float(v)
+                    except:
+                        continue
+                self.meter.update(**{k: val})
+
+        # 2. Logging logic
         if (self.iter + 1) % self.exp.print_interval == 0:
-            # TODO check ETA logic
-            left_iters = self.max_iter * self.max_epoch - (self.progress_in_iter + 1)
-            eta_seconds = self.meter["iter_time"].global_avg * left_iters
+            curr_lr = self.optimizer.param_groups[0]['lr']
+            
+            left_iters = self.max_iter - self.iter - 1
+            avg_time = self.meter["iter_time"].global_avg if "iter_time" in self.meter else 0
+            eta_seconds = avg_time * left_iters
             eta_str = "ETA: {}".format(datetime.timedelta(seconds=int(eta_seconds)))
 
-            progress_str = "epoch: {}/{}, iter: {}/{}".format(
+            progress_str = "epoch: [{}/{}][{}/{}]".format(
                 self.epoch + 1, self.max_epoch, self.iter + 1, self.max_iter
             )
+            
             loss_meter = self.meter.get_filtered_meter("loss")
             loss_str = ", ".join(
-                ["{}: {:.1f}".format(k, v.latest) for k, v in loss_meter.items()]
+                ["{}: {:.3f}".format(k, v.avg) for k, v in loss_meter.items()]
             )
-
-            time_meter = self.meter.get_filtered_meter("time")
-            time_str = ", ".join(
-                ["{}: {:.3f}s".format(k, v.avg) for k, v in time_meter.items()]
-            )
-
-            mem_str = "gpu mem: {:.0f}Mb, mem: {:.1f}Gb".format(gpu_mem_usage(), mem_usage())
 
             logger.info(
-                "{}, {}, {}, {}, lr: {:.3e}".format(
+                "{}, mem: {:.0f}Mb, {}, {}, lr: {:.3e}".format(
                     progress_str,
-                    mem_str,
-                    time_str,
+                    gpu_mem_usage(), 
+                    eta_str,
                     loss_str,
-                    self.meter["lr"].latest,
+                    curr_lr, 
                 )
-                + (", size: {:d}, {}".format(self.input_size[0], eta_str))
             )
+
+            if hasattr(self.meter, "clear_meters"):
+                self.meter.clear_meters()
+            else:
+                self.meter.clear()
 
             if self.rank == 0:
                 if self.args.logger == "tensorboard":

@@ -4,36 +4,23 @@ import torch.nn.functional as F
 from torch.func import functional_call, grad
 import contextlib
 
-#PHASE 1
 class GRN(nn.Module):
-    """Global Response Normalization: Prevents feature collapse."""
+    """Global Response Normalization: Essential for preventing feature collapse."""
     def __init__(self, dim):
         super().__init__()
         self.gamma = nn.Parameter(torch.zeros(1, 1, 1, dim))
         self.beta = nn.Parameter(torch.zeros(1, 1, 1, dim))
 
     def forward(self, x):
-        x_p = x.permute(0, 2, 3, 1) # B, H, W, C
+        x_p = x.permute(0, 2, 3, 1)
         gx = torch.norm(x_p, p=2, dim=(1, 2), keepdim=True)
         nx = gx / (gx.mean(dim=-1, keepdim=True) + 1e-6)
         return (self.gamma * (x_p * nx) + self.beta + x_p).permute(0, 3, 1, 2)
 
-class AugmentedLightningIndexer(nn.Module):
-    """DSA-inspired learnable saliency head."""
-    def __init__(self, in_channels, num_heads=4):
-        super().__init__()
-        self.dw_conv = nn.Conv2d(in_channels, in_channels, 3, padding=1, groups=in_channels)
-        self.pw_conv = nn.Conv2d(in_channels, num_heads, 1)
-        self.act = nn.ReLU()
-
-    def forward(self, x):
-        return torch.mean(self.act(self.pw_conv(self.dw_conv(x))), dim=1, keepdim=True)
-
 class TTTProjector(nn.Module):
     def __init__(self, in_channels):
         super().__init__()
-        # mask_token here so it is tracked in named_parameters()
-        self.mask_token = nn.Parameter(torch.randn(1, in_channels, 1, 1))
+        self.mask_token = nn.Parameter(torch.randn(1, in_channels, 1, 1) * 0.02)
         hidden = in_channels // 2
         self.net = nn.Sequential(
             nn.Conv2d(in_channels, hidden, 1),
@@ -45,54 +32,70 @@ class TTTProjector(nn.Module):
     def forward(self, x): return self.net(x)
 
 class TTTAdaptiveStage(nn.Module):
-    def __init__(self, stage_module, in_channels, ttt_lr=0.005, noise_std=0.05):
+    """
+    Meta-Adaptive Darknet Stage.
+    Features: Learnable Per-Parameter LRs + Adaptive Denoising.
+    """
+    def __init__(self, stage_module, in_channels, init_ttt_lr=0.05, noise_std=0.08):
         super().__init__()
         self.backbone_stage = stage_module
         self.projector = TTTProjector(in_channels)
-        self.lightning_indexer = AugmentedLightningIndexer(in_channels)
-        self.ttt_lr = ttt_lr
         self.noise_std = noise_std
-
-    def _get_active_mask(self, feat, ratio=0.75):
-        # Universal DType Alignment
-        indexer_params = dict(self.lightning_indexer.named_parameters())
         
-        with torch.no_grad():
-            # functional_call to force the indexer to match feat.dtype
-            saliency_map = functional_call(self.lightning_indexer, indexer_params, feat.detach())
-            
-            # 8x8 Block Aggregation
-            scores_blocked = F.avg_pool2d(saliency_map, 8, stride=8)
-            
-            # Precision Bridge for Quantile
-            scores_fp32 = scores_blocked.view(feat.shape[0], -1).float()
-            threshold = torch.quantile(scores_fp32, ratio, dim=1, keepdim=True)
-            
-            # Final Mask construction
-            mask_blocked = (scores_blocked >= threshold.view(feat.shape[0], 1, 1, 1)).to(feat.dtype)
-            
-        return F.interpolate(mask_blocked, size=(feat.shape[2:]), mode='nearest')
+        # --- Learnable LR Map ---
+        # Instead of one LR, we have a unique learnable LR for every adaptable parameter.
+        # allows the model to learn 'Update Sensitivities'.
+        self.ttt_lrs = nn.ParameterDict()
+        for name, param in self.backbone_stage.named_parameters():
+            if 'gn' in name or 'norm' in name:
+                # Initialize with the provided scalar, but allow meta-optimization
+                self.ttt_lrs[name.replace('.', '_')] = nn.Parameter(torch.tensor(init_ttt_lr))
+
+    def _get_robust_variance_mask(self, feat, ratio=0.75):
+        """Multi-scale variance masking for robust saliency detection."""
+        B, C, H, W = feat.shape
+        # combine 4x4 and 8x8 variance to catch both fine textures and coarse parts
+        var = torch.var(feat, dim=1, keepdim=True)
+        
+        v4 = F.avg_pool2d(var, 4, stride=4)
+        v8 = F.avg_pool2d(var, 8, stride=8)
+        
+        # Upsample v8 back to v4 scale for fusion
+        v_fusion = v4 + F.interpolate(v8, size=(H//4, W//4), mode='nearest')
+        
+        # Top-K Selection
+        scores_fp32 = v_fusion.view(B, -1).float()
+        threshold = torch.quantile(scores_fp32, ratio, dim=1, keepdim=True)
+        mask_fusion = (v_fusion >= threshold.view(B, 1, 1, 1)).to(feat.dtype)
+        
+        return F.interpolate(mask_fusion, size=(H, W), mode='nearest')
+
     def inner_loss_fn(self, params, projector_params, x_in, mask, noise_map, clean_target):
-        # 1. Functional Forward through backbone
         feat = functional_call(self.backbone_stage, params, x_in)
-        # 2. Denoising Logic
+        # Apply Denoising + Masking
         feat_noisy = feat + noise_map
-        # 3. Masked Modeling Logic
         feat_corrupted = feat_noisy * (1 - mask) + self.projector.mask_token * mask
-        # 4. Reconstruction
         rec = functional_call(self.projector, projector_params, feat_corrupted)
         return F.mse_loss(rec, clean_target)
 
     def forward(self, x_in, run_ttt=True):
-        # 0. Profiler Bypass
-        is_profiling = any(hasattr(m, 'total_ops') for m in self.backbone_stage.modules())
+        # --- PROFILER BYPASS (Fixes thop collision) ---
+        # 1. Check if we are in a 'thop' profiling context (Total Ops tracking)
+        # 2. Check if we are in a 'fvcore' or other common profiler context
+        is_profiling = False
+        for m in self.backbone_stage.modules():
+            if hasattr(m, 'total_ops') or hasattr(m, 'total_params'):
+                is_profiling = True
+                break
+        
         if is_profiling or not run_ttt:
             return self.backbone_stage(x_in)
 
-        # Capture input precision to ensure output matches
+        # Capture precision to prevent DType Mismatch in Neck
         input_dtype = x_in.dtype
 
-        # 1. SETUP GRADIENT CONTEXT
+        # --- SETUP GRADIENT CONTEXT ---
+        # TTT during inference often runs in no_grad mode. must force grad enablement.
         is_inference_mode = (not torch.is_grad_enabled())
         if is_inference_mode:
             x_curr = x_in.detach()
@@ -102,59 +105,61 @@ class TTTAdaptiveStage(nn.Module):
             x_curr = x_in
             context_manager = contextlib.nullcontext()
 
-        # 2. CAPTURE & PARTITION STATE
+        # --- CAPTURE & PARTITION STATE ---
         backbone_params = dict(self.backbone_stage.named_parameters())
         backbone_buffers = dict(self.backbone_stage.named_buffers())
         proj_params = dict(self.projector.named_parameters())
-        proj_buffers = dict(self.projector.named_buffers())
 
+        # Isolate adaptable Norm parameters (GroupNorm has no buffers)
         adapt_backbone = {k: v for k, v in backbone_params.items() 
-                         if ('bn' in k or 'norm' in k) and v.is_floating_point()}
+                         if ('gn' in k or 'norm' in k) and v.is_floating_point()}
         static_backbone_state = {k: v for k, v in backbone_params.items() 
                                 if k not in adapt_backbone}
+        
         fixed_backbone_state = {**static_backbone_state, **backbone_buffers}
 
-        # 3. FREEZE MODULE STATE 
+        # Force Eval mode for the inner loop to prevent batch stat updates
         self.backbone_stage.eval()
         self.projector.eval()
 
         with context_manager:
-            if not x_curr.is_floating_point():
-                return self.backbone_stage(x_in)
-
-            # Generate Target
+            # Generate Adaptation Targets
             with torch.no_grad():
                 feat_initial = self.backbone_stage(x_curr)
                 clean_target = feat_initial.detach()
-                mask = self._get_active_mask(clean_target)
+                mask = self._get_robust_variance_mask(clean_target)
                 noise_map = torch.randn_like(clean_target) * self.noise_std
 
-            # 4. CORE META-LEARNING STEP
+            # --- CORE FUNCTIONAL TTT STEP ---
             def inner_grad_fn(p_adapt_b, p_adapt_p):
                 full_backbone = {**p_adapt_b, **fixed_backbone_state}
-                # Projector buffers (fixed_proj_state) is empty but included for safety
                 return self.inner_loss_fn(full_backbone, p_adapt_p, x_curr, mask, noise_map, clean_target)
 
-            grads_backbone, grads_proj = grad(inner_grad_fn, argnums=(0, 1))(adapt_backbone, proj_params)
+            # Compute d_Loss / d_BackboneNorms
+            # Note: also pass proj_params to grad to allow joint optimization
+            grads_backbone = grad(inner_grad_fn, argnums=0)(adapt_backbone, proj_params)
             
-            # 5. CONSTRUCT ADAPTED WEIGHT SPACE
+            # --- CONSTRUCT ADAPTED WEIGHT SPACE ---
             updated_backbone_params = {**backbone_params, **backbone_buffers}
             for name, g in grads_backbone.items():
-                updated_backbone_params[name] = updated_backbone_params[name] - self.ttt_lr * g
+                lr_key = name.replace('.', '_')
+                lr = self.ttt_lrs[lr_key]
+                # Cast grad to param type for safe functional update
+                updated_backbone_params[name] = updated_backbone_params[name] - lr * g.to(updated_backbone_params[name].dtype)
 
-        # 6. RESTORE ORIGINAL STATE
+        # --- RESTORE TRAINING STATE ---
         if self.training:
             self.backbone_stage.train()
             self.projector.train()
 
-        # 7. FINAL ADAPTED FORWARD 
+        # --- FINAL ADAPTED FORWARD ---
+        # uses the 'updated_backbone_params' dict locally for this image only
         if self.training:
             out = functional_call(self.backbone_stage, updated_backbone_params, x_curr)
         else:
             with torch.no_grad():
                 out = functional_call(self.backbone_stage, updated_backbone_params, x_curr)
 
-        # Force cast to input_dtype to be safe for deeper layers
         return out.to(input_dtype)
 
 #PHASE 2
