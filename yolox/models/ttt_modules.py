@@ -256,36 +256,32 @@ class DeepSeekSparseAttention(nn.Module):
 
 class EngramMemoryBank(nn.Module):
     """
-    NUCLEAR VERSION: Hyperspherical Associative Memory.
-    Forces hard-decision identity restoration.
+    OPTIMAL VERSION: Contrastive Prototype Learning (CPL).
+    Ensures gradual, stable separation without gradient shattering.
     """
-    def __init__(self, num_classes, latent_dim=128, temperature=50.0):
+    def __init__(self, num_classes, latent_dim=128):
         super().__init__()
         self.num_classes = num_classes
         self.latent_dim = latent_dim
-        self.temperature = temperature
         
-        # Prototypes are now unit vectors on a hypersphere
-        self.prototypes = nn.Parameter(torch.randn(num_classes, latent_dim))
-        nn.init.orthogonal_(self.prototypes)
+        # The Prototypes (Learnable Anchors)
+        self.prototype_layer = nn.Linear(latent_dim, num_classes, bias=False)
+        nn.init.orthogonal_(self.prototype_layer.weight)
 
     def forward(self, x_latent, uncertainty_gate, objectness_mask):
-        # 1. Hyperspherical Projection (Crucial for OOD)
-        # Normalize both input and prototypes to unit length
+        # 1. L2 Normalization (Crucial for stable cosine similarity)
         x_norm = F.normalize(x_latent, p=2, dim=-1)
-        p_norm = F.normalize(self.prototypes, p=2, dim=-1)
+        p_norm = F.normalize(self.prototype_layer.weight, p=2, dim=-1)
         
-        # 2. Hard-Attention Lookup (Temperature 50)
-        # Dot product similarity in hypersphere
-        attn_scores = torch.matmul(x_norm, p_norm.t()) * self.temperature
+        # 2. Smooth Attention Lookup (No extreme temperature)
+        # We use a gentle temperature (e.g., 5.0) to keep gradients flowing
+        attn_scores = torch.matmul(x_norm, p_norm.t()) * 5.0
         attn_weights = F.softmax(attn_scores, dim=-1)
         
         # 3. Memory Retrieval
-        memory_retrieved = torch.matmul(attn_weights, self.prototypes)
+        memory_retrieved = torch.matmul(attn_weights, self.prototype_layer.weight)
         
-        # Restoration mask (Gating)
         restoration_mask = uncertainty_gate * objectness_mask
-        
         return memory_retrieved * restoration_mask
 
 class UncertaintyEstimator(nn.Module):

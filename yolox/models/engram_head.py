@@ -21,7 +21,6 @@ class TDE_Head(YOLOXHead):
 
     def forward(self, xin, labels=None, imgs=None):
         outputs = []
-        # Collect raw memory-retrieval scores for all scales
         aux_memory_logits_list = [] 
         
         origin_preds = []
@@ -47,7 +46,7 @@ class TDE_Head(YOLOXHead):
             if self.training:
                 # 1. Noise Injection
                 cls_feat = cls_feat + torch.randn_like(cls_feat) * 0.05
-                # 2. Spatial Feature Dropout ( forces model to 'Remember' hidden parts)
+                # 2. Spatial Feature Dropout (forces model to 'Remember' hidden parts)
                 f_mask = (torch.rand(B, 1, H, W, device=x.device) > 0.15).float()
                 cls_feat = cls_feat * f_mask
             
@@ -55,34 +54,32 @@ class TDE_Head(YOLOXHead):
             latent_vec = self.latent_projectors[k](cls_feat_flat)
             
             uncertainty = self.uncertainty_gates[k](latent_vec)
-            obj_mask = torch.sigmoid(obj_output.view(B, 1, -1).permute(0, 2, 1))
             
-            # Step C: Retrieve Clean Identity from Memory
+            # CRITICAL FIX: Detach obj_output so classification gradients 
+            # do not corrupt the objectness predictor.
+            obj_mask = torch.sigmoid(obj_output.detach().view(B, 1, -1).permute(0, 2, 1))
+            
+            # Memory Retrieval (Calls EngramMemoryBank)
             memory_feat = self.memory_banks[k](latent_vec, uncertainty, obj_mask)
             
-            # Step D: CONVEX SWITCH FUSION (The Nuclear Move)
-            # Force the model to choose between noisy observation and clean memory
-            # restored_feat = (1 - Gate) * Observed + (Gate) * Memory
+            # Re-project memory back to feature dimension
             memory_inflated = F.linear(memory_feat, self.latent_projectors[k].weight.t())
             
-            # Use the uncertainty gate as a hard convex mixer
-            # Reshape gate to [B, HW, 1] -> [B, H, W, 1] -> [B, 1, H, W]
+            # Step D: CONVEX SWITCH FUSION
             gate_spatial = uncertainty.view(B, H, W, 1).permute(0, 3, 1, 2)
-            
-            # COMBINATION:
-            # When gate is high (uncertain), the noisy cls_feat is suppressed 
-            # and replaced by the 'perfect' memory identity.
             restored_cls_feat = (1.0 - gate_spatial) * cls_feat + gate_spatial * memory_inflated.reshape(B, H, W, C).permute(0, 3, 1, 2)
             
             cls_output = self.cls_preds[k](restored_cls_feat)
 
-            # Record retrieval scores for supervision
-            # scores = similarity between query vector and all class prototypes
-            retrieval_scores = torch.matmul(latent_vec, self.memory_banks[k].prototypes.t())
-            aux_memory_logits_list.append(retrieval_scores)
-
-            # --- YOLOX Standard Logic ---
+            # --- YOLOX Standard Logic & Target Collection ---
             if self.training:
+                # Calculate exact retrieval scores for Contrastive Anchor Loss
+                x_norm = F.normalize(latent_vec, p=2, dim=-1)
+                p_norm = F.normalize(self.memory_banks[k].prototype_layer.weight, p=2, dim=-1)
+                exact_retrieval_scores = torch.matmul(x_norm, p_norm.t()) * self.memory_banks[k].temperature
+                aux_memory_logits_list.append(exact_retrieval_scores)
+
+                # Standard YOLOX Target preparation
                 output = torch.cat([reg_output, obj_output, cls_output], 1)
                 output, grid = self.get_output_and_grid(output, k, stride_this_level, xin[0].type())
                 x_shifts.append(grid[:, :, 0])
@@ -95,11 +92,13 @@ class TDE_Head(YOLOXHead):
                     reg_output_tmp = reg_output_tmp.permute(0, 1, 3, 4, 2).reshape(batch_size, -1, 4)
                     origin_preds.append(reg_output_tmp.clone())
             else:
+                # Efficient Inference Logic
                 output = torch.cat([reg_output, obj_output.sigmoid(), cls_output.sigmoid()], 1)
+            
             outputs.append(output)
 
         if self.training:
-            # Return targets so Memory Bank can be supervised
+            # Return targets so Memory Bank can be supervised in yolox.py
             total_loss, iou_loss, conf_loss, cls_loss, l1_loss, num_fg, cls_targets, fg_masks = self.get_losses_with_targets(
                 imgs, x_shifts, y_shifts, expanded_strides, labels, torch.cat(outputs, 1), origin_preds, dtype=xin[0].dtype
             )

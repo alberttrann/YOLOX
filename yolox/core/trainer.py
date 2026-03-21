@@ -105,26 +105,32 @@ class Trainer:
 
         with torch.cuda.amp.autocast(enabled=self.amp_training):
             outputs = self.model(inps, targets)
-
+        
+        self.outputs = outputs
         loss = outputs["total_loss"]
 
-        self.optimizer.zero_grad()
+        if isinstance(self.optimizer, dict):
+            self.optimizer["cnn"].zero_grad()
+            self.optimizer["transformer"].zero_grad()
+        else:
+            self.optimizer.zero_grad()
+
         self.scaler.scale(loss).backward()
-        self.scaler.step(self.optimizer)
+
+        if isinstance(self.optimizer, dict):
+            self.scaler.step(self.optimizer["cnn"])
+            self.scaler.step(self.optimizer["transformer"])
+        else:
+            self.scaler.step(self.optimizer)
         self.scaler.update()
 
         if self.use_model_ema:
             self.ema_model.update(self.model)
 
-        lr = self.lr_scheduler.update_lr(self.progress_in_iter + 1)
-        for param_group in self.optimizer.param_groups:
-            param_group["lr"] = lr
-
         iter_end_time = time.time()
         self.meter.update(
             iter_time=iter_end_time - iter_start_time,
             data_time=data_end_time - iter_start_time,
-            lr=lr,
             **outputs,
         )
 
@@ -255,7 +261,26 @@ class Trainer:
             self.evaluate_and_save_model()
 
     def before_iter(self):
-        pass
+        # Apply Dual-LR Schedules
+        if isinstance(self.optimizer, dict):
+            # 1. Update CNN (SGD)
+            lr_cnn = self.lr_scheduler["cnn"].update_lr(self.progress_in_iter + 1)
+            for param_group in self.optimizer["cnn"].param_groups:
+                param_group["lr"] = lr_cnn
+                
+            # 2. Update Transformer (AdamW)
+            lr_trans = self.lr_scheduler["transformer"].update_lr(self.progress_in_iter + 1)
+            for param_group in self.optimizer["transformer"].param_groups:
+                param_group["lr"] = lr_trans
+                
+            # Log the primary (CNN) LR for the dashboard
+            self.meter.update(lr=lr_cnn)
+        else:
+            # Standard YOLOX
+            lr = self.lr_scheduler.update_lr(self.progress_in_iter + 1)
+            for param_group in self.optimizer.param_groups:
+                param_group["lr"] = lr
+            self.meter.update(lr=lr)
 
     def after_iter(self):
         """
@@ -275,7 +300,10 @@ class Trainer:
 
         # 2. Logging logic
         if (self.iter + 1) % self.exp.print_interval == 0:
-            curr_lr = self.optimizer.param_groups[0]['lr']
+            if isinstance(self.optimizer, dict):
+                curr_lr = self.optimizer["cnn"].param_groups[0]['lr']
+            else:
+                curr_lr = self.optimizer.param_groups[0]['lr']
             
             left_iters = self.max_iter - self.iter - 1
             avg_time = self.meter["iter_time"].global_avg if "iter_time" in self.meter else 0
@@ -347,7 +375,21 @@ class Trainer:
             ckpt = torch.load(ckpt_file, map_location=self.device)
             # resume the model/optimizer state dict
             model.load_state_dict(ckpt["model"])
-            self.optimizer.load_state_dict(ckpt["optimizer"])
+            if "optimizer" in ckpt:
+                if isinstance(self.optimizer, dict):
+                    # We are using Dual-Optimizers
+                    if isinstance(ckpt["optimizer"], dict) and "cnn" in ckpt["optimizer"]:
+                        # Resuming from a TDE-YOLOX checkpoint
+                        self.optimizer["cnn"].load_state_dict(ckpt["optimizer"]["cnn"])
+                        self.optimizer["transformer"].load_state_dict(ckpt["optimizer"]["transformer"])
+                        logger.info("Successfully loaded Dual-Optimizer states (SGD + AdamW).")
+                    else:
+                        # Resuming from official yolox_s.pth which only has one SGD optimizer
+                        self.optimizer["cnn"].load_state_dict(ckpt["optimizer"])
+                        logger.warning("Loaded standard SGD state into CNN. AdamW starts fresh (Expected for Epoch 0 transfer learning).")
+                else:
+                    # Standard YOLOX fallback
+                    self.optimizer.load_state_dict(ckpt["optimizer"])
             self.best_ap = ckpt.pop("best_ap", 0)
             # resume the training states variables
             start_epoch = (
@@ -428,10 +470,18 @@ class Trainer:
         if self.rank == 0:
             save_model = self.ema_model.ema if self.use_model_ema else self.model
             logger.info("Save weights to {}".format(self.file_name))
+            # Save Dual-Optimizer state if applicable
+            if isinstance(self.optimizer, dict):
+                opt_state = {
+                    "cnn": self.optimizer["cnn"].state_dict(),
+                    "transformer": self.optimizer["transformer"].state_dict()
+                }
+            else:
+                opt_state = self.optimizer.state_dict()
             ckpt_state = {
                 "start_epoch": self.epoch + 1,
                 "model": save_model.state_dict(),
-                "optimizer": self.optimizer.state_dict(),
+                "optimizer": opt_state,
                 "best_ap": self.best_ap,
                 "curr_ap": ap,
             }

@@ -29,11 +29,11 @@ class YOLOX(nn.Module):
         self.current_epoch = 0
         self.max_epochs = 80 
         
-        # Annealing Schedule 
-        self.warmup_end = 10
-        self.ramp_end = 60 # Extended ramp (was 50) - Slower increase
+        # --- TTT ANNEALING SCHEDULE ---
+        self.warmup_end = 30        # TTT stays at 0.1 until E30
+        self.ramp_end = 100         # Slow, stable ramp to 0.6
         self.prob_start = 0.1
-        self.prob_end = 0.5 # Lower cap (was 0.6) - Less noise injection
+        self.prob_end = 0.75
 
     def set_meta_training_state(self, epoch, max_epochs):
         """Called by Trainer at epoch start to drive the adaptation schedule."""
@@ -42,15 +42,17 @@ class YOLOX(nn.Module):
 
     def _get_ttt_probability(self):
         if not self.training:
-            return 1.0
+            return 1.0 # Always adapt at test time
             
-        if self.current_epoch < self.warmup_end:
-            return self.prob_start
+        if self.current_epoch < 30: # Use hardcoded or self.ttt_warmup_end
+            return 0.10
             
-        # Linear Ramp - NO GENTLE LANDING
-        # probability continues to climb to 0.7-0.8 at the end
-        progress = (self.current_epoch - self.warmup_end) / (self.max_epochs - self.warmup_end)
-        return self.prob_start + (0.7 - self.prob_start) * progress
+        if self.current_epoch >= 100: # Use self.ttt_ramp_end
+            return 0.75
+            
+        # Phase III: Linear Ramp (E30 to E100)
+        progress = (self.current_epoch - 30) / (100 - 30)
+        return 0.10 + (0.75 - 0.10) * progress
 
     def forward(self, x, targets=None):
         current_ttt_prob = self._get_ttt_probability()
@@ -87,29 +89,51 @@ class YOLOX(nn.Module):
 
     def _calculate_supervised_memory_loss(self, aux_mem_logits, cls_targets, fg_masks):
         """
-        The 'Holy Grail' Supervised Identity Loss.
-        Ensures the Memory retrieval queries are supervised by GT labels.
+        RE-EVALUATED FULL-FIDELITY IMPLEMENTATION.
+        
+        Objective: Supervised Contrastive Prototype Alignment (InfoNCE logic).
+        This forces the latent space to map noisy features to 'canonical' class prototypes.
         """
-        # aux_mem_logits: list of [B, HW, num_classes]
-        # cls_targets: [Total_FG_Pixels, num_classes] - The targets assigned by SimOTA
-        # fg_masks: [B, Total_Pixels] - Boolean mask of which pixels are objects
+        # 1. FLATTEN MULTI-SCALE LOGITS
+        # aux_mem_logits is a list of [B, HW_k, num_classes] from P3, P4, P5.
+        # We reshape to [B*HW_k, num_classes] and concatenate to [B*Total_HW, num_classes]
+        # This matches the YOLOX flattened anchor order.
+        all_logits = torch.cat([l.reshape(-1, self.num_classes) for l in aux_mem_logits], dim=0)
+
+        # 2. FLATTEN FOREGROUND MASK
+        # fg_masks shape: [B, Total_Anchors]. Flatten to [B * Total_Anchors].
+        flat_mask = fg_masks.view(-1)
+
+        # 3. EXTRACT FOREGROUND SAMPLES
+        # Extract the retrieval scores (similarity map) for pixels that actually contain objects.
+        # Shape: [num_foreground_pixels, num_classes]
+        fg_logits = all_logits[flat_mask]
+
+        # 4. NUMERICAL & LOGICAL SAFETY GUARD
+        # In batches with only background (common in BDD100K 'Undefined' scenes), 
+        # fg_logits will be empty. We return a zero loss with a gradient tether.
+        if fg_logits.shape[0] == 0:
+            return all_logits.sum() * 0.0
+
+        # 5. CONTRASTIVE SOFT-TARGET CROSS ENTROPY
+        # cls_targets is [num_foreground_pixels, num_classes] from SimOTA.
+        # It contains IoU-weighted labels (e.g., [0.92, 0, 0...] for a Car).
         
-        # 1. Flatten all scales into one long sequence
-        all_logits = torch.cat([l.view(-1, self.num_classes) for l in aux_mem_logits], dim=0)
+        # We use these as 'Soft Targets'. 
+        # This is more robust than 'argmax' because it weights the prototype 
+        # update by the detection confidence (IoU).
+        # High IoU Car -> Strong pull to Car Prototype.
+        # Low IoU Car -> Gentle pull to Car Prototype.
         
-        # 2. Extract retrieval scores for Foreground (Object) pixels only
-        # matches the dimension of cls_targets [num_fg, num_classes]
-        fg_logits = all_logits[fg_masks.view(-1)]
-        
-        # 3. Supervise via Binary Cross Entropy (matching YOLOX classification style)
-        if fg_logits.shape[0] > 0:
-            # use the same targets the main detector uses!
-            # ensures the Memory Bank and the Conv Head are perfectly synced.
-            mem_loss = F.binary_cross_entropy_with_logits(fg_logits, cls_targets)
-        else:
-            mem_loss = all_logits.sum() * 0.0 # Zero loss if no objects
-            
-        return mem_loss
+        # InfoNCE requires a valid probability distribution as target.
+        # We ensure the soft-labels sum to 1.0 across classes.
+        target_probs = F.normalize(cls_targets, p=1, dim=-1)
+
+        # CrossEntropy on normalized similarities is mathematically 
+        # identical to the InfoNCE Contrastive Loss used in SoTA models like CLIP/DINO.
+        contrastive_loss = F.cross_entropy(fg_logits, target_probs)
+
+        return contrastive_loss
 
     def visualize(self, x, targets, save_prefix="assign_vis_"):
         # Inference mode: Always run TTT (1.0 probability)
