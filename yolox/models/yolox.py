@@ -31,9 +31,9 @@ class YOLOX(nn.Module):
         
         # Annealing Schedule 
         self.warmup_end = 10
-        self.ramp_end = 50
+        self.ramp_end = 60 # Extended ramp (was 50) - Slower increase
         self.prob_start = 0.1
-        self.prob_end = 0.6  # Final TTT probability for robust OOD training
+        self.prob_end = 0.5 # Lower cap (was 0.6) - Less noise injection
 
     def set_meta_training_state(self, epoch, max_epochs):
         """Called by Trainer at epoch start to drive the adaptation schedule."""
@@ -70,7 +70,9 @@ class YOLOX(nn.Module):
                 aux_mem_logits, cls_targets, fg_masks
             )
             
-            total_loss = det_loss + (0.2 * memory_anchor_loss) # Boosted weight for anchor
+            # OLD: total_loss = det_loss + (0.2 * memory_anchor_loss) 
+            # NEW: Reduced weight to 0.05 (Let detection drive 95% of gradients)
+            total_loss = det_loss + (0.05 * memory_anchor_loss)
 
             return {
                 "total_loss": total_loss,
