@@ -226,12 +226,6 @@ class Trainer:
         Tell the TDE-YOLOX engine which epoch we are in.
         This drives the Saliency Annealing (the curriculum of the Holy Grail).
         """
-        # 1. Access the raw YOLOX model (unwrapping DDP if necessary)
-        model = self.model.module if hasattr(self.model, "module") else self.model
-        
-        # 2. Update the Meta-Learning Engine state
-        if hasattr(model, "set_meta_training_state"):
-            model.set_meta_training_state(self.epoch, self.max_epoch)
             
         # Standard YOLOX logic follows
         logger.info("---> start train epoch{}".format(self.epoch + 1))

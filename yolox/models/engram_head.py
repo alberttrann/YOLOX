@@ -43,16 +43,14 @@ class TDE_Head(YOLOXHead):
             B, C, H, W = cls_feat.shape
             
             # --- PATCH: SCHEDULED ADVERSARIAL WAKEUP ---
-            # Avoid noise in the very first epochs to allow base feature formation
             if self.training:
-                # Extract epoch progress from the model wrapper if available
+                # Use the epoch passed from yolox.py
                 epoch = getattr(self, "current_epoch", 0)
-                adv_scale = min(1.0, epoch / 20.0) if epoch > 3 else 0.0
+                # No noise for first 3 epochs; full noise by epoch 20
+                adv_scale = min(1.0, (epoch - 3) / 17.0) if epoch > 3 else 0.0
                 
                 if adv_scale > 0:
-                    # 1. Gradual Noise Injection
                     cls_feat = cls_feat + torch.randn_like(cls_feat) * (0.05 * adv_scale)
-                    # 2. Gradual Spatial Feature Dropout
                     f_mask = (torch.rand(B, 1, H, W, device=x.device) > (0.15 * adv_scale)).float()
                     cls_feat = cls_feat * f_mask
             

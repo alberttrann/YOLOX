@@ -111,7 +111,15 @@ class CSPDarknet(nn.Module):
         # Step 0: Input Stem
         x = self.stem(x)
         outputs["stem"] = x
+        # --- PATCH: PROPAGATE EPOCH TO TTT STAGES ---
+        # Assuming self.backbone is the CSPDarknet
+        epoch = getattr(self, "current_epoch", 0)
         
+        for name, stage in self.named_children():
+            if "dark" in name:
+                # If stage is wrapped in TTTAdaptiveStage
+                if hasattr(stage, "current_epoch"):
+                    stage.current_epoch = epoch
         # Step 1: ADAPTIVE FEATURE EXTRACTION (TTT)
         run_ttt = False
         

@@ -288,16 +288,17 @@ class UncertaintyEstimator(nn.Module):
     def __init__(self, dim):
         super().__init__()
         # dim = 128
-        self.classifier = nn.Sequential(
-            nn.Linear(dim, 32),
+        self.gate_fc = nn.Sequential(
+            nn.Linear(dim, dim // 4),
             nn.ReLU(),
-            nn.Linear(32, 1)
+            nn.Linear(dim // 4, 1),
+            nn.Sigmoid()
         )
-        # Keep the -5.0 bias fix to ensure the gate starts CLOSED
-        nn.init.constant_(self.classifier[2].bias, -5.0)
+        # Initialize bias to a high value (e.g., 2.0) so sigmoid(2.0) ~ 0.88
+        nn.init.constant_(self.gate_fc[-2].bias, 2.0)
 
     def forward(self, x):
         # x: [B, HW, 128]
         # We pass the full latent vector into the MLP.
         # This allows the model to learn complex 'identity confusion' patterns.
-        return torch.sigmoid(self.classifier(x)) # Returns [B, HW, 1]
+        return self.gate_fc(x) # [B, HW, 1]

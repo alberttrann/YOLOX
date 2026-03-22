@@ -136,57 +136,55 @@ class Exp(MyExp):
     
     def get_optimizer(self, batch_size):
         if "optimizer" not in self.__dict__:
+            # 1. Initialize parameter groups
+            pg_cnn_weights, pg_cnn_biases, pg_cnn_no_decay = [], [], []
+            pg_transformer = []
+            pg_meta = [] # For gates and ttt_lrs
+
+            for k, v in self.model.named_parameters():
+                if not v.requires_grad:
+                    continue
+                
+                # Group 1: Meta/Gating Parameters (High Priority)
+                if ".gate" in k or "ttt_lrs" in k:
+                    pg_meta.append(v)
+                
+                # Group 2: Transformer/Engram Components (AdamW)
+                elif any(x in k for x in ["global_mixer", "memory_banks", "uncertainty_gates", "latent_projectors", "ttt_projector", "lightning_indexer"]):
+                    pg_transformer.append(v)
+                
+                # Group 3: Standard CNN Components (SGD)
+                else:
+                    if len(v.shape) == 1 or k.endswith(".bias"):
+                        pg_cnn_biases.append(v)
+                    elif "bn" in k or "gn" in k:
+                        pg_cnn_no_decay.append(v)
+                    else:
+                        pg_cnn_weights.append(v)
+
             if self.warmup_epochs > 0:
                 lr = self.warmup_lr
             else:
                 lr = self.basic_lr_per_img * batch_size
 
-            # Group 1: CNN Parameters (SGD)
-            pg0_cnn, pg1_cnn, pg2_cnn = [], [], []  
-            
-            # Group 2: Transformer Parameters (AdamW)
-            pg_transformer = []
-
-            for k, v in self.model.named_modules():
-                # IDENTIFY TRANSFORMER & ENGRAM COMPONENTS
-                if "global_mixer" in k or "memory_banks" in k or "uncertainty_gates" in k or "latent_projectors" in k or "ttt_projector" in k or "lightning_indexer" in k:
-                    if hasattr(v, "weight") and isinstance(v.weight, nn.Parameter):
-                        pg_transformer.append(v.weight)
-                    if hasattr(v, "bias") and isinstance(v.bias, nn.Parameter):
-                        pg_transformer.append(v.bias)
-                    # Catch the orthogonal Engram bank if defined as a raw parameter
-                    if hasattr(v, "prototypes") and isinstance(v.prototypes, nn.Parameter):
-                        pg_transformer.append(v.prototypes)
-                    continue # Skip CNN grouping for these
-
-                # STANDARD CNN GROUPING
-                if hasattr(v, "bias") and isinstance(v.bias, nn.Parameter):
-                    pg2_cnn.append(v.bias)  # biases
-                if isinstance(v, (nn.BatchNorm2d, nn.GroupNorm, nn.LayerNorm)) or "bn" in k or "gn" in k:
-                    pg0_cnn.append(v.weight)  # no decay
-                elif hasattr(v, "weight") and isinstance(v.weight, nn.Parameter):
-                    pg1_cnn.append(v.weight)  # apply decay
-
-            # 1. Instantiate SGD for CNN
+            # 2. Setup SGD for CNN + Meta Gates
             optimizer_cnn = torch.optim.SGD(
-                pg0_cnn, lr=lr, momentum=self.momentum, nesterov=True
+                pg_cnn_no_decay, lr=lr, momentum=self.momentum, nesterov=True
             )
-            optimizer_cnn.add_param_group({"params": pg1_cnn, "weight_decay": self.weight_decay})
-            optimizer_cnn.add_param_group({"params": pg2_cnn})
+            optimizer_cnn.add_param_group({"params": pg_cnn_weights, "weight_decay": self.weight_decay})
+            optimizer_cnn.add_param_group({"params": pg_cnn_biases})
+            optimizer_cnn.add_param_group({"params": pg_meta, "weight_decay": 0.0}) # Don't decay gates
             
-            # 2. Instantiate AdamW for Transformers
-            # AdamW requires a lower learning rate to prevent exploding Softmax gradients
+            # 3. Setup AdamW for Transformers
             adam_lr = min(1e-3, lr * 0.1) 
             optimizer_transformer = torch.optim.AdamW(
                 pg_transformer, lr=adam_lr, weight_decay=0.05
             )
 
-            # Store both in a dictionary
             self.optimizer = {
                 "cnn": optimizer_cnn,
                 "transformer": optimizer_transformer
             }
-            # Cache the base LRs so the scheduler knows the peaks
             self.base_lrs = {"cnn": lr, "transformer": adam_lr}
 
         return self.optimizer

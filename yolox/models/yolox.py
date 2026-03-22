@@ -39,9 +39,13 @@ class YOLOX(nn.Module):
         """Called by Trainer at epoch start to drive the adaptation schedule."""
         self.current_epoch = epoch
         self.max_epochs = max_epochs
-        # --- PATCH: PASS STATE TO HEAD ---
+        
+        # --- PATCH: PASS STATE TO HEAD AND BACKBONE ---
         if hasattr(self.head, "current_epoch"):
             self.head.current_epoch = epoch
+            
+        if hasattr(self.backbone, "current_epoch"):
+            self.backbone.current_epoch = epoch
 
     def _get_ttt_probability(self):
         if not self.training:

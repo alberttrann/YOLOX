@@ -70,6 +70,18 @@ class YOLOPAFPN(nn.Module):
             int(in_channels[2] * width), 
             round(3 * depth), False, depthwise=depthwise, act=act
         )
+    
+    @property
+    def current_epoch(self):
+        return getattr(self.backbone, "current_epoch", 0)
+
+    @current_epoch.setter
+    def current_epoch(self, val):
+        if hasattr(self.backbone, "current_epoch"):
+            self.backbone.current_epoch = val
+        else:
+            # Fallback for manual assignment
+            setattr(self.backbone, "current_epoch", val)
 
     def forward(self, input, ttt_prob=0.0):
         """
