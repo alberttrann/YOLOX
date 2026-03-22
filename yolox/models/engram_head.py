@@ -53,19 +53,18 @@ class TDE_Head(YOLOXHead):
             cls_feat_flat = cls_feat.permute(0, 2, 3, 1).reshape(B, H*W, C)
             latent_vec = self.latent_projectors[k](cls_feat_flat)
             
+            # 1. Calculate Uncertainty (Now safely starts at ~0.006)
             uncertainty = self.uncertainty_gates[k](latent_vec)
             
-            # CRITICAL FIX: Detach obj_output so classification gradients 
-            # do not corrupt the objectness predictor.
-            obj_mask = torch.sigmoid(obj_output.detach().view(B, 1, -1).permute(0, 2, 1))
+            # 2. Retrieve Memory (Removed the buggy obj_mask)
+            memory_feat = self.memory_banks[k](latent_vec, uncertainty)
             
-            # Memory Retrieval (Calls EngramMemoryBank)
-            memory_feat = self.memory_banks[k](latent_vec, uncertainty, obj_mask)
-            
-            # Re-project memory back to feature dimension
+            # 3. Project back to feature space
             memory_inflated = F.linear(memory_feat, self.latent_projectors[k].weight.t())
             
-            # Step D: CONVEX SWITCH FUSION
+            # 4. Convex Switch Fusion
+            # At Epoch 1, gate_spatial ≈ 0.0, so restored_cls_feat ≈ cls_feat
+            # The model behaves exactly like Baseline YOLOX, preventing the 0.000 AP crash.
             gate_spatial = uncertainty.view(B, H, W, 1).permute(0, 3, 1, 2)
             restored_cls_feat = (1.0 - gate_spatial) * cls_feat + gate_spatial * memory_inflated.reshape(B, H, W, C).permute(0, 3, 1, 2)
             

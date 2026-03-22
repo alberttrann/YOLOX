@@ -255,54 +255,41 @@ class DeepSeekSparseAttention(nn.Module):
 #PHASE 3
 
 class EngramMemoryBank(nn.Module):
-    """
-    OPTIMAL VERSION: Contrastive Prototype Learning (CPL).
-    Ensures gradual, stable separation without gradient shattering.
-    """
     def __init__(self, num_classes, latent_dim=128):
         super().__init__()
         self.num_classes = num_classes
         self.latent_dim = latent_dim
-
-        self.temperature = 5.0 # Gentle temperature for stable gradients (No extreme sharpening)
-        
-        # The Prototypes (Learnable Anchors)
+        self.temperature = 5.0 
         self.prototype_layer = nn.Linear(latent_dim, num_classes, bias=False)
         nn.init.orthogonal_(self.prototype_layer.weight)
 
-    def forward(self, x_latent, uncertainty_gate, objectness_mask):
-        # 1. L2 Normalization (Crucial for stable cosine similarity)
+    # REMOVED objectness_mask argument
+    def forward(self, x_latent, uncertainty_gate): 
         x_norm = F.normalize(x_latent, p=2, dim=-1)
         p_norm = F.normalize(self.prototype_layer.weight, p=2, dim=-1)
         
-        # 2. Smooth Attention Lookup (No extreme temperature)
-        # We use a gentle temperature (e.g., 5.0) to keep gradients flowing
-        # Multiplied by saved temperature
         attn_scores = torch.matmul(x_norm, p_norm.t()) * self.temperature
         attn_weights = F.softmax(attn_scores, dim=-1)
         
-        # 3. Memory Retrieval
         memory_retrieved = torch.matmul(attn_weights, self.prototype_layer.weight)
         
-        restoration_mask = uncertainty_gate * objectness_mask
-        return memory_retrieved * restoration_mask
+        # Only gate by uncertainty
+        return memory_retrieved * uncertainty_gate
 
 class UncertaintyEstimator(nn.Module):
-    """
-    Expert Enhancement: 
-    Learns to predict uncertainty from the latent feature pattern itself.
-    """
     def __init__(self, dim):
         super().__init__()
-        # Input dim is 128 (latent_dim)
         self.classifier = nn.Sequential(
             nn.Linear(dim, 32),
             nn.ReLU(),
-            nn.Linear(32, 1),
-            nn.Sigmoid()
+            nn.Linear(32, 1)
         )
+        # CRITICAL FIX: Initialize the final bias to -5.0. 
+        # Sigmoid(-5.0) ≈ 0.006. 
+        # This guarantees the gate starts CLOSED, allowing the pre-trained Conv 
+        # features to flow perfectly uninterrupted in Epoch 1.
+        nn.init.constant_(self.classifier[2].bias, -5.0)
 
     def forward(self, x):
-        # x: [B, HW, 128]
-        # process each token's latent vector to get its uncertainty score
-        return self.classifier(x) # Returns [B, HW, 1]
+        entropy = torch.std(x, dim=-1, keepdim=True)
+        return torch.sigmoid(self.classifier(entropy))
