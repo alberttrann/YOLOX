@@ -15,13 +15,20 @@ def analyze_engram_memory(ckpt_path, epoch_label="97"):
     ckpt = torch.load(ckpt_path, map_location="cpu")
     state_dict = ckpt["model"]
     
-    # 2. Extract prototypes from the P4 scale (Middle scale, usually most stable)
-    # The key in state_dict follows the head.memory_banks structure
-    # Level 0 = P3, Level 1 = P4, Level 2 = P5
-    target_key = "head.memory_banks.1.prototypes" 
+    # 2. Robust Key Search
+    # Check for DDP prefix and look for any key containing 'memory_banks' and 'prototypes'
+    target_key = None
+    possible_keys = [k for k in state_dict.keys() if "memory_banks" in k and "prototypes" in k]
     
-    if target_key not in state_dict:
-        print(f"Error: Could not find {target_key} in checkpoint.")
+    # We want Level 1 (P4 scale). Level 0=P3, 1=P4, 2=P5.
+    for k in possible_keys:
+        if ".1." in k: 
+            target_key = k
+            break
+            
+    if target_key is None:
+        print("Error: Could not find memory prototypes. Available keys related to memory:")
+        print([k for k in state_dict.keys() if "memory" in k][:10], "... (truncated)")
         return
     
     prototypes = state_dict[target_key] # [9, 128]
