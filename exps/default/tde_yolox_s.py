@@ -146,7 +146,7 @@ class Exp(MyExp):
                     continue
                 
                 # Group 1: Meta/Gating Parameters (High Priority)
-                if ".gate" in k or "ttt_lrs" in k:
+                if "gate" in k or "ttt_lrs" in k:
                     pg_meta.append(v)
                 
                 # Group 2: Transformer/Engram Components (AdamW)
@@ -155,9 +155,9 @@ class Exp(MyExp):
                 
                 # Group 3: Standard CNN Components (SGD)
                 else:
-                    if len(v.shape) == 1 or k.endswith(".bias"):
+                    if k.endswith(".bias"):
                         pg_cnn_biases.append(v)
-                    elif "bn" in k or "gn" in k:
+                    elif k.endswith(".weight") and any(n in k for n in ["bn", "gn", "norm"]):
                         pg_cnn_no_decay.append(v)
                     else:
                         pg_cnn_weights.append(v)
@@ -168,12 +168,18 @@ class Exp(MyExp):
                 lr = self.basic_lr_per_img * batch_size
 
             # 2. Setup SGD for CNN + Meta Gates
+            # FIX: Pass pg_cnn_weights as the primary group. It is guaranteed to contain the Conv weights.
             optimizer_cnn = torch.optim.SGD(
-                pg_cnn_no_decay, lr=lr, momentum=self.momentum, nesterov=True
+                pg_cnn_weights, lr=lr, momentum=self.momentum, nesterov=True, weight_decay=self.weight_decay
             )
-            optimizer_cnn.add_param_group({"params": pg_cnn_weights, "weight_decay": self.weight_decay})
-            optimizer_cnn.add_param_group({"params": pg_cnn_biases})
-            optimizer_cnn.add_param_group({"params": pg_meta, "weight_decay": 0.0}) # Don't decay gates
+            
+            # Safely add other groups only if they contain parameters
+            if len(pg_cnn_no_decay) > 0:
+                optimizer_cnn.add_param_group({"params": pg_cnn_no_decay, "weight_decay": 0.0})
+            if len(pg_cnn_biases) > 0:
+                optimizer_cnn.add_param_group({"params": pg_cnn_biases, "weight_decay": 0.0})
+            if len(pg_meta) > 0:
+                optimizer_cnn.add_param_group({"params": pg_meta, "weight_decay": 0.0}) 
             
             # 3. Setup AdamW for Transformers
             adam_lr = min(1e-3, lr * 0.1) 

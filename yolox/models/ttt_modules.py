@@ -295,7 +295,8 @@ class UncertaintyEstimator(nn.Module):
             nn.Sigmoid()
         )
         # Initialize bias to a high value (e.g., 2.0) so sigmoid(2.0) ~ 0.88
-        nn.init.constant_(self.gate_fc[-2].bias, 2.0)
+        # Initialize bias to -2.0 (Mildly Closed, strong gradient)
+        nn.init.constant_(self.gate_fc[2].bias, -2.0)
 
     def forward(self, x):
         # x: [B, HW, 128]
