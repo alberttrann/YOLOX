@@ -39,6 +39,9 @@ class YOLOX(nn.Module):
         """Called by Trainer at epoch start to drive the adaptation schedule."""
         self.current_epoch = epoch
         self.max_epochs = max_epochs
+        # --- PATCH: PASS STATE TO HEAD ---
+        if hasattr(self.head, "current_epoch"):
+            self.head.current_epoch = epoch
 
     def _get_ttt_probability(self):
         if not self.training:
@@ -72,7 +75,8 @@ class YOLOX(nn.Module):
             
             # OLD: total_loss = det_loss + (0.2 * memory_anchor_loss) 
             # NEW: Reduced weight to 0.05 (Let detection drive 95% of gradients)
-            total_loss = det_loss + (0.05 * memory_anchor_loss)
+            # Increased weight slightly for faster prototype clustering
+            total_loss = det_loss + (0.10 * memory_anchor_loss)
 
             return {
                 "total_loss": total_loss,

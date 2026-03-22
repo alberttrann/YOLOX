@@ -42,13 +42,19 @@ class TDE_Head(YOLOXHead):
             cls_feat = cls_conv(x)
             B, C, H, W = cls_feat.shape
             
-            # Adversarial Training (Forces Memory Wakeup)
+            # --- PATCH: SCHEDULED ADVERSARIAL WAKEUP ---
+            # Avoid noise in the very first epochs to allow base feature formation
             if self.training:
-                # 1. Noise Injection
-                cls_feat = cls_feat + torch.randn_like(cls_feat) * 0.05
-                # 2. Spatial Feature Dropout (forces model to 'Remember' hidden parts)
-                f_mask = (torch.rand(B, 1, H, W, device=x.device) > 0.15).float()
-                cls_feat = cls_feat * f_mask
+                # Extract epoch progress from the model wrapper if available
+                epoch = getattr(self, "current_epoch", 0)
+                adv_scale = min(1.0, epoch / 20.0) if epoch > 3 else 0.0
+                
+                if adv_scale > 0:
+                    # 1. Gradual Noise Injection
+                    cls_feat = cls_feat + torch.randn_like(cls_feat) * (0.05 * adv_scale)
+                    # 2. Gradual Spatial Feature Dropout
+                    f_mask = (torch.rand(B, 1, H, W, device=x.device) > (0.15 * adv_scale)).float()
+                    cls_feat = cls_feat * f_mask
             
             cls_feat_flat = cls_feat.permute(0, 2, 3, 1).reshape(B, H*W, C)
             # Step A: Latent Projection

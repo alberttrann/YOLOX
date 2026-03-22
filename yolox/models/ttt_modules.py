@@ -115,7 +115,11 @@ class TTTAdaptiveStage(nn.Module):
                 feat_initial = self.backbone_stage(x_curr)
                 clean_target = feat_initial.detach()
                 mask = self._get_robust_variance_mask(clean_target)
-                noise_map = torch.randn_like(clean_target) * self.noise_std
+                
+                # --- PATCH: CURRICULUM NOISE ---
+                epoch = getattr(self, "current_epoch", 10) # Default to 10 if not found
+                curr_noise = self.noise_std * min(1.0, epoch / 10.0)
+                noise_map = torch.randn_like(clean_target) * curr_noise
 
             # --- CORE FUNCTIONAL TTT STEP ---
             def inner_grad_fn(p_adapt_b, p_adapt_p):
