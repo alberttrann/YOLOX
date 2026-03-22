@@ -51,12 +51,14 @@ class TDE_Head(YOLOXHead):
                 cls_feat = cls_feat * f_mask
             
             cls_feat_flat = cls_feat.permute(0, 2, 3, 1).reshape(B, H*W, C)
-            latent_vec = self.latent_projectors[k](cls_feat_flat)
+            # Step A: Latent Projection
+            latent_vec = self.latent_projectors[k](cls_feat_flat) # [B, HW, 128]
             
-            # 1. Calculate Uncertainty (Now safely starts at ~0.006)
-            uncertainty = self.uncertainty_gates[k](latent_vec)
+            # Step B: Calculate Uncertainty 
+            # Passing the full [B, HW, 128] vector to the estimator
+            uncertainty = self.uncertainty_gates[k](latent_vec) # [B, HW, 1]
             
-            # 2. Retrieve Memory (Removed the buggy obj_mask)
+            # Step C: Retrieve Memory
             memory_feat = self.memory_banks[k](latent_vec, uncertainty)
             
             # 3. Project back to feature space

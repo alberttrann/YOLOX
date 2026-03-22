@@ -277,19 +277,23 @@ class EngramMemoryBank(nn.Module):
         return memory_retrieved * uncertainty_gate
 
 class UncertaintyEstimator(nn.Module):
+    """
+    NUCLEAR VERSION: Full-Pattern Uncertainty Estimation.
+    Learns to detect OOD features by analyzing the 128D latent distribution.
+    """
     def __init__(self, dim):
         super().__init__()
+        # dim = 128
         self.classifier = nn.Sequential(
             nn.Linear(dim, 32),
             nn.ReLU(),
             nn.Linear(32, 1)
         )
-        # CRITICAL FIX: Initialize the final bias to -5.0. 
-        # Sigmoid(-5.0) ≈ 0.006. 
-        # This guarantees the gate starts CLOSED, allowing the pre-trained Conv 
-        # features to flow perfectly uninterrupted in Epoch 1.
+        # Keep the -5.0 bias fix to ensure the gate starts CLOSED
         nn.init.constant_(self.classifier[2].bias, -5.0)
 
     def forward(self, x):
-        entropy = torch.std(x, dim=-1, keepdim=True)
-        return torch.sigmoid(self.classifier(entropy))
+        # x: [B, HW, 128]
+        # We pass the full latent vector into the MLP.
+        # This allows the model to learn complex 'identity confusion' patterns.
+        return torch.sigmoid(self.classifier(x)) # Returns [B, HW, 1]
