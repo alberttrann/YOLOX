@@ -3,7 +3,34 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.func import functional_call, grad
 import contextlib
+from collections import OrderedDict
 
+@contextlib.contextmanager
+def suspend_hooks(module):
+    """
+    EXPERT FIX: Temporarily suspends all forward hooks.
+    Prevents profiling libraries (like `thop` or `fvcore`) from triggering 
+    in-place tensor mutations (e.g., m.total_ops += 1) during torch.func.grad,
+    which strictly forbids in-place operations to maintain functional purity.
+    """
+    hooks_backup = {}
+    pre_hooks_backup = {}
+    for name, m in module.named_modules():
+        if m._forward_hooks:
+            hooks_backup[name] = m._forward_hooks
+            m._forward_hooks = OrderedDict()
+        if hasattr(m, '_forward_pre_hooks') and m._forward_pre_hooks:
+            pre_hooks_backup[name] = m._forward_pre_hooks
+            m._forward_pre_hooks = OrderedDict()
+    try:
+        yield
+    finally:
+        # Restore all hooks flawlessly
+        for name, m in module.named_modules():
+            if name in hooks_backup:
+                m._forward_hooks = hooks_backup[name]
+            if name in pre_hooks_backup:
+                m._forward_pre_hooks = pre_hooks_backup[name]
 class GRN(nn.Module):
     """Global Response Normalization: Essential for preventing feature collapse."""
     def __init__(self, dim):
@@ -48,7 +75,7 @@ class TTTAdaptiveStage(nn.Module):
                 # Meta-LR is now significantly more aggressive (0.08)
                 self.ttt_lrs[name.replace('.', '_')] = nn.Parameter(torch.tensor(init_ttt_lr))
 
-    def _get_robust_variance_mask(self, feat, ratio=0.85): # Extreme 85% Mask
+    def _get_robust_variance_mask(self, feat, ratio=0.65): # Adjusted to 0.65 to prevent complete blackout in dense fog
         B, C, H, W = feat.shape
         var = torch.var(feat, dim=1, keepdim=True)
         v_fusion = F.avg_pool2d(var, 4, stride=4) # Fine-grained focus
@@ -70,8 +97,8 @@ class TTTAdaptiveStage(nn.Module):
             return self.backbone_stage(x_in)
 
         input_dtype = x_in.dtype
-
         is_inference_mode = (not torch.is_grad_enabled())
+        
         if is_inference_mode:
             x_curr = x_in.detach()
             x_curr.requires_grad = True
@@ -80,17 +107,9 @@ class TTTAdaptiveStage(nn.Module):
             x_curr = x_in
             context_manager = contextlib.nullcontext()
 
-        # --- THE PROFILER FIX ---
-        # We extract parameters, deliberately ignoring injected hook attributes
-        # like 'total_ops' or 'total_params' that thop/fvcore add.
-        all_params = {}
-        for name, p in self.backbone_stage.named_parameters():
-             all_params[name] = p
-             
-        all_buffers = {}
-        for name, b in self.backbone_stage.named_buffers():
-             all_buffers[name] = b
-
+        # --- CAPTURE STATE ---
+        all_params = dict(self.backbone_stage.named_parameters())
+        all_buffers = dict(self.backbone_stage.named_buffers())
         proj_params = dict(self.projector.named_parameters())
 
         adapt_backbone = {k: v for k, v in all_params.items() 
@@ -104,21 +123,23 @@ class TTTAdaptiveStage(nn.Module):
         self.projector.eval()
 
         with context_manager:
+            if not x_curr.is_floating_point():
+                return self.backbone_stage(x_in)
+
             with torch.no_grad():
-                # For the initial forward pass, we use the standard module 
-                # (which is safe even if hooks are present)
                 feat_initial = self.backbone_stage(x_curr)
                 clean_target = feat_initial.detach()
-                
-                # Fog Fix: Lower ratio to 0.65 to ensure it doesn't mask the whole image in dense fog
-                mask = self._get_robust_variance_mask(clean_target, ratio=0.65) 
+                mask = self._get_robust_variance_mask(clean_target)
                 noise_map = torch.randn_like(clean_target) * self.noise_std
 
             def inner_grad_fn(p_adapt_b, p_adapt_p):
                 full_backbone = {**p_adapt_b, **fixed_backbone_state}
                 return self.inner_loss_fn(full_backbone, p_adapt_p, x_curr, mask, noise_map, clean_target)
 
-            grads_backbone = grad(inner_grad_fn, argnums=0)(adapt_backbone, proj_params)
+            # --- THE HOOK SUSPENSION FIX ---
+            # Prevents thop/fvcore from crashing the functional trace via in-place operations
+            with suspend_hooks(self.backbone_stage), suspend_hooks(self.projector):
+                grads_backbone = grad(inner_grad_fn, argnums=0)(adapt_backbone, proj_params)
             
             updated_backbone_params = {**all_params, **all_buffers}
             for name, g in grads_backbone.items():
@@ -130,8 +151,8 @@ class TTTAdaptiveStage(nn.Module):
             self.backbone_stage.train()
             self.projector.train()
 
-        # The functional_call is now safe because updated_backbone_params 
-        # only contains pure PyTorch Tensors, stripped of any hook objects.
+        # --- FINAL ADAPTED FORWARD ---
+        # The hooks are restored! thop will now successfully count the FLOPs of this pass.
         if self.training:
             out = functional_call(self.backbone_stage, updated_backbone_params, x_curr)
         else:
