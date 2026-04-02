@@ -17,7 +17,7 @@ class Exp(MyExp):
         # --- TDE-YOLOX RESEARCH CONFIG ---
         self.num_classes = 9       # BDD Detection categories
         self.init_ttt_lr = 0.02    # Aggressive start for Norm adaptation
-        self.ttt_noise_std = 0.08  # Hard contrastive denoising task
+        self.ttt_noise_std = 0.1  # Harder contrastive denoising task
         
         self.data_dir = "D:/YOLOX-3RD/bdd100k/bdd100k/bdd100k/images"
         self.train_ann = "D:/YOLOX-3RD/bdd100k/bdd100k/bdd100k/images/annotations/tde_train_coco.json"

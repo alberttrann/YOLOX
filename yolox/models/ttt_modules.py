@@ -66,23 +66,11 @@ class TTTAdaptiveStage(nn.Module):
         return F.mse_loss(rec, clean_target)
 
     def forward(self, x_in, run_ttt=True):
-        # --- PROFILER BYPASS (Fixes thop collision) ---
-        # 1. Check if we are in a 'thop' profiling context (Total Ops tracking)
-        # 2. Check if we are in a 'fvcore' or other common profiler context
-        is_profiling = False
-        for m in self.backbone_stage.modules():
-            if hasattr(m, 'total_ops') or hasattr(m, 'total_params'):
-                is_profiling = True
-                break
-        
-        if is_profiling or not run_ttt:
+        if not run_ttt:
             return self.backbone_stage(x_in)
 
-        # Capture precision to prevent DType Mismatch in Neck
         input_dtype = x_in.dtype
 
-        # --- SETUP GRADIENT CONTEXT ---
-        # TTT during inference often runs in no_grad mode. must force grad enablement.
         is_inference_mode = (not torch.is_grad_enabled())
         if is_inference_mode:
             x_curr = x_in.detach()
@@ -92,55 +80,58 @@ class TTTAdaptiveStage(nn.Module):
             x_curr = x_in
             context_manager = contextlib.nullcontext()
 
-        # --- CAPTURE & PARTITION STATE ---
-        backbone_params = dict(self.backbone_stage.named_parameters())
-        backbone_buffers = dict(self.backbone_stage.named_buffers())
+        # --- THE PROFILER FIX ---
+        # We extract parameters, deliberately ignoring injected hook attributes
+        # like 'total_ops' or 'total_params' that thop/fvcore add.
+        all_params = {}
+        for name, p in self.backbone_stage.named_parameters():
+             all_params[name] = p
+             
+        all_buffers = {}
+        for name, b in self.backbone_stage.named_buffers():
+             all_buffers[name] = b
+
         proj_params = dict(self.projector.named_parameters())
 
-        # Isolate adaptable Norm parameters (GroupNorm has no buffers)
-        adapt_backbone = {k: v for k, v in backbone_params.items() 
+        adapt_backbone = {k: v for k, v in all_params.items() 
                          if ('gn' in k or 'norm' in k) and v.is_floating_point()}
-        static_backbone_state = {k: v for k, v in backbone_params.items() 
+        static_backbone_state = {k: v for k, v in all_params.items() 
                                 if k not in adapt_backbone}
         
-        fixed_backbone_state = {**static_backbone_state, **backbone_buffers}
+        fixed_backbone_state = {**static_backbone_state, **all_buffers}
 
-        # Force Eval mode for the inner loop to prevent batch stat updates
         self.backbone_stage.eval()
         self.projector.eval()
 
         with context_manager:
-            # Generate Adaptation Targets
             with torch.no_grad():
+                # For the initial forward pass, we use the standard module 
+                # (which is safe even if hooks are present)
                 feat_initial = self.backbone_stage(x_curr)
                 clean_target = feat_initial.detach()
-                mask = self._get_robust_variance_mask(clean_target)
+                
+                # Fog Fix: Lower ratio to 0.65 to ensure it doesn't mask the whole image in dense fog
+                mask = self._get_robust_variance_mask(clean_target, ratio=0.65) 
                 noise_map = torch.randn_like(clean_target) * self.noise_std
 
-            # --- CORE FUNCTIONAL TTT STEP ---
             def inner_grad_fn(p_adapt_b, p_adapt_p):
                 full_backbone = {**p_adapt_b, **fixed_backbone_state}
                 return self.inner_loss_fn(full_backbone, p_adapt_p, x_curr, mask, noise_map, clean_target)
 
-            # Compute d_Loss / d_BackboneNorms
-            # Note: also pass proj_params to grad to allow joint optimization
             grads_backbone = grad(inner_grad_fn, argnums=0)(adapt_backbone, proj_params)
             
-            # --- CONSTRUCT ADAPTED WEIGHT SPACE ---
-            updated_backbone_params = {**backbone_params, **backbone_buffers}
+            updated_backbone_params = {**all_params, **all_buffers}
             for name, g in grads_backbone.items():
                 lr_key = name.replace('.', '_')
                 lr = self.ttt_lrs[lr_key]
-                # Cast grad to param type for safe functional update
                 updated_backbone_params[name] = updated_backbone_params[name] - lr * g.to(updated_backbone_params[name].dtype)
 
-        # --- RESTORE TRAINING STATE ---
         if self.training:
             self.backbone_stage.train()
             self.projector.train()
 
-        # --- FINAL ADAPTED FORWARD ---
-        # uses the 'updated_backbone_params' dict locally for this image only
+        # The functional_call is now safe because updated_backbone_params 
+        # only contains pure PyTorch Tensors, stripped of any hook objects.
         if self.training:
             out = functional_call(self.backbone_stage, updated_backbone_params, x_curr)
         else:

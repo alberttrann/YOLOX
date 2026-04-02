@@ -115,3 +115,13 @@ class YOLOX(nn.Module):
         # Inference mode: Always run TTT (1.0 probability)
         fpn_outs = self.backbone(x, ttt_prob=1.0)
         self.head.visualize_assign_result(fpn_outs, targets, x, save_prefix)
+    def get_engram_prototypes(self):
+        """
+        Returns the latent prototypes for each class across the 3 FPN scales.
+        Useful for t-SNE visualization to prove class separation.
+        """
+        prototypes = []
+        for memory_bank in self.head.memory_banks:
+            # Shape: [num_classes, latent_dim]
+            prototypes.append(memory_bank.prototypes.detach().cpu().numpy())
+        return prototypes
