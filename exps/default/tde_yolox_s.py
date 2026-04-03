@@ -141,45 +141,29 @@ class Exp(MyExp):
             else:
                 lr = self.basic_lr_per_img * batch_size
 
-            pg_no_decay = []      # Biases and Norms (No Weight Decay)
-            pg_decay_head = []    # New components (Full LR, Weight Decay)
-            pg_decay_backbone = [] # Pre-trained components (Half LR, Weight Decay)
+            pg0, pg1, pg2 = [], [], []  # optimizer parameter groups
 
             for k, v in self.model.named_modules():
-                # 1. NO DECAY GROUP: Biases and all Normalization layers
                 if hasattr(v, "bias") and isinstance(v.bias, nn.Parameter):
-                    pg_no_decay.append(v.bias)
+                    pg2.append(v.bias)  # biases (no weight decay)
                 
-                # Exclude ALL Norms (BatchNorm, GroupNorm, GRN, LayerNorm) from WD
+                # --- CRITICAL FIX: Protect TTT Norms from Weight Decay ---
+                # Excludes BatchNorm, GroupNorm, LayerNorm, and our new GRN
                 if isinstance(v, (nn.BatchNorm2d, nn.GroupNorm, nn.LayerNorm)) or "bn" in k or "norm" in k or "GRN" in v.__class__.__name__:
                     if hasattr(v, "weight") and isinstance(v.weight, nn.Parameter):
-                        pg_no_decay.append(v.weight)
-                        
-                # 2. DECAY GROUPS: Convolutions, Linear layers, Attention weights
+                        pg0.append(v.weight)  # no weight decay
+                
                 elif hasattr(v, "weight") and isinstance(v.weight, nn.Parameter):
-                    # LLRD Logic: Check if parameter is in the backbone
-                    if "backbone.backbone" in k: 
-                        # This targets CSPDarknet inside YOLOPAFPN
-                        pg_decay_backbone.append(v.weight)
-                    else:
-                        # This targets Tribrid Neck, Engram Head, and TTT Projector
-                        pg_decay_head.append(v.weight)
+                    pg1.append(v.weight)  # apply weight decay
 
-            # Initialize SGD
             optimizer = torch.optim.SGD(
-                pg_no_decay, lr=lr, momentum=self.momentum, nesterov=True
+                pg0, lr=lr, momentum=self.momentum, nesterov=True
             )
-            
-            # Group 1: New Components (Full LR, standard WD)
             optimizer.add_param_group(
-                {"params": pg_decay_head, "weight_decay": self.weight_decay}
+                {"params": pg1, "weight_decay": self.weight_decay}
             )
+            optimizer.add_param_group({"params": pg2})
             
-            # Group 2: Backbone Components (LLRD: 50% LR, standard WD)
-            optimizer.add_param_group(
-                {"params": pg_decay_backbone, "weight_decay": self.weight_decay, "lr": lr * 0.5}
-            )
-
             self.optimizer = optimizer
 
         return self.optimizer
