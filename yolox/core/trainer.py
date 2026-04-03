@@ -111,6 +111,12 @@ class Trainer:
 
         self.optimizer.zero_grad()
         self.scaler.scale(loss).backward()
+        # --- Gradient Clipping ---
+        # Unscale the gradients before clipping (required for AMP)
+        self.scaler.unscale_(self.optimizer)
+        # Clip max norm to 5.0 to prevent Meta-Learning explosion
+        torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=5.0)
+        # ----------------------------------------------
         self.scaler.step(self.optimizer)
         self.scaler.update()
 
@@ -264,7 +270,7 @@ class Trainer:
         """
         # Unified Metric Unpacking 
         for k, v in self.outputs.items():
-            if k in ["total_loss", "iou_loss", "l1_loss", "conf_loss", "cls_loss", "mem_loss", "ttt_prob"]:
+            if k in ["total_loss", "iou_loss", "l1_loss", "conf_loss", "cls_loss", "mem_loss", "ttt_prob", "proto_loss"]:
                 if torch.is_tensor(v):
                     val = v.detach().cpu().item()
                 else:

@@ -5,10 +5,10 @@ import matplotlib.pyplot as plt
 import os
 
 # --- CONFIGURATION ---
-CKPT_PATH = "./YOLOX_outputs/tde_yolox_s/epoch_97_ckpt.pth"
+CKPT_PATH = "./YOLOX_outputs/tde_yolox_s/epoch_2_ckpt.pth"
 CLASS_NAMES = ["car", "bus", "truck", "person", "rider", "bike", "motor", "traffic light", "traffic sign"]
 
-def analyze_engram_memory(ckpt_path, epoch_label="97"):
+def analyze_engram_memory(ckpt_path, epoch_label="2"):
     print(f"--- Analyzing Engram Prototypes from Epoch {epoch_label} ---")
     
     # 1. Load the checkpoint
@@ -62,6 +62,6 @@ def analyze_engram_memory(ckpt_path, epoch_label="97"):
 
 if __name__ == "__main__":
     if os.path.exists(CKPT_PATH):
-        analyze_engram_memory(CKPT_PATH, "97")
+        analyze_engram_memory(CKPT_PATH, "2")
     else:
         print(f"Missing checkpoint at {CKPT_PATH}")

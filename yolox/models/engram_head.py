@@ -103,7 +103,23 @@ class TDE_Head(YOLOXHead):
             total_loss, iou_loss, conf_loss, cls_loss, l1_loss, num_fg, cls_targets, fg_masks = self.get_losses_with_targets(
                 imgs, x_shifts, y_shifts, expanded_strides, labels, torch.cat(outputs, 1), origin_preds, dtype=xin[0].dtype
             )
-            return total_loss, iou_loss, conf_loss, cls_loss, l1_loss, num_fg, aux_memory_logits_list, cls_targets, fg_masks
+            # --- NEW: ENGRAM SEPARATION METRIC ---
+            # Calculate how distinct the prototypes are from each other
+            proto_sim_sum = 0.0
+            for bank in self.memory_banks:
+                # Normalize prototypes
+                p_norm = F.normalize(bank.prototypes, p=2, dim=-1)
+                # Cosine similarity matrix [num_classes, num_classes]
+                sim_matrix = torch.matmul(p_norm, p_norm.t())
+                # Get mean similarity of off-diagonal elements (different classes)
+                mask = ~torch.eye(self.num_classes, dtype=torch.bool, device=sim_matrix.device)
+                mean_off_diag_sim = sim_matrix[mask].mean()
+                proto_sim_sum += mean_off_diag_sim
+                
+            avg_proto_sim = proto_sim_sum / len(self.memory_banks)
+
+            # Add it to the return tuple
+            return total_loss, iou_loss, conf_loss, cls_loss, l1_loss, num_fg, aux_memory_logits_list, cls_targets, fg_masks, avg_proto_sim
         else:
             self.hw = [x.shape[-2:] for x in outputs]
             outputs = torch.cat([x.flatten(start_dim=2) for x in outputs], dim=2).permute(0, 2, 1)

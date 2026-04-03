@@ -59,7 +59,7 @@ class YOLOX(nn.Module):
         if self.training:
             # Head now returns detection metrics + memory scores + ground truth targets
             (det_loss, iou_l, conf_l, cls_l, l1_l, num_fg, 
-             aux_mem_logits, cls_targets, fg_masks) = self.head(fpn_outs, targets, x)
+             aux_mem_logits, cls_targets, fg_masks, proto_loss) = self.head(fpn_outs, targets, x)
             
             # --- SUPERVISED IDENTITY ANCHORING ---
             # align the Memory Retrieval scores directly with Ground Truth.
@@ -79,6 +79,7 @@ class YOLOX(nn.Module):
                 "conf_loss": conf_l,
                 "cls_loss": cls_l,
                 "mem_loss": memory_anchor_loss,
+                "proto_loss": proto_loss,
                 "num_fg": num_fg,
                 "ttt_prob": current_ttt_prob 
             }

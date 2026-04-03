@@ -17,10 +17,14 @@ class Exp(MyExp):
         self.ttt_lr = 0.005        
         self.ttt_noise_std = 0.05  
         
-        # --- DATASET OVERRIDES ---
-        self.data_dir = r"D:\DAWN\images"
-        self.val_ann = r"D:\YOLOX-3RD\dawn_bdd_compatible.json"
-        self.test_ann = r"D:\YOLOX-3RD\dawn_bdd_compatible.json"
+        # 1. POINT TO THE DAWN ROOT
+        # Because the JSON file_names are 'Fog/Fog/001.jpg', 
+        # YOLOX will look for D:\DAWN\Fog\Fog\001.jpg
+        self.data_dir = r"D:\DAWN" 
+        
+        # 2. POINT TO YOUR GENERATED JSON
+        self.val_ann = r"D:\DAWN\dawn_adverse_coco.json"
+        self.test_ann = r"D:\DAWN\dawn_adverse_coco.json"
         self.test_size = (640, 640) # STRICT CONSISTENCY
         self.input_size = (640, 640)
         
