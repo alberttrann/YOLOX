@@ -33,7 +33,7 @@ class YOLOX(nn.Module):
         self.warmup_end = 10
         self.ramp_end = 60 # Extended ramp (was 50) - Slower increase
         self.prob_start = 0.1
-        self.prob_end = 0.5 # Lower cap (was 0.6) - Less noise injection
+        self.prob_end = 0.6 # noise injection
 
     def set_meta_training_state(self, epoch, max_epochs):
         """Called by Trainer at epoch start to drive the adaptation schedule."""
@@ -41,16 +41,25 @@ class YOLOX(nn.Module):
         self.max_epochs = max_epochs
 
     def _get_ttt_probability(self):
+        """
+        Unified Meta-Learning Scheduler.
+        Respects __init__ variables to allow external control.
+        """
+        # Rule 1: Inference always uses 100% adaptation (TTT)
         if not self.training:
             return 1.0
             
+        # Rule 2: Warmup Phase (Fixed low probability for stability)
         if self.current_epoch < self.warmup_end:
             return self.prob_start
             
-        # Linear Ramp - NO GENTLE LANDING
-        # probability continues to climb to 0.7-0.8 at the end
-        progress = (self.current_epoch - self.warmup_end) / (self.max_epochs - self.warmup_end)
-        return self.prob_start + (0.7 - self.prob_start) * progress
+        # Rule 3: Post-Ramp Phase (Stay at the defined limit)
+        if self.current_epoch >= self.ramp_end:
+            return self.prob_end
+            
+        # Rule 4: The Linear Ramp (Dynamic Complexity Scaling)
+        progress = (self.current_epoch - self.warmup_end) / (self.ramp_end - self.warmup_end)
+        return self.prob_start + (self.prob_end - self.prob_start) * progress
 
     def forward(self, x, targets=None):
         current_ttt_prob = self._get_ttt_probability()
