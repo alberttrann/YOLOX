@@ -77,9 +77,8 @@ class YOLOX(nn.Module):
                 aux_mem_logits, cls_targets, fg_masks
             )
             
-            # OLD: total_loss = det_loss + (0.2 * memory_anchor_loss) 
-            # NEW: Reduced weight to 0.05 (Let detection drive 95% of gradients)
-            total_loss = det_loss + (0.05 * memory_anchor_loss)
+            # We use 0.2 weight for memory loss to ensure strong prototype separation
+            total_loss = det_loss + (0.2 * memory_anchor_loss)
 
             return {
                 "total_loss": total_loss,

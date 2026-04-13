@@ -59,27 +59,32 @@ class TDE_Head(YOLOXHead):
             
             # Step C: Retrieve Clean Identity from Memory
             memory_feat = self.memory_banks[k](latent_vec, uncertainty, obj_mask)
-            
-            # Step D: CONVEX SWITCH FUSION (The Nuclear Move)
-            # Force the model to choose between noisy observation and clean memory
-            # restored_feat = (1 - Gate) * Observed + (Gate) * Memory
             memory_inflated = F.linear(memory_feat, self.latent_projectors[k].weight.t())
             
-            # Use the uncertainty gate as a hard convex mixer
-            # Reshape gate to [B, HW, 1] -> [B, H, W, 1] -> [B, 1, H, W]
-            gate_spatial = uncertainty.view(B, H, W, 1).permute(0, 3, 1, 2)
+            # --- EXPERT FIX 1: Detached Magnitude Matching ---
+            # Measure L2 norms across the channel dimension
+            norm_conv = torch.norm(cls_feat_flat, p=2, dim=-1, keepdim=True)
+            norm_mem = torch.norm(memory_inflated, p=2, dim=-1, keepdim=True)
             
-            # COMBINATION:
-            # When gate is high (uncertain), the noisy cls_feat is suppressed 
-            # and replaced by the 'perfect' memory identity.
-            restored_cls_feat = (1.0 - gate_spatial) * cls_feat + gate_spatial * memory_inflated.reshape(B, H, W, C).permute(0, 3, 1, 2)
+            # Scale memory to match Conv energy. DETACH norm_conv to prevent gradient entanglement.
+            memory_scaled = memory_inflated * (norm_conv.detach() / (norm_mem + 1e-6))
+            
+            # Step D: Convex Switch Fusion
+            gate_spatial = uncertainty.view(B, H, W, 1).permute(0, 3, 1, 2)
+            restored_cls_feat = (1.0 - gate_spatial) * cls_feat + gate_spatial * memory_scaled.reshape(B, H, W, C).permute(0, 3, 1, 2)
             
             cls_output = self.cls_preds[k](restored_cls_feat)
 
-            # Record retrieval scores for supervision
-            # scores = similarity between query vector and all class prototypes
-            retrieval_scores = torch.matmul(latent_vec, self.memory_banks[k].prototypes.t())
-            aux_memory_logits_list.append(retrieval_scores)
+            # --- EXPERT FIX 2: Scaled Logits for BCE Loss ---
+            if self.training:
+                # Calculate pure cosine similarity [-1, 1]
+                cos_sim = torch.matmul(
+                    F.normalize(latent_vec, p=2, dim=-1), 
+                    F.normalize(self.memory_banks[k].prototypes, p=2, dim=-1).t()
+                )
+                # Scale by 15.0 so logits span [-15, 15]. 
+                # This allows BCEWithLogitsLoss to function correctly and generate gradients!
+                aux_memory_logits_list.append(cos_sim * 15.0)
 
             # --- YOLOX Standard Logic ---
             if self.training:
@@ -116,10 +121,10 @@ class TDE_Head(YOLOXHead):
                 mean_off_diag_sim = sim_matrix[mask].mean()
                 proto_sim_sum += mean_off_diag_sim
                 
-            avg_proto_sim = proto_sim_sum / len(self.memory_banks)
+            proto_loss = proto_sim_sum / len(self.memory_banks)
 
             # Add it to the return tuple
-            return total_loss, iou_loss, conf_loss, cls_loss, l1_loss, num_fg, aux_memory_logits_list, cls_targets, fg_masks, avg_proto_sim
+            return total_loss, iou_loss, conf_loss, cls_loss, l1_loss, num_fg, aux_memory_logits_list, cls_targets, fg_masks, proto_loss
         else:
             self.hw = [x.shape[-2:] for x in outputs]
             outputs = torch.cat([x.flatten(start_dim=2) for x in outputs], dim=2).permute(0, 2, 1)

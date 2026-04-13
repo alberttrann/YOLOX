@@ -1,3 +1,6 @@
+#!/usr/bin/env python3
+# -*- coding:utf-8 -*-
+
 import torch
 import torch.nn.functional as F
 import numpy as np
@@ -24,11 +27,11 @@ def parse_args():
 def extract_latents_and_prototypes(model, val_loader, scale_idx, device):
     model.eval()
     
-    # 1. Extract Prototypes (FIXED: Correct Attribute Name)
+    # 1. Extract Prototypes
     memory_bank = model.head.memory_banks[scale_idx]
     
     with torch.no_grad():
-        # In TDE-YOLOX, prototypes is a raw Parameter [num_classes, latent_dim]
+        # In TDE-YOLOX 3.0, prototypes is a raw Parameter [num_classes, latent_dim]
         raw_prototypes = memory_bank.prototypes.detach().cpu()
         normalized_prototypes = F.normalize(raw_prototypes, p=2, dim=-1)
     
@@ -60,16 +63,17 @@ def extract_latents_and_prototypes(model, val_loader, scale_idx, device):
             latent_vec = model.head.latent_projectors[scale_idx](cls_feat_flat)
             normalized_latents = F.normalize(latent_vec, p=2, dim=-1) 
             
-            # --- LABEL ASSIGNMENT (FIXED: Return Signature) ---
-            # model.head returns 10 values in our high-fidelity implementation
-            model.train() # Temp train mode for SimOTA
+            # --- LABEL ASSIGNMENT (Return Signature Handler) ---
+            # model.head returns 10 values in our high-fidelity training implementation
+            model.train() # Temp train mode to access get_losses_with_targets
             outputs_head = model.head(fpn_outs, targets, imgs)
-            # Unpack only what we need from the end of the tuple
+            
+            # Unpack the specific targets needed for alignment
             cls_targets = outputs_head[-3] # targets
             fg_masks = outputs_head[-2]    # mask
             model.eval() 
             
-            # Shape handling
+            # Shape handling for masks
             total_anchors = sum([fpn.shape[-2] * fpn.shape[-1] for fpn in fpn_outs])
             fg_masks_2d = fg_masks.view(B, total_anchors)
             
@@ -102,6 +106,7 @@ def plot_prototype_similarity(prototypes, epoch_name):
     plt.title(f"TDE-YOLOX Engram Prototype Similarity (Epoch {epoch_name})")
     plt.tight_layout()
     plt.savefig(f"engram_similarity_epoch_{epoch_name}.png")
+    print(f"Saved: engram_similarity_epoch_{epoch_name}.png")
 
 def plot_latent_space_pca(prototypes, epoch_name):
     pca = PCA(n_components=2)
@@ -114,6 +119,7 @@ def plot_latent_space_pca(prototypes, epoch_name):
     plt.grid(True, alpha=0.3)
     plt.tight_layout()
     plt.savefig(f"engram_pca_epoch_{epoch_name}.png")
+    print(f"Saved: engram_pca_epoch_{epoch_name}.png")
 
 def main():
     args = parse_args()

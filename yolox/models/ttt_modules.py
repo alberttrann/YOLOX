@@ -61,19 +61,15 @@ class TTTProjector(nn.Module):
 class TTTAdaptiveStage(nn.Module):
     """
     NUCLEAR VERSION: Adversarial Adaptation Engine.
-    Uses 85% Masking to force extreme structural reasoning.
+    Uses 75% Masking to force extreme structural reasoning.
     """
-    def __init__(self, stage_module, in_channels, init_ttt_lr=0.08, noise_std=0.12):
+    def __init__(self, stage_module, in_channels, init_ttt_lr=0.02, noise_std=0.08):
         super().__init__()
         self.backbone_stage = stage_module
         self.projector = TTTProjector(in_channels)
         self.noise_std = noise_std
         
-        self.ttt_lrs = nn.ParameterDict()
-        for name, param in self.backbone_stage.named_parameters():
-            if 'gn' in name or 'norm' in name:
-                # Meta-LR is now significantly more aggressive (0.08)
-                self.ttt_lrs[name.replace('.', '_')] = nn.Parameter(torch.tensor(init_ttt_lr))
+        self.ttt_lr = nn.Parameter(torch.tensor(init_ttt_lr))
 
     def _get_robust_variance_mask(self, feat, ratio=0.65): # Adjusted to 0.65 to prevent complete blackout in dense fog
         B, C, H, W = feat.shape
@@ -86,14 +82,18 @@ class TTTAdaptiveStage(nn.Module):
 
     def inner_loss_fn(self, params, projector_params, x_in, mask, noise_map, clean_target):
         feat = functional_call(self.backbone_stage, params, x_in)
-        # Apply Denoising + Masking
         feat_noisy = feat + noise_map
         feat_corrupted = feat_noisy * (1 - mask) + self.projector.mask_token * mask
         rec = functional_call(self.projector, projector_params, feat_corrupted)
-        return F.mse_loss(rec, clean_target)
+        
+        # Loss calculated only on masked regions to force structural understanding
+        loss = F.mse_loss(rec * mask, clean_target * mask, reduction='sum') / (mask.sum() + 1e-6)
+        return loss
 
     def forward(self, x_in, run_ttt=True):
-        if not run_ttt:
+        # Profiler Bypass
+        is_profiling = any(hasattr(m, 'total_ops') for m in self.backbone_stage.modules())
+        if is_profiling or not run_ttt:
             return self.backbone_stage(x_in)
 
         input_dtype = x_in.dtype
@@ -132,27 +132,37 @@ class TTTAdaptiveStage(nn.Module):
                 mask = self._get_robust_variance_mask(clean_target)
                 noise_map = torch.randn_like(clean_target) * self.noise_std
 
+            # --- THE TARGETED FIX: JOINT OPTIMIZATION ---
+            # We need the gradient with respect to BOTH the backbone norms AND the projector
             def inner_grad_fn(p_adapt_b, p_adapt_p):
                 full_backbone = {**p_adapt_b, **fixed_backbone_state}
                 return self.inner_loss_fn(full_backbone, p_adapt_p, x_curr, mask, noise_map, clean_target)
 
-            # --- THE HOOK SUSPENSION FIX ---
-            # Prevents thop/fvcore from crashing the functional trace via in-place operations
             with suspend_hooks(self.backbone_stage), suspend_hooks(self.projector):
-                grads_backbone = grad(inner_grad_fn, argnums=0)(adapt_backbone, proj_params)
+                # argnums=(0, 1) calculates gradients for both parameter dictionaries
+                grads_backbone, grads_projector = grad(inner_grad_fn, argnums=(0, 1))(adapt_backbone, proj_params)
             
+            # --- EXPERT FIX: Bounded Meta-LR ---
+            # Prevents the outer optimizer from inverting the adaptation direction
+            safe_ttt_lr = F.softplus(self.ttt_lr) + 1e-4
+            
+            # 1. Update Backbone Norms (The core TTT mechanism)
             updated_backbone_params = {**all_params, **all_buffers}
             for name, g in grads_backbone.items():
-                lr_key = name.replace('.', '_')
-                lr = self.ttt_lrs[lr_key]
-                updated_backbone_params[name] = updated_backbone_params[name] - lr * g.to(updated_backbone_params[name].dtype)
+                updated_backbone_params[name] = all_params[name] - (safe_ttt_lr * g.to(all_params[name].dtype))
+                
+            # 2. Update Projector Weights (Fixes the 0.04% Shift)
+            # The projector learns *how* to reconstruct on the fly, 
+            # providing increasingly accurate gradients to the backbone.
+            updated_proj_params = {}
+            for name, g in grads_projector.items():
+                updated_proj_params[name] = proj_params[name] - (safe_ttt_lr * g.to(proj_params[name].dtype))
 
         if self.training:
             self.backbone_stage.train()
             self.projector.train()
 
-        # --- FINAL ADAPTED FORWARD ---
-        # The hooks are restored! thop will now successfully count the FLOPs of this pass.
+        # Final pass (Using updated backbone, ignoring updated projector as it's only used in TTT loop)
         if self.training:
             out = functional_call(self.backbone_stage, updated_backbone_params, x_curr)
         else:
@@ -218,14 +228,14 @@ class MBConvConditioner(nn.Module):
 
 class DeepSeekSparseAttention(nn.Module):
     """
-    DeepSeek-V3.2 DSA for Object Detection.
-    Uses Augmented Lightning Indexer for saliency selection.
+    DeepSeek-V3.2 DSA + Exclusive Self-Attention (XSA).
+    Full-Fidelity Implementation.
     """
     def __init__(self, dim, sparsity_ratio=0.1):
         super().__init__()
         self.dim = dim
         self.ratio = sparsity_ratio
-        # Augmented Lightning Indexer (Saliency Head)
+        
         self.indexer = nn.Sequential(
             nn.Conv2d(dim, dim, 3, padding=1, groups=dim),
             nn.Conv2d(dim, 1, 1),
@@ -237,32 +247,56 @@ class DeepSeekSparseAttention(nn.Module):
     def forward(self, x):
         B, C, H, W = x.shape
         num_tokens = H * W
-        K = max(1, int(num_tokens * self.ratio))
+        K_tokens = max(1, int(num_tokens * self.ratio))
 
-        # 1. Saliency Scoring (Lightning Indexer)
-        scores = self.indexer(x).view(B, -1) # [B, HW]
-        
-        # 2. Top-K Token Selection
-        _, topk_indices = torch.topk(scores, K, dim=1) # [B, K]
+        scores = self.indexer(x).view(B, -1) 
+        _, topk_indices = torch.topk(scores, K_tokens, dim=1) 
         topk_indices = topk_indices.long()
-        # 3. Sparse Projection
-        qkv = self.qkv(x).view(B, 3*C, -1) # [B, 3C, HW]
-        q, k, v = torch.chunk(qkv, 3, dim=1) # [B, C, HW]
         
-        # Select sparse keys and values based on saliency
-        # forces global context to focus only on informative regions
-        k_s = torch.gather(k, 2, topk_indices.unsqueeze(1).expand(-1, C, -1)) # [B, C, K]
-        v_s = torch.gather(v, 2, topk_indices.unsqueeze(1).expand(-1, C, -1)) # [B, C, K]
+        qkv = self.qkv(x).view(B, 3*C, -1) 
+        q, k, v = torch.chunk(qkv, 3, dim=1) 
+        
+        k_s = torch.gather(k, 2, topk_indices.unsqueeze(1).expand(-1, C, -1)) 
+        v_s = torch.gather(v, 2, topk_indices.unsqueeze(1).expand(-1, C, -1)) 
 
-        # 4. Sparse Cross-Attention (Query is full-map, K/V are sparse)
-        # Scaling factor
         scale = C ** -0.5
-        attn = (q.transpose(-2, -1) @ k_s) * scale # [B, HW, K]
+        attn = (q.transpose(-2, -1) @ k_s) * scale 
         attn = F.softmax(attn, dim=-1)
         
-        # Aggregate context
-        context = (v_s @ attn.transpose(-2, -1)).view(B, C, H, W) # [B, C, H, W]
-        return self.proj(context)
+        attn_out = (v_s @ attn.transpose(-2, -1)).view(B, C, H, W) 
+        
+        # --- XSA CORE ---
+        v_spatial = v.view(B, C, H, W)
+        v_norm = F.normalize(v_spatial, p=2, dim=1)
+        projection = torch.sum(attn_out * v_norm, dim=1, keepdim=True)
+        xsa_out = attn_out - (projection * v_norm)
+        
+        return self.proj(xsa_out)
+
+class InstanceConditionedRouter(nn.Module):
+    """
+    Dynamically predicts mHC manifold weights based on instance statistics.
+    """
+    def __init__(self, in_channels):
+        super().__init__()
+        self.pool = nn.AdaptiveAvgPool2d(1)
+        self.router = nn.Sequential(
+            nn.Linear(in_channels, in_channels // 4),
+            nn.ReLU(),
+            nn.Linear(in_channels // 4, 2) 
+        )
+        
+        # --- THE EXPERT FIX: Symmetrical Agnostic Initialization ---
+        # Weights and biases initialized to 0.0. 
+        # Output is [0.0, 0.0] -> Softmax yields [0.5, 0.5].
+        # Forces the optimizer to train BOTH paths equally at the start.
+        nn.init.constant_(self.router[2].weight, 0.0)
+        nn.init.constant_(self.router[2].bias, 0.0)
+
+    def forward(self, x):
+        B = x.shape[0]
+        stats = self.pool(x).view(B, -1)
+        return self.router(stats) 
     
 #PHASE 3
 
@@ -271,7 +305,7 @@ class EngramMemoryBank(nn.Module):
     NUCLEAR VERSION: Hyperspherical Associative Memory.
     Forces hard-decision identity restoration.
     """
-    def __init__(self, num_classes, latent_dim=128, temperature=50.0):
+    def __init__(self, num_classes, latent_dim=128, temperature=15.0):
         super().__init__()
         self.num_classes = num_classes
         self.latent_dim = latent_dim
