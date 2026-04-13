@@ -19,7 +19,7 @@ class TDE_Head(YOLOXHead):
             self.memory_banks.append(EngramMemoryBank(num_classes, self.latent_dim))
             self.uncertainty_gates.append(UncertaintyEstimator(self.latent_dim))
 
-    def forward(self, xin, labels=None, imgs=None):
+    def forward(self, xin, labels=None, imgs=None, curriculum_progress=0.0):
         outputs = []
         # Collect raw memory-retrieval scores for all scales
         aux_memory_logits_list = [] 
@@ -28,6 +28,10 @@ class TDE_Head(YOLOXHead):
         x_shifts = []
         y_shifts = []
         expanded_strides = []
+
+        # --- DYNAMIC ADVERSARIAL CURRICULUM ---
+        current_noise_std = 0.05 + (0.15 * curriculum_progress) # Max 20% noise
+        current_dropout_p = 0.10 + (0.25 * curriculum_progress) # Max 35% dropout
 
         for k, (cls_conv, reg_conv, stride_this_level, x) in enumerate(
             zip(self.cls_convs, self.reg_convs, self.strides, xin)
@@ -43,12 +47,9 @@ class TDE_Head(YOLOXHead):
             cls_feat = cls_conv(x)
             B, C, H, W = cls_feat.shape
             
-            # Adversarial Training (Forces Memory Wakeup)
             if self.training:
-                # 1. Noise Injection
-                cls_feat = cls_feat + torch.randn_like(cls_feat) * 0.05
-                # 2. Spatial Feature Dropout ( forces model to 'Remember' hidden parts)
-                f_mask = (torch.rand(B, 1, H, W, device=x.device) > 0.15).float()
+                cls_feat = cls_feat + torch.randn_like(cls_feat) * current_noise_std
+                f_mask = (torch.rand(B, 1, H, W, device=x.device) > current_dropout_p).float()
                 cls_feat = cls_feat * f_mask
             
             cls_feat_flat = cls_feat.permute(0, 2, 3, 1).reshape(B, H*W, C)

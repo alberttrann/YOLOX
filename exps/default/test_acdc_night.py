@@ -12,10 +12,10 @@ class Exp(MyExp):
         self.width = 0.50 
         self.exp_name = os.path.split(os.path.realpath(__file__))[1].split(".")[0]
         
-        # --- TDE-YOLOX Research Config ---
-        self.num_classes = 9 # BDD Detection categories filtered in preprocessing
+        self.num_classes = 9 
         self.ttt_lr = 0.005        
-        self.ttt_noise_std = 0.05  
+        self.init_ttt_lr = 0.02    # Aggressive start for Norm adaptation
+        self.ttt_noise_std = 0.08  # Harder contrastive denoising task
         
         # --- DATASET OVERRIDES ---
         # ... inside __init__ ...
@@ -109,6 +109,9 @@ class Exp(MyExp):
         )
 
     def get_model(self):
+        """
+        Wires Stage 1 (TTT) -> Neck (Tribrid) -> Head (Engram).
+        """
         from yolox.models import YOLOX, YOLOPAFPN
         from yolox.models.engram_head import TDE_Head
         from yolox.models.darknet import CSPDarknet
@@ -120,31 +123,36 @@ class Exp(MyExp):
                     m.momentum = 0.03
 
         if getattr(self, "model", None) is None:
-            # P3, P4, P5 Channels for YOLOX-S
-            in_channels = [128, 256, 512] 
+            # P3, P4, P5 Channels for YOLOX-S (Width = 0.5)
+            # Standard YOLOX-S outputs: 128, 256, 512
+            in_channels = [128, 256, 512, 1024] 
             
-            # 1. Instantiate TTT-Aware Backbone (Phase 1)
-            # Operates Functional Meta-Learning on Stage 1 Features
+            # 1. THE ADAPTIVE BACKBONE (Phase 1)
+            # Uses GroupNorm + Functional TTT + Learnable LRs
             backbone = CSPDarknet(
                 self.depth, 
                 self.width, 
+                out_features=("dark2", "dark3", "dark4", "dark5"), 
                 depthwise=False, 
                 act=self.act,
-                ttt_lr=self.ttt_lr,           
+                ttt_lr=self.init_ttt_lr,           
                 ttt_noise_std=self.ttt_noise_std 
             )
             
-            # 2. Instantiate Tribrid Neck (Phase 2)
-            # Replaces standard CSPLayer with C2f_Tribrid (MaxViT + DSA + SimAM)
+            # 2. THE TRIBRID NECK (Phase 2)
+            # Replaces standard CSPLayer with C2f_Tribrid (DSA + SimAM + MBConv)
+            # pass the backbone to PAFPN to maintain YOLOX structure
             neck = YOLOPAFPN(
                 self.depth, 
                 self.width, 
-                in_channels=[256, 512, 1024], # Input from darknet stages
+                in_channels=in_channels,
                 act=self.act,
             )
+            # Override the internal backbone with TTT version
+            neck.backbone = backbone
             
-            # 3. Instantiate the Engram Head (Phase 3)
-            # Differentiable Associative Memory restoration
+            # 3. THE ENGRAM HEAD (Phase 3)
+            # Differentiable Identity Restoration + Uncertainty Gating
             head = TDE_Head(
                 self.num_classes, 
                 self.width, 
@@ -152,9 +160,14 @@ class Exp(MyExp):
                 act=self.act
             )
             
-            # backbone here is neck because YOLOPAFPN wraps the backbone
+            # 4. THE UNIFIED TDE-YOLOX WRAPPER
+            # Manages the TTT annealing schedule and Memory Anchor Loss
             self.model = YOLOX(neck, head)
 
         self.model.apply(init_yolo)
         self.model.head.initialize_biases(1e-2)
+        
+        # Set the total training epochs for the TTT probability scheduler
+        self.model.max_epochs = self.max_epoch
+        
         return self.model

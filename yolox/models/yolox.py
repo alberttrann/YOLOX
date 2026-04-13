@@ -63,12 +63,16 @@ class YOLOX(nn.Module):
 
     def forward(self, x, targets=None):
         current_ttt_prob = self._get_ttt_probability()
+        # Calculate Curriculum Progress [0.0 to 1.0]
+        progress = 0.0
+        if self.training and self.current_epoch >= self.warmup_end:
+            progress = min(1.0, (self.current_epoch - self.warmup_end) / (self.max_epochs - self.warmup_end))
         fpn_outs = self.backbone(x, ttt_prob=current_ttt_prob)
 
         if self.training:
             # Head now returns detection metrics + memory scores + ground truth targets
             (det_loss, iou_l, conf_l, cls_l, l1_l, num_fg, 
-             aux_mem_logits, cls_targets, fg_masks, proto_loss) = self.head(fpn_outs, targets, x)
+             aux_mem_logits, cls_targets, fg_masks, proto_loss) = self.head(fpn_outs, targets, x, curriculum_progress=progress)
             
             # --- SUPERVISED IDENTITY ANCHORING ---
             # align the Memory Retrieval scores directly with Ground Truth.
