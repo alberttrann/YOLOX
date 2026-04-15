@@ -129,15 +129,17 @@ class TTTAdaptiveStage(nn.Module):
             with torch.no_grad():
                 feat_initial = self.backbone_stage(x_curr)
                 clean_target = feat_initial.detach()
-                # --- THE EXPERT FIX: TARGET SHARPENING (DEFOGGING CATALYST) ---
-                # We artificially boost the contrast of the target by 20%.
-                # This forces the TTT loop to upscale GroupNorm parameters (gamma)
-                # to "reach" the sharper target, effectively cutting through low-contrast fog.
-                target_mean = clean_target.mean(dim=(2, 3), keepdim=True)
-                clean_target_sharp = target_mean + (clean_target - target_mean) * 1.20
-                # --------------------------------------------------------------
-                mask = self._get_robust_variance_mask(clean_target_sharp)
-                noise_map = torch.randn_like(clean_target_sharp) * self.noise_std
+                mask = self._get_robust_variance_mask(clean_target)
+                
+                # --- THE EXPERT OOD FIX ---
+                # During training, we inject synthetic noise to force meta-learning.
+                # During OOD inference, the weather is the noise. We must NOT add synthetic 
+                # noise on top of fog/snow, as it forces the Norm layers to optimize 
+                # for the wrong corruption type, degrading performance.
+                if self.training:
+                    noise_map = torch.randn_like(clean_target) * self.noise_std
+                else:
+                    noise_map = torch.zeros_like(clean_target)
 
             # --- THE TARGETED FIX: JOINT OPTIMIZATION ---
             # We need the gradient with respect to BOTH the backbone norms AND the projector

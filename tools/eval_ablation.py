@@ -4,6 +4,7 @@
 import argparse
 import os
 import re
+import itertools
 import torch
 import torch.nn as nn
 from loguru import logger
@@ -77,7 +78,7 @@ class TDEAblationWrapper(nn.Module):
         return self.model(x, targets)
 
 @logger.catch
-def run_omni_ablation(exp, ckpt_path, batch_size=8, fp16=False, disable_t=False, disable_d=False, disable_e=False):
+def run_omni_ablation(exp, ckpt_path, batch_size=8, fp16=False):
     rank = get_local_rank()
     torch.cuda.set_device(rank)
     
@@ -88,7 +89,7 @@ def run_omni_ablation(exp, ckpt_path, batch_size=8, fp16=False, disable_t=False,
     model.cuda(rank).eval()
 
     # ==========================================
-    # PHASE 1: EVALUATE FULL MODEL (UPPER BOUND)
+    # PHASE 1: EVALUATE FULL MODEL (BASELINE)
     # ==========================================
     logger.info("\n" + "="*60)
     logger.info("PHASE 1: EVALUATING FULL TDE-YOLOX (T=ON, D=ON, E=ON)")
@@ -100,65 +101,61 @@ def run_omni_ablation(exp, ckpt_path, batch_size=8, fp16=False, disable_t=False,
     full_model_wrapper = TDEAblationWrapper(model, disable_t=False, disable_d=False, disable_e=False)
     *_, full_summary = eval_full.evaluate(full_model_wrapper, False, fp16, None, None, exp.test_size)
     full_model_wrapper.restore()
-    
-    # ==========================================
-    # PHASE 2: EVALUATE ABLATED MODEL
-    # ==========================================
-    logger.info("\n" + "="*60)
-    config_str = f"T={'OFF' if disable_t else 'ON'}, D={'OFF' if disable_d else 'ON'}, E={'OFF' if disable_e else 'ON'}"
-    logger.info(f"PHASE 2: EVALUATING ABLATED YOLOX ({config_str})")
-    logger.info("="*60)
-    
-    # FRESH evaluator to prevent state/cache leaks
-    eval_ablated = exp.get_evaluator(batch_size, is_distributed=False, testdev=False, legacy=False)
-    eval_ablated.per_class_AP = True
-    
-    ablated_model_wrapper = TDEAblationWrapper(model, disable_t=disable_t, disable_d=disable_d, disable_e=disable_e)
-    *_, ablated_summary = eval_ablated.evaluate(ablated_model_wrapper, False, fp16, None, None, exp.test_size)
-    ablated_model_wrapper.restore()
 
-    # ==========================================
-    # FORENSIC DELTA REPORT
-    # ==========================================
-    logger.info("\n" + "="*60)
-    logger.info(f"OMNI-ABLATION IMPACT REPORT: ABLATING [{config_str}]")
-    logger.info("="*60)
-    
-    def extract_ap(summary_str, class_name):
-        match = re.search(rf"\|\s*{class_name}\s*\|\s*([\d.]+)\s*\|", summary_str)
-        return float(match.group(1)) if match else 0.0
+    # Generate all combinations of (disable_t, disable_d, disable_e)
+    # Exclude (False, False, False) as it is the full model already evaluated
+    configs = list(itertools.product([False, True], repeat=3))[1:]
 
-    classes = ["car", "bus", "truck", "person", "rider", "bike", "motor", "traffic light", "traffic sign"]
-    
-    print(f"{'Class':<15} | {'Ablated AP':<15} | {'Full Model AP':<15} | {'Delta (Component Lift)':<20}")
-    print("-" * 75)
-    
-    total_lift = 0
-    for cls in classes:
-        ap_off = extract_ap(ablated_summary, cls)
-        ap_on = extract_ap(full_summary, cls)
-        delta = ap_on - ap_off
-        total_lift += delta
+    for disable_t, disable_d, disable_e in configs:
+        # ==========================================
+        # PHASE 2: EVALUATE ABLATED MODEL
+        # ==========================================
+        logger.info("\n" + "="*60)
+        config_str = f"T={'OFF' if disable_t else 'ON'}, D={'OFF' if disable_d else 'ON'}, E={'OFF' if disable_e else 'ON'}"
+        logger.info(f"PHASE 2: EVALUATING ABLATED YOLOX ({config_str})")
+        logger.info("="*60)
         
-        # Terminal formatting: Green for positive contribution, Red if components actually hurt
-        if delta > 0.5:
-            delta_str = f"\033[92m+{delta:.2f}\033[0m" 
-        elif delta < -0.5:
-            delta_str = f"\033[91m{delta:.2f}\033[0m" 
-        else:
-            delta_str = f"{delta:.2f}"
+        eval_ablated = exp.get_evaluator(batch_size, is_distributed=False, testdev=False, legacy=False)
+        eval_ablated.per_class_AP = True
+        
+        ablated_model_wrapper = TDEAblationWrapper(model, disable_t=disable_t, disable_d=disable_d, disable_e=disable_e)
+        *_, ablated_summary = eval_ablated.evaluate(ablated_model_wrapper, False, fp16, None, None, exp.test_size)
+        ablated_model_wrapper.restore()
+        
+        # ==========================================
+        # FORENSIC DELTA REPORT
+        # ==========================================
+        logger.info("\n" + "="*60)
+        logger.info(f"OMNI-ABLATION IMPACT REPORT: ABLATING [{config_str}]")
+        logger.info("="*60)
+        
+        def extract_ap(summary_str, class_name):
+            match = re.search(rf"\|\s*{class_name}\s*\|\s*([\d.]+)\s*\|", summary_str)
+            return float(match.group(1)) if match else 0.0
+
+        classes = ["car", "bus", "truck", "person", "rider", "bike", "motor", "traffic light", "traffic sign"]
+        
+        print(f"{'Class':<15} | {'Ablated AP':<15} | {'Full Model AP':<15} | {'Delta':<20}")
+        print("-" * 75)
+        
+        total_lift = 0
+        for cls in classes:
+            ap_off = extract_ap(ablated_summary, cls)
+            ap_on = extract_ap(full_summary, cls)
+            delta = ap_on - ap_off
+            total_lift += delta
             
-        print(f"{cls:<15} | {ap_off:<15.2f} | {ap_on:<15.2f} | {delta_str:<20}")
-        
-    print("-" * 75)
-    print(f"Total Cumulative AP Lift provided by disabled components: {total_lift:.2f}")
-    
-    # Quick Check summary
-    if total_lift > 0:
-        print("\nCONCLUSION: The disabled components POSITIVELY contribute to the model's performance.")
-    else:
-        print("\nCONCLUSION: The disabled components are currently DEGRADING performance or having no effect.")
-
+            if delta > 0.5:
+                delta_str = f"\033[92m+{delta:.2f}\033[0m" 
+            elif delta < -0.5:
+                delta_str = f"\033[91m{delta:.2f}\033[0m" 
+            else:
+                delta_str = f"{delta:.2f}"
+                
+            print(f"{cls:<15} | {ap_off:<15.2f} | {ap_on:<15.2f} | {delta_str:<20}")
+            
+        print("-" * 75)
+        print(f"Total Cumulative AP Lift provided by disabled components: {total_lift:.2f}")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser("TDE-YOLOX Omni-Ablation")
@@ -167,24 +164,12 @@ if __name__ == "__main__":
     parser.add_argument("-b", "--batch_size", default=8, type=int)
     parser.add_argument("--fp16", action="store_true")
     
-    # --- Ablation Toggles ---
-    parser.add_argument("--disable_t", action="store_true", help="Disable Test-Time Training (Adaptive Stem)")
-    parser.add_argument("--disable_d", action="store_true", help="Disable DeepSeek Tribrid Neck (Global Context)")
-    parser.add_argument("--disable_e", action="store_true", help="Disable Engram Head (Memory Bank)")
-    
     args = parser.parse_args()
-    
-    if not (args.disable_t or args.disable_d or args.disable_e):
-        logger.warning("No ablation flags provided! Both phases will run the Full Model.")
-
     setup_logger("YOLOX_outputs/ablation", filename="omni_ablation.txt", mode="a")
     
     run_omni_ablation(
         get_exp(args.exp_file), 
         args.ckpt, 
         args.batch_size, 
-        args.fp16,
-        disable_t=args.disable_t,
-        disable_d=args.disable_d,
-        disable_e=args.disable_e
+        args.fp16
     )
