@@ -44,7 +44,7 @@ class BlockAttnRes(nn.Module):
                 if feat_proj.shape[-1] > W:
                     feat_proj = F.adaptive_max_pool2d(feat_proj, (H, W))
                 else:
-                    feat_proj = F.interpolate(feat_proj, size=(H, W), mode='nearest')
+                    feat_proj = F.interpolate(feat_proj, size=(H, W), mode="bilinear", align_corners=False)
             aligned_history.append(feat_proj)
             
         all_feats = aligned_history + [current_feat]
@@ -66,13 +66,6 @@ class BlockAttnRes(nn.Module):
         out = torch.sum(V * attn_weights, dim=1)
         
         return out
-
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-from .darknet import CSPDarknet
-from .network_blocks import BaseConv
-from .tribrid_neck import C2f_Tribrid
 
 class YOLOPAFPN(nn.Module):
     def __init__(
@@ -102,7 +95,9 @@ class YOLOPAFPN(nn.Module):
         c4 = int(in_channels[2] * width) # 256 (P4)
         c5 = int(in_channels[3] * width) # 512 (P5)
 
-        self.upsample = nn.Upsample(scale_factor=2, mode="nearest")
+        # UPSAMPLING FIX: Use Bilinear instead of Nearest. 
+        # Smooths TTT artifacts without OOM crashes.
+        self.upsample = nn.Upsample(scale_factor=2, mode="bilinear", align_corners=False)
         
         # Lateral/Reduction Convolutions
         self.lateral_conv0 = BaseConv(c5, c4, 1, 1, act=act) # P5 -> P4 logic

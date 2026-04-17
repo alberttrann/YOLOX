@@ -40,7 +40,9 @@ class GRN(nn.Module):
 
     def forward(self, x):
         x_p = x.permute(0, 2, 3, 1)
-        gx = torch.norm(x_p, p=2, dim=(1, 2), keepdim=True)
+        # THE FIX: Mathematically safe L2 Norm. 
+        # Adding 1e-6 inside the square root prevents infinite gradients at 0.
+        gx = torch.sqrt(torch.sum(x_p ** 2, dim=(1, 2), keepdim=True) + 1e-6)
         nx = gx / (gx.mean(dim=-1, keepdim=True) + 1e-6)
         return (self.gamma * (x_p * nx) + self.beta + x_p).permute(0, 3, 1, 2)
 
@@ -58,10 +60,24 @@ class TTTProjector(nn.Module):
         )
     def forward(self, x): return self.net(x)
 
+class SobelEdgeExtractor(nn.Module):
+    """ECL-YOLOv11: Extracts physical gradients to supervise TTT."""
+    def __init__(self, in_channels):
+        super().__init__()
+        kx = torch.tensor([[1, 0, -1], [2, 0, -2], [1, 0, -1]], dtype=torch.float32)
+        ky = torch.tensor([[1, 2, 1], [0, 0, 0], [-1, -2, -1]], dtype=torch.float32)
+        self.register_buffer('Kx', kx.view(1, 1, 3, 3).repeat(in_channels, 1, 1, 1))
+        self.register_buffer('Ky', ky.view(1, 1, 3, 3).repeat(in_channels, 1, 1, 1))
+
+    def forward(self, x):
+        edge_x = F.conv2d(x, self.Kx, padding=1, groups=x.shape[1])
+        edge_y = F.conv2d(x, self.Ky, padding=1, groups=x.shape[1])
+        return torch.sqrt(edge_x**2 + edge_y**2 + 1e-6)
+
 class TTTAdaptiveStage(nn.Module):
     """
     NUCLEAR VERSION: Adversarial Adaptation Engine.
-    Uses 75% Masking to force extreme structural reasoning.
+    Uses 65% Masking to force extreme structural reasoning.
     """
     def __init__(self, stage_module, in_channels, init_ttt_lr=0.02, noise_std=0.08):
         super().__init__()
@@ -70,6 +86,7 @@ class TTTAdaptiveStage(nn.Module):
         self.noise_std = noise_std
         
         self.ttt_lr = nn.Parameter(torch.tensor(init_ttt_lr))
+        self.sobel_extractor = SobelEdgeExtractor(in_channels)
 
     def _get_robust_variance_mask(self, feat, ratio=0.65): # Adjusted to 0.65 to prevent complete blackout in dense fog
         B, C, H, W = feat.shape
@@ -80,18 +97,29 @@ class TTTAdaptiveStage(nn.Module):
         mask = (v_fusion >= threshold.view(B, 1, 1, 1)).to(feat.dtype)
         return F.interpolate(mask, size=(H, W), mode='nearest')
 
-    def inner_loss_fn(self, params, projector_params, x_in, mask, noise_map, clean_target):
+    def inner_loss_fn(self, params, projector_params, x_in, mask, noise_map, clean_target, clean_edges):
+        # 1. Forward pass
         feat = functional_call(self.backbone_stage, params, x_in)
+        
+        # 2. Corrupt
         feat_noisy = feat + noise_map
         feat_corrupted = feat_noisy * (1 - mask) + self.projector.mask_token * mask
+        
+        # 3. Reconstruct
         rec = functional_call(self.projector, projector_params, feat_corrupted)
         
-        # Loss calculated only on masked regions to force structural understanding
-        loss = F.mse_loss(rec * mask, clean_target * mask, reduction='sum') / (mask.sum() + 1e-6)
-        return loss
+        # 4. PRIMARY LOSS: Masked Feature Reconstruction
+        loss_rec = F.mse_loss(rec * mask, clean_target * mask, reduction='sum') / (mask.sum() + 1e-6)
+        
+        # 5. EXPERT ENHANCEMENT: Sobel Structural Consistency Loss
+        # Force the reconstructed features to possess the exact same physical edges as the clean target
+        rec_edges = self.sobel_extractor(rec)
+        loss_edge = F.mse_loss(rec_edges * mask, clean_edges * mask, reduction='sum') / (mask.sum() + 1e-6)
+        
+        # 6. Total Meta-Loss
+        return loss_rec + (0.5 * loss_edge) # Edge loss acts as a strong structural prior
 
     def forward(self, x_in, run_ttt=True):
-        # Profiler Bypass
         is_profiling = any(hasattr(m, 'total_ops') for m in self.backbone_stage.modules())
         if is_profiling or not run_ttt:
             return self.backbone_stage(x_in)
@@ -107,71 +135,68 @@ class TTTAdaptiveStage(nn.Module):
             x_curr = x_in
             context_manager = contextlib.nullcontext()
 
-        # --- CAPTURE STATE ---
         all_params = dict(self.backbone_stage.named_parameters())
         all_buffers = dict(self.backbone_stage.named_buffers())
         proj_params = dict(self.projector.named_parameters())
 
-        adapt_backbone = {k: v for k, v in all_params.items() 
-                         if ('gn' in k or 'norm' in k) and v.is_floating_point()}
-        static_backbone_state = {k: v for k, v in all_params.items() 
-                                if k not in adapt_backbone}
-        
+        adapt_backbone = {k: v for k, v in all_params.items() if ('gn' in k or 'norm' in k) and v.is_floating_point()}
+        static_backbone_state = {k: v for k, v in all_params.items() if k not in adapt_backbone}
         fixed_backbone_state = {**static_backbone_state, **all_buffers}
 
         self.backbone_stage.eval()
         self.projector.eval()
 
         with context_manager:
-            if not x_curr.is_floating_point():
-                return self.backbone_stage(x_in)
+            if not x_curr.is_floating_point(): return self.backbone_stage(x_in)
 
             with torch.no_grad():
                 feat_initial = self.backbone_stage(x_curr)
                 clean_target = feat_initial.detach()
                 mask = self._get_robust_variance_mask(clean_target)
+                clean_edges = self.sobel_extractor(clean_target).detach()
                 
-                # --- THE EXPERT OOD FIX ---
-                # During training, we inject synthetic noise to force meta-learning.
-                # During OOD inference, the weather is the noise. We must NOT add synthetic 
-                # noise on top of fog/snow, as it forces the Norm layers to optimize 
-                # for the wrong corruption type, degrading performance.
-                if self.training:
+                if self.training: 
                     noise_map = torch.randn_like(clean_target) * self.noise_std
-                else:
+                else: 
                     noise_map = torch.zeros_like(clean_target)
 
-            # --- THE TARGETED FIX: JOINT OPTIMIZATION ---
-            # We need the gradient with respect to BOTH the backbone norms AND the projector
             def inner_grad_fn(p_adapt_b, p_adapt_p):
                 full_backbone = {**p_adapt_b, **fixed_backbone_state}
-                return self.inner_loss_fn(full_backbone, p_adapt_p, x_curr, mask, noise_map, clean_target)
+                return self.inner_loss_fn(full_backbone, p_adapt_p, x_curr, mask, noise_map, clean_target, clean_edges)
 
             with suspend_hooks(self.backbone_stage), suspend_hooks(self.projector):
-                # argnums=(0, 1) calculates gradients for both parameter dictionaries
-                grads_backbone, grads_projector = grad(inner_grad_fn, argnums=(0, 1))(adapt_backbone, proj_params)
-            
-            # --- EXPERT FIX: Bounded Meta-LR ---
-            # Prevents the outer optimizer from inverting the adaptation direction
+                if self.training:
+                    # TRAINING: Adapt both Backbone Norms AND Projector
+                    grads = grad(inner_grad_fn, argnums=(0, 1))(adapt_backbone, proj_params)
+                    grads_backbone = grads[0]
+                    grads_projector = grads[1]
+                else:
+                    # INFERENCE: Adapt Backbone Norms ONLY (Frozen Projector)
+                    # grad with argnums=0 returns a single dict, not a tuple
+                    grads_backbone = grad(inner_grad_fn, argnums=0)(adapt_backbone, proj_params)
+                    grads_projector = None # Safely initialize to None
+
             safe_ttt_lr = F.softplus(self.ttt_lr) + 1e-4
             
-            # 1. Update Backbone Norms (The core TTT mechanism)
+            # 1. Update Backbone Norms
             updated_backbone_params = {**all_params, **all_buffers}
             for name, g in grads_backbone.items():
                 updated_backbone_params[name] = all_params[name] - (safe_ttt_lr * g.to(all_params[name].dtype))
                 
-            # 2. Update Projector Weights (Fixes the 0.04% Shift)
-            # The projector learns *how* to reconstruct on the fly, 
-            # providing increasingly accurate gradients to the backbone.
-            updated_proj_params = {}
-            for name, g in grads_projector.items():
-                updated_proj_params[name] = proj_params[name] - (safe_ttt_lr * g.to(proj_params[name].dtype))
+            # 2. Update Projector (Training Only - we don't actually use these updated params 
+            # for the final forward pass, but computing the gradients allows the outer 
+            # optimizer to update the projector later).
+            # Note: In functional_call meta-learning, if you want the projector to update, 
+            # its gradients must flow through the outer loss. The inner update here is just
+            # if the projector itself needs to be "fast weights", which it doesn't. 
+            # So we actually don't even need to calculate `updated_proj_params` here!
 
-        if self.training:
+        # Restore train mode if we were training
+        if self.training: 
             self.backbone_stage.train()
             self.projector.train()
 
-        # Final pass (Using updated backbone, ignoring updated projector as it's only used in TTT loop)
+        # Final Forward Pass
         if self.training:
             out = functional_call(self.backbone_stage, updated_backbone_params, x_curr)
         else:
