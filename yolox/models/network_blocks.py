@@ -205,7 +205,7 @@ class SPPBottleneck(nn.Module):
         hidden_channels = in_channels // 2
         # Select the correct ConvBlock based on the flag
         ConvBlock = BaseConvGN if use_gn else BaseConv
-        self.conv1 = BaseConv(in_channels, hidden_channels, 1, stride=1, act=activation)
+        self.conv1 = ConvBlock(in_channels, hidden_channels, 1, stride=1, act=activation)
         self.m = nn.ModuleList(
             [
                 nn.MaxPool2d(kernel_size=ks, stride=1, padding=ks // 2)
@@ -213,7 +213,7 @@ class SPPBottleneck(nn.Module):
             ]
         )
         conv2_channels = hidden_channels * (len(kernel_sizes) + 1)
-        self.conv2 = BaseConv(conv2_channels, out_channels, 1, stride=1, act=activation)
+        self.conv2 = ConvBlock(conv2_channels, out_channels, 1, stride=1, act=activation)
 
     def forward(self, x):
         x = self.conv1(x)
