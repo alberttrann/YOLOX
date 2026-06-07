@@ -138,11 +138,13 @@ class Exp(MyExp):
     
     def get_optimizer(self, batch_size):
         if "optimizer" not in self.__dict__:
+            # Get effective batch size
+            accum_steps = getattr(self, "accum_steps", 1)
+            effective_batch_size = batch_size * accum_steps
             if self.warmup_epochs > 0:
                 lr = self.warmup_lr
             else:
-                lr = self.basic_lr_per_img * batch_size
-
+                lr = self.basic_lr_per_img * effective_batch_size
             pg_no_decay = []  # Biases, Norms, Gates, TTT LRs, Tokens, Prototypes
             pg_decay = []     # Conv weights, Linear weights
 

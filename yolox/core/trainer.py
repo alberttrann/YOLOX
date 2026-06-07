@@ -163,9 +163,11 @@ class Trainer:
         self.prefetcher = DataPrefetcher(self.train_loader)
         # max_iter means iters per epoch
         self.max_iter = len(self.train_loader)
-
+        accum_steps = getattr(self.exp, 'accum_steps', 1)
+        # Multiply the batch_size by accum_steps for the LR Scheduler
         self.lr_scheduler = self.exp.get_lr_scheduler(
-            self.exp.basic_lr_per_img * self.args.batch_size, self.max_iter
+            self.exp.basic_lr_per_img * self.args.batch_size * accum_steps, 
+            self.max_iter
         )
         if self.args.occupy:
             occupy_mem(self.local_rank)
@@ -253,8 +255,15 @@ class Trainer:
             model_ref.set_meta_training_state(self.epoch + 1, self.max_epoch)
 
     def after_epoch(self):
-        self.save_ckpt(ckpt_name="latest")
+        # Flush partial accumulation window at epoch boundary
+        accum_steps = getattr(self.exp, 'accum_steps', 1)
+        if accum_steps > 1 and (self.max_iter % accum_steps) != 0:
+            # Step with whatever gradients have accumulated in the partial window
+            self.scaler.step(self.optimizer)
+            self.scaler.update()
+            self.optimizer.zero_grad()
 
+        self.save_ckpt(ckpt_name="latest")
         if (self.epoch + 1) % self.exp.eval_interval == 0:
             all_reduce_norm(self.model)
             self.evaluate_and_save_model()
