@@ -130,10 +130,7 @@ class Trainer:
             iter_time=iter_end_time - iter_start_time,
             data_time=data_end_time - iter_start_time,
             lr=lr,
-            **{k: v * accum_steps for k, v in outputs.items()
-            if k not in ['num_fg', 'ttt_prob']},  # restore display values
-            num_fg=outputs.get('num_fg', 0),
-            ttt_prob=outputs.get('ttt_prob', 0),
+            **outputs,
         )
 
     def before_train(self):
