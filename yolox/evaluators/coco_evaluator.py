@@ -169,10 +169,6 @@ class COCOEvaluator:
         ):
             with context_manager:
                 imgs = imgs.type(tensor_type)
-                
-                # If TDE, we must explicitly allow gradients to flow from the input
-                if is_tde_model:
-                    imgs.requires_grad_(True)
 
                 # skip the last iters since batchsize might be not enough for batch inference
                 is_time_record = cur_iter < len(self.dataloader) - 1

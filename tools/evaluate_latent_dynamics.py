@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding:utf-8 -*-
-
+# tools/evaluate_latent_dynamics.py: A forensic analysis tool for TDE-YOLOX's latent space dynamics. Intercepts and visualizes the relationship between the adapted latent features, memory prototypes, and uncertainty gates during inference on the Adverse set. Generates t-SNE plots and gate histograms to reveal how the model's internal representations evolve under distribution shift, providing critical insights for debugging and optimization.
 import torch
 import torch.nn.functional as F
 import numpy as np
@@ -66,8 +66,8 @@ def run_forensics(exp_file, ckpt_path, num_batches=5, scale_idx=2):
             # obj_out is [B, 1, H, W]
             obj_scores = torch.sigmoid(tensors['obj_out']).view(imgs.shape[0], -1)
             
-            # Find pixels where the model thinks there is an object (Score > 0.3)
-            obj_mask = obj_scores > 0.3
+            # Find pixels where the model thinks there is an object (Score > 0.1)
+            obj_mask = obj_scores > 0.1
             
             if obj_mask.sum() > 0:
                 # 1. L2 Normalize the extracted latents to match the Nuclear Head physics

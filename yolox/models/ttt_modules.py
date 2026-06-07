@@ -1,3 +1,4 @@
+import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -84,9 +85,43 @@ class TTTAdaptiveStage(nn.Module):
         self.backbone_stage = stage_module
         self.projector = TTTProjector(in_channels)
         self.noise_std = noise_std
-        
-        self.ttt_lr = nn.Parameter(torch.tensor(init_ttt_lr))
         self.sobel_extractor = SobelEdgeExtractor(in_channels)
+        
+        # THE FIX: Return to Learnable LRs, but initialized sensibly.
+        # The stability will come from normalizing the gradients, not clamping the LR.
+        self.ttt_lrs = nn.ParameterDict()
+        # EXPERT FIX: Inverse Softplus Initialization
+        # Ensures the initial effective LR is exactly 0.02
+        inv_softplus_val = math.log(math.exp(init_ttt_lr) - 1 + 1e-9)
+        for name, param in self.backbone_stage.named_parameters():
+            if 'gn' in name or 'norm' in name:
+                self.ttt_lrs[name.replace('.', '_')] = nn.Parameter(torch.tensor(inv_softplus_val))
+    
+    def _get_deterministic_sobel_mask(self, clean_edges, ratio=0.50):
+        """
+        DETERMINISTIC MASKING: 
+        Always masks the Top-50% most structural regions (edges/objects).
+        Guarantees stable 1-step gradients at inference time.
+        """
+        B, C, H, W = clean_edges.shape
+        # Aggregate edge strength across channels
+        edge_magnitude = clean_edges.mean(dim=1, keepdim=True) 
+        
+        # Blockify to 8x8 to force structural completion
+        e_blocked = F.avg_pool2d(edge_magnitude, 8, stride=8) 
+        
+        scores_fp32 = e_blocked.view(B, -1).float()
+        
+        # We must loop quantile over the batch to ensure each image gets 50% masked
+        # regardless of whether it's clear (high absolute edges) or foggy (low absolute edges).
+        # This solves the "Fog Failure" natively.
+        thresholds = torch.cat([
+            torch.quantile(scores_fp32[i], ratio, keepdim=True) 
+            for i in range(B)
+        ]).view(B, 1, 1, 1)
+        
+        mask = (e_blocked >= thresholds).to(clean_edges.dtype)
+        return F.interpolate(mask, size=(H, W), mode='nearest')
 
     def _get_robust_variance_mask(self, feat, ratio=0.65): # Adjusted to 0.65 to prevent complete blackout in dense fog
         B, C, H, W = feat.shape
@@ -98,26 +133,25 @@ class TTTAdaptiveStage(nn.Module):
         return F.interpolate(mask, size=(H, W), mode='nearest')
 
     def inner_loss_fn(self, params, projector_params, x_in, mask, noise_map, clean_target, clean_edges):
-        # 1. Forward pass
         feat = functional_call(self.backbone_stage, params, x_in)
         
-        # 2. Corrupt
         feat_noisy = feat + noise_map
         feat_corrupted = feat_noisy * (1 - mask) + self.projector.mask_token * mask
-        
-        # 3. Reconstruct
         rec = functional_call(self.projector, projector_params, feat_corrupted)
         
-        # 4. PRIMARY LOSS: Masked Feature Reconstruction
-        loss_rec = F.mse_loss(rec * mask, clean_target * mask, reduction='sum') / (mask.sum() + 1e-6)
+        # A. Smooth L1 for Reconstruction (Stable Gradients)
+        loss_rec = F.smooth_l1_loss(rec * mask, clean_target * mask, reduction='sum') / (mask.sum() + 1e-6)
         
-        # 5. EXPERT ENHANCEMENT: Sobel Structural Consistency Loss
-        # Force the reconstructed features to possess the exact same physical edges as the clean target
+        # B. Sobel Edge Consistency (Forces structural alignment)
         rec_edges = self.sobel_extractor(rec)
-        loss_edge = F.mse_loss(rec_edges * mask, clean_edges * mask, reduction='sum') / (mask.sum() + 1e-6)
+        loss_edge = F.smooth_l1_loss(rec_edges * mask, clean_edges * mask, reduction='sum') / (mask.sum() + 1e-6)
         
-        # 6. Total Meta-Loss
-        return loss_rec + (0.5 * loss_edge) # Edge loss acts as a strong structural prior
+        # C. Feature Variance Maximization (PREVENTS FOG COLLAPSE)
+        # If the model tries to cheat by outputting gray mush, std_feat drops, and loss_var spikes.
+        std_feat = torch.sqrt(feat.var(dim=(2, 3)) + 1e-4) 
+        loss_var = torch.mean(F.relu(1.0 - std_feat)) 
+        
+        return loss_rec + (0.5 * loss_edge) + (1.0 * loss_var)
 
     def forward(self, x_in, run_ttt=True):
         is_profiling = any(hasattr(m, 'total_ops') for m in self.backbone_stage.modules())
@@ -152,44 +186,41 @@ class TTTAdaptiveStage(nn.Module):
             with torch.no_grad():
                 feat_initial = self.backbone_stage(x_curr)
                 clean_target = feat_initial.detach()
-                mask = self._get_robust_variance_mask(clean_target)
                 clean_edges = self.sobel_extractor(clean_target).detach()
                 
-                if self.training: 
-                    noise_map = torch.randn_like(clean_target) * self.noise_std
-                else: 
-                    noise_map = torch.zeros_like(clean_target)
+                # Deterministic mask targeting physical objects
+                mask = self._get_deterministic_sobel_mask(clean_edges)
+                
+                noise_map = torch.randn_like(clean_target) * self.noise_std if self.training else torch.zeros_like(clean_target)
 
             def inner_grad_fn(p_adapt_b, p_adapt_p):
                 full_backbone = {**p_adapt_b, **fixed_backbone_state}
                 return self.inner_loss_fn(full_backbone, p_adapt_p, x_curr, mask, noise_map, clean_target, clean_edges)
 
             with suspend_hooks(self.backbone_stage), suspend_hooks(self.projector):
-                if self.training:
-                    # TRAINING: Adapt both Backbone Norms AND Projector
-                    grads = grad(inner_grad_fn, argnums=(0, 1))(adapt_backbone, proj_params)
-                    grads_backbone = grads[0]
-                    grads_projector = grads[1]
-                else:
-                    # INFERENCE: Adapt Backbone Norms ONLY (Frozen Projector)
-                    # grad with argnums=0 returns a single dict, not a tuple
-                    grads_backbone = grad(inner_grad_fn, argnums=0)(adapt_backbone, proj_params)
-                    grads_projector = None # Safely initialize to None
-
-            safe_ttt_lr = F.softplus(self.ttt_lr) + 1e-4
+                grads_backbone = grad(inner_grad_fn, argnums=0)(adapt_backbone, proj_params)
             
-            # 1. Update Backbone Norms
             updated_backbone_params = {**all_params, **all_buffers}
+            
+            # --- THE FULL-FIDELITY FIX: Inner Gradient Normalization ---
+            # We calculate the global norm of the inner gradients to prevent explosions,
+            # while allowing the AdamW optimizer to freely learn the TTT-LRs.
+            total_norm = 0.0
+            for g in grads_backbone.values():
+                total_norm += g.pow(2).sum()
+            total_norm = torch.sqrt(total_norm + 1e-6)
+            
+            # Clip the gradient norm to 1.0 (Standard practice for stable meta-learning)
+            clip_coef = 1.0 / max(total_norm.item(), 1.0)
+
             for name, g in grads_backbone.items():
-                updated_backbone_params[name] = all_params[name] - (safe_ttt_lr * g.to(all_params[name].dtype))
+                lr_key = name.replace('.', '_')
+                # Use Softplus to ensure LR is positive, but do not artificially clamp it
+                active_lr = F.softplus(self.ttt_lrs[lr_key])
                 
-            # 2. Update Projector (Training Only - we don't actually use these updated params 
-            # for the final forward pass, but computing the gradients allows the outer 
-            # optimizer to update the projector later).
-            # Note: In functional_call meta-learning, if you want the projector to update, 
-            # its gradients must flow through the outer loss. The inner update here is just
-            # if the projector itself needs to be "fast weights", which it doesn't. 
-            # So we actually don't even need to calculate `updated_proj_params` here!
+                # Apply the normalized gradient
+                normalized_grad = g * clip_coef
+                updated_backbone_params[name] = all_params[name] - (active_lr * normalized_grad.to(all_params[name].dtype))
 
         # Restore train mode if we were training
         if self.training: 
@@ -313,9 +344,11 @@ class InstanceConditionedRouter(nn.Module):
     """
     def __init__(self, in_channels):
         super().__init__()
-        self.pool = nn.AdaptiveAvgPool2d(1)
+        self.avg_pool = nn.AdaptiveAvgPool2d(1)
+        self.max_pool = nn.AdaptiveMaxPool2d(1)
         self.router = nn.Sequential(
-            nn.Linear(in_channels, in_channels // 4),
+            # Input is now 2x channels (Avg + Max)
+            nn.Linear(in_channels * 2, in_channels // 4), 
             nn.ReLU(),
             nn.Linear(in_channels // 4, 2) 
         )
@@ -329,8 +362,12 @@ class InstanceConditionedRouter(nn.Module):
 
     def forward(self, x):
         B = x.shape[0]
-        stats = self.pool(x).view(B, -1)
-        return self.router(stats) 
+        # Concatenate spatial statistics
+        stats_avg = self.avg_pool(x).view(B, -1)
+        stats_max = self.max_pool(x).view(B, -1)
+        stats = torch.cat([stats_avg, stats_max], dim=1)
+        
+        return self.router(stats)
     
 #PHASE 3
 
@@ -339,15 +376,18 @@ class EngramMemoryBank(nn.Module):
     NUCLEAR VERSION: Hyperspherical Associative Memory.
     Forces hard-decision identity restoration.
     """
-    def __init__(self, num_classes, latent_dim=128, temperature=15.0):
+    def __init__(self, num_classes, latent_dim=128):
         super().__init__()
         self.num_classes = num_classes
         self.latent_dim = latent_dim
-        self.temperature = temperature
-        
-        # Prototypes are now unit vectors on a hypersphere
+        # Prototypes
         self.prototypes = nn.Parameter(torch.randn(num_classes, latent_dim))
-        nn.init.orthogonal_(self.prototypes)
+        nn.init.normal_(self.prototypes, std=0.02) # Normal init, no forced orthogonality
+        
+        # THE FIX: Learnable Temperature (Logit Scale)
+        # Initializes to ln(1/0.07) ≈ 2.65 -> exp(2.65) = 14.2 (Standard CLIP init)
+        import numpy as np
+        self.logit_scale = nn.Parameter(torch.ones([]) * np.log(1 / 0.07))
 
     def forward(self, x_latent, uncertainty_gate, objectness_mask):
         # 1. Hyperspherical Projection (Crucial for OOD)
@@ -356,8 +396,9 @@ class EngramMemoryBank(nn.Module):
         p_norm = F.normalize(self.prototypes, p=2, dim=-1)
         
         # 2. Hard-Attention Lookup (Temperature 50)
-        # Dot product similarity in hypersphere
-        attn_scores = torch.matmul(x_norm, p_norm.t()) * self.temperature
+        # Dynamically scaled cosine similarity
+        logit_scale = torch.clamp(self.logit_scale.exp(), max=100.0) # Prevent overflow
+        attn_scores = torch.matmul(x_norm, p_norm.t()) * logit_scale
         attn_weights = F.softmax(attn_scores, dim=-1)
         
         # 3. Memory Retrieval

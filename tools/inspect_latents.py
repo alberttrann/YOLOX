@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding:utf-8 -*-
-
+# tools/inspect_latents.py: A forensic analysis tool for TDE-YOLOX's latent space. Extracts and visualizes the Engram prototypes and live latent vectors from a specified FPN scale during inference on the validation set. Generates similarity heatmaps and PCA plots to reveal the structure of the learned representations, providing critical insights for debugging and optimization.
 import torch
 import torch.nn.functional as F
 import numpy as np

@@ -95,7 +95,6 @@ class Trainer:
 
     def train_one_iter(self):
         iter_start_time = time.time()
-
         inps, targets = self.prefetcher.next()
         inps = inps.to(self.data_type)
         targets = targets.to(self.data_type)
@@ -103,16 +102,21 @@ class Trainer:
         inps, targets = self.exp.preprocess(inps, targets, self.input_size)
         data_end_time = time.time()
 
+        accum_steps = getattr(self.exp, 'accum_steps', 1)
+        
         with torch.cuda.amp.autocast(enabled=self.amp_training):
             outputs = self.model(inps, targets)
 
         self.outputs = outputs
-        loss = outputs["total_loss"]
-
-        self.optimizer.zero_grad()
+        # Normalize loss by accumulation steps before backward
+        loss = outputs["total_loss"] / accum_steps
         self.scaler.scale(loss).backward()
-        self.scaler.step(self.optimizer)
-        self.scaler.update()
+
+        # Step only when accumulation is complete
+        if (self.iter + 1) % accum_steps == 0:
+            self.scaler.step(self.optimizer)
+            self.scaler.update()
+            self.optimizer.zero_grad()
 
         if self.use_model_ema:
             self.ema_model.update(self.model)
@@ -126,7 +130,10 @@ class Trainer:
             iter_time=iter_end_time - iter_start_time,
             data_time=data_end_time - iter_start_time,
             lr=lr,
-            **outputs,
+            **{k: v * accum_steps for k, v in outputs.items()
+            if k not in ['num_fg', 'ttt_prob']},  # restore display values
+            num_fg=outputs.get('num_fg', 0),
+            ttt_prob=outputs.get('ttt_prob', 0),
         )
 
     def before_train(self):

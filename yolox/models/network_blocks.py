@@ -199,10 +199,12 @@ class ResLayer(nn.Module):
 class SPPBottleneck(nn.Module):
     """Spatial pyramid pooling layer used in YOLOv3-SPP"""
     def __init__(
-        self, in_channels, out_channels, kernel_sizes=(5, 9, 13), activation="silu"
+        self, in_channels, out_channels, kernel_sizes=(5, 9, 13), activation="silu", use_gn=False
     ):
         super().__init__()
         hidden_channels = in_channels // 2
+        # Select the correct ConvBlock based on the flag
+        ConvBlock = BaseConvGN if use_gn else BaseConv
         self.conv1 = BaseConv(in_channels, hidden_channels, 1, stride=1, act=activation)
         self.m = nn.ModuleList(
             [

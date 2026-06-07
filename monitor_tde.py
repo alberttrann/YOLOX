@@ -1,3 +1,4 @@
+#monitor_tde.py: A forensic log parser and report generator for TDE-YOLOX training runs. Extracts training dynamics, evaluation metrics, and timing information from the training log to produce comprehensive visual reports on model performance, adaptation behavior, and resource usage. Critical for debugging and optimizing TDE-YOLOX under distribution shift.
 import re
 import os
 import argparse

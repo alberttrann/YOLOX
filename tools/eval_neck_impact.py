@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding:utf-8 -*-
-
+# eval_neck_impact.py: Evaluates the causal impact of the Tribrid Neck's global branch by severing it and comparing AP metrics.
 import argparse
 import torch
 import torch.nn as nn

@@ -70,6 +70,7 @@ class CSPDarknet(nn.Module):
                 n=base_depth * 3,
                 depthwise=depthwise,
                 act=act,
+                use_gn=True
             ),
         )
 
@@ -82,13 +83,14 @@ class CSPDarknet(nn.Module):
                 n=base_depth * 3,
                 depthwise=depthwise,
                 act=act,
+                use_gn=True
             ),
         )
 
         # 4. DARK5 (DEEP BACKBONE + SPP) - Standard BN
         self.dark5 = nn.Sequential(
             Conv(base_channels * 8, base_channels * 16, 3, 2, act=act),
-            SPPBottleneck(base_channels * 16, base_channels * 16, activation=act),
+            SPPBottleneck(base_channels * 16, base_channels * 16, activation=act, use_gn=True),
             CSPLayer(
                 base_channels * 16,
                 base_channels * 16,
@@ -96,6 +98,7 @@ class CSPDarknet(nn.Module):
                 shortcut=False,
                 depthwise=depthwise,
                 act=act,
+                use_gn=True
             ),
         )
 

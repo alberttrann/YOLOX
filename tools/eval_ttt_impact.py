@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding:utf-8 -*-
-
+#eval_ttt_impact.py: Evaluates the causal impact of the TTT-Stem by forcibly disabling the TTT loop and comparing AP metrics.
 import argparse
 import torch
 import torch.nn as nn

@@ -1,0 +1,82 @@
+#rain
+Average forward time: 17.93 ms, Average NMS time: 0.32 ms, Average inference time: 18.25 ms
+ Average Precision  (AP) @[ IoU=0.50:0.95 | area=   all | maxDets=100 ] = 0.144
+ Average Precision  (AP) @[ IoU=0.50      | area=   all | maxDets=100 ] = 0.257
+ Average Precision  (AP) @[ IoU=0.75      | area=   all | maxDets=100 ] = 0.131
+ Average Precision  (AP) @[ IoU=0.50:0.95 | area= small | maxDets=100 ] = 0.038
+ Average Precision  (AP) @[ IoU=0.50:0.95 | area=medium | maxDets=100 ] = 0.135
+ Average Precision  (AP) @[ IoU=0.50:0.95 | area= large | maxDets=100 ] = 0.348
+ Average Recall     (AR) @[ IoU=0.50:0.95 | area=   all | maxDets=  1 ] = 0.132
+ Average Recall     (AR) @[ IoU=0.50:0.95 | area=   all | maxDets= 10 ] = 0.223
+ Average Recall     (AR) @[ IoU=0.50:0.95 | area=   all | maxDets=100 ] = 0.252
+ Average Recall     (AR) @[ IoU=0.50:0.95 | area= small | maxDets=100 ] = 0.060
+ Average Recall     (AR) @[ IoU=0.50:0.95 | area=medium | maxDets=100 ] = 0.304
+ Average Recall     (AR) @[ IoU=0.50:0.95 | area= large | maxDets=100 ] = 0.495
+per class AP:
+| class   | AP     | class         | AP     | class        | AP     |
+|:--------|:-------|:--------------|:-------|:-------------|:-------|
+| car     | 46.240 | bus           | 14.158 | truck        | 22.737 |
+| person  | 12.155 | rider         | 0.110  | bike         | 0.035  |
+| motor   | 5.534  | traffic light | nan    | traffic sign | nan    |
+per class AR:
+| class   | AR     | class         | AR     | class        | AR     |
+|:--------|:-------|:--------------|:-------|:-------------|:-------|
+| car     | 53.764 | bus           | 31.875 | truck        | 46.875 |
+| person  | 23.106 | rider         | 2.000  | bike         | 8.889  |
+| motor   | 10.000 | traffic light | nan    | traffic sign | nan    |
+
+#test_acdc_night
+Average forward time: 18.53 ms, Average NMS time: 0.75 ms, Average inference time: 19.28 ms
+ Average Precision  (AP) @[ IoU=0.50:0.95 | area=   all | maxDets=100 ] = 0.108
+ Average Precision  (AP) @[ IoU=0.50      | area=   all | maxDets=100 ] = 0.235
+ Average Precision  (AP) @[ IoU=0.75      | area=   all | maxDets=100 ] = 0.073
+ Average Precision  (AP) @[ IoU=0.50:0.95 | area= small | maxDets=100 ] = 0.034
+ Average Precision  (AP) @[ IoU=0.50:0.95 | area=medium | maxDets=100 ] = 0.193
+ Average Precision  (AP) @[ IoU=0.50:0.95 | area= large | maxDets=100 ] = 0.334
+ Average Recall     (AR) @[ IoU=0.50:0.95 | area=   all | maxDets=  1 ] = 0.108
+ Average Recall     (AR) @[ IoU=0.50:0.95 | area=   all | maxDets= 10 ] = 0.177
+ Average Recall     (AR) @[ IoU=0.50:0.95 | area=   all | maxDets=100 ] = 0.187
+ Average Recall     (AR) @[ IoU=0.50:0.95 | area= small | maxDets=100 ] = 0.056
+ Average Recall     (AR) @[ IoU=0.50:0.95 | area=medium | maxDets=100 ] = 0.302
+ Average Recall     (AR) @[ IoU=0.50:0.95 | area= large | maxDets=100 ] = 0.454
+per class AP:
+| class   | AP     | class         | AP    | class        | AP    |
+|:--------|:-------|:--------------|:------|:-------------|:------|
+| car     | 32.456 | bus           | nan   | truck        | 7.623 |
+| person  | 13.350 | rider         | 5.248 | bike         | 4.549 |
+| motor   | 1.861  | traffic light | nan   | traffic sign | nan   |
+per class AR:
+| class   | AR     | class         | AR    | class        | AR     |
+|:--------|:-------|:--------------|:------|:-------------|:-------|
+| car     | 43.295 | bus           | nan   | truck        | 32.500 |
+| person  | 21.218 | rider         | 6.154 | bike         | 6.316  |
+| motor   | 2.500  | traffic light | nan   | traffic sign | nan    |
+
+#test_acdc_snow
+Average forward time: 17.43 ms, Average NMS time: 0.85 ms, Average inference time: 18.28 ms
+ Average Precision  (AP) @[ IoU=0.50:0.95 | area=   all | maxDets=100 ] = 0.159
+ Average Precision  (AP) @[ IoU=0.50      | area=   all | maxDets=100 ] = 0.281
+ Average Precision  (AP) @[ IoU=0.75      | area=   all | maxDets=100 ] = 0.172
+ Average Precision  (AP) @[ IoU=0.50:0.95 | area= small | maxDets=100 ] = 0.062
+ Average Precision  (AP) @[ IoU=0.50:0.95 | area=medium | maxDets=100 ] = 0.207
+ Average Precision  (AP) @[ IoU=0.50:0.95 | area= large | maxDets=100 ] = 0.396
+ Average Recall     (AR) @[ IoU=0.50:0.95 | area=   all | maxDets=  1 ] = 0.128
+ Average Recall     (AR) @[ IoU=0.50:0.95 | area=   all | maxDets= 10 ] = 0.241
+ Average Recall     (AR) @[ IoU=0.50:0.95 | area=   all | maxDets=100 ] = 0.254
+ Average Recall     (AR) @[ IoU=0.50:0.95 | area= small | maxDets=100 ] = 0.085
+ Average Recall     (AR) @[ IoU=0.50:0.95 | area=medium | maxDets=100 ] = 0.328
+ Average Recall     (AR) @[ IoU=0.50:0.95 | area= large | maxDets=100 ] = 0.506
+per class AP:
+| class   | AP     | class         | AP    | class        | AP     |
+|:--------|:-------|:--------------|:------|:-------------|:-------|
+| car     | 45.846 | bus           | 1.221 | truck        | 34.456 |
+| person  | 16.738 | rider         | 0.000 | bike         | 2.082  |
+| motor   | 11.234 | traffic light | nan   | traffic sign | nan    |
+per class AR:
+| class   | AR     | class         | AR    | class        | AR     |
+|:--------|:-------|:--------------|:------|:-------------|:-------|
+| car     | 54.311 | bus           | 7.500 | truck        | 47.805 |
+| person  | 26.429 | rider         | 0.000 | bike         | 21.000 |
+| motor   | 20.625 | traffic light | nan   | traffic sign | nan    |
+
+#Fog

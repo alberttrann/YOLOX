@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding:utf-8 -*-
-
+#tools/inspect_internals_2.py: A comprehensive diagnostic tool for TDE-YOLOX internals, analyzing TTT dynamics, Tribrid gating, and Engram injection in a single pass. Provides actionable insights for researchers to understand and optimize the interplay of components.
 import argparse
 import torch
 import torch.nn.functional as F
@@ -63,10 +63,15 @@ def inspect_model_internals(exp_file, ckpt_path, num_batches=3):
     
     try:
         ttt_stage = model.backbone.backbone.dark2
-        raw_lr = ttt_stage.ttt_lr.item()
-        actual_lr = F.softplus(torch.tensor(raw_lr)).item() + 1e-4
-        print(f"Raw Meta-LR Parameter: {raw_lr:.6f}")
-        print(f"Actual Math Meta-LR:   {actual_lr:.6f}")
+        if hasattr(ttt_stage, "ttt_lrs") and len(ttt_stage.ttt_lrs) > 0:
+            lrs = [p.data for p in ttt_stage.ttt_lrs.values()]
+            avg_raw_lr = torch.stack(lrs).mean().item()
+            actual_lr = F.softplus(torch.tensor(avg_raw_lr)).item() + 1e-4
+            print(f"Detected {len(lrs)} Meta-LR parameters in ParameterDict.")
+            print(f"Average Raw Meta-LR: {avg_raw_lr:.6f}")
+            print(f"Actual Math Meta-LR:   {actual_lr:.6f}")
+        else:
+            print("TTTAdaptiveStage found, but ttt_lrs is empty or missing.")
     except Exception as e:
         print(f"Could not locate TTT LR. Error: {e}")
 
@@ -177,7 +182,14 @@ def inspect_model_internals(exp_file, ckpt_path, num_batches=3):
     
     for h in handles: h.remove()
 
-    scale_idx = 2 
+    scale_idx = 0 
+    
+    handles = []
+    # Attach to P3 (Index 0)
+    handles.append(model.head.uncertainty_gates[scale_idx].register_forward_hook(get_gate_hook()))
+    handles.append(model.head.cls_convs[scale_idx].register_forward_hook(get_cls_hook()))
+    handles.append(model.head.memory_banks[scale_idx].register_forward_hook(get_mem_hook()))
+    handles.append(model.head.obj_preds[scale_idx].register_forward_hook(get_obj_hook()))
     gate_val = engram_data['gate'][0]        
     cls_f = engram_data['cls_feat'][0]       
     mem_raw = engram_data['mem_feat'][0]     
@@ -195,10 +207,10 @@ def inspect_model_internals(exp_file, ckpt_path, num_batches=3):
     memory_scaled = mem_inflated * (norm_conv / (norm_mem + 1e-6)) 
     
     obj_scores = torch.sigmoid(obj_out).view(B, -1)
-    obj_mask = obj_scores > 0.3 
+    obj_mask = obj_scores > 0.01
     
     if obj_mask.sum() == 0:
-        print("Warning: No objects >0.3 confidence in sample batch. Skipping Gate metrics.")
+        print("Warning: No objects >0.01 confidence in sample batch. Skipping Gate metrics.")
     else:
         valid_gates = gate_val.view(B, -1)[obj_mask]
         valid_conv = cls_flat[obj_mask]

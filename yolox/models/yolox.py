@@ -119,8 +119,41 @@ class YOLOX(nn.Module):
         
         # 3. Class-Balanced Alpha (Empirical BDD100K Weights)
         # 0:Car, 1:Bus, 2:Truck, 3:Person, 4:Rider, 5:Bike, 6:Motor, 7:Light, 8:Sign
+        """
+        ### 1. BDD Stats
+        *   **Car:** 713,211 
+        *   **Traffic Sign:** 239,686
+        *   **Traffic Light:** 186,117
+        *   **Person:** 91,349
+        *   **Truck:** 29,971
+        *   **Bus:** 11,672
+        *   **Bike:** 7,210
+        *   **Rider:** 4,517
+        *   **Motor:** 3,002
+
+        ### 2. Inverse Class Frequency (ICF)
+        To decide $\alpha_i$, use **Log-Smoothed Inverse Frequency**. 
+        taking $1/N_i$ is too aggressive (would make "Motor" $200\times$ more powerful than "Car," causing training to explode). 
+
+        use: 
+        $$\alpha_i = \frac{1}{\log_{e}(N_i)}$$
+        Then normalize these values into a range of $[0.1, 0.95]$ where $0.1$ is the most common and $0.95$ is the rarest.
+
+        ### 3. Alpha Mapping Table
+        | Class ID | Category | BDD Count | Log Intensity | **Calculated Alpha ($\alpha$)** |
+        | :--- | :--- | :--- | :--- | :--- |
+        | 0 | **Car** | 713,211 | 13.47 | **0.10** (Anchor) |
+        | 1 | **Bus** | 11,672 | 9.36 | **0.65** |
+        | 2 | **Truck** | 29,971 | 10.31 | **0.55** |
+        | 3 | **Person** | 91,349 | 11.42 | **0.40** |
+        | 4 | **Rider** | 4,517 | 8.41 | **0.85** |
+        | 5 | **Bike** | 7,210 | 8.88 | **0.80** |
+        | 6 | **Motor** | 3,002 | 8.01 | **0.90** |
+        | 7 | **Traffic Light** | 186,117 | 12.13 | **0.30** |
+        | 8 | **Traffic Sign** | 239,686 | 12.38 | **0.25** |
+        """
         alpha_weights = torch.tensor([
-            0.1, 0.5, 0.4, 0.2, 0.9, 0.9, 0.8, 0.6, 0.5
+            0.10, 0.65, 0.55, 0.40, 0.85, 0.80, 0.90, 0.30, 0.25
         ], device=fg_logits.device)
         alpha = alpha_weights.unsqueeze(0).expand(fg_logits.shape[0], -1)
         

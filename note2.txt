@@ -1,0 +1,216 @@
+(.venv) PS D:\YOLOX-3rd> python tools/eval.py -f exps/default/test_acdc_snow.py -c YOLOX_outputs/tde_yolox_s/epoch_30_ckpt.pth -b 16 -d 1 --conf 0.001 --fp16 --fuse 
+2026-03-16 16:31:26 | INFO     | __main__:226 - Args: Namespace(experiment_name='test_acdc_snow', name=None, dist_backend='nccl', dist_url=None, batch_size=16, devices=1, num_machines=1, machine_rank=0, exp_file='exps/default/test_acdc_snow.py', ckpt='YOLOX_outputs/tde_yolox_s/epoch_30_ckpt.pth', conf=0.001, nms=None, tsize=None, seed=None, fp16=True, fuse=True, trt=False, legacy=False, test=False, speed=False, opts=[])
+2026-03-16 16:31:26 | INFO     | __main__:244 - TDE-YOLOX: Setting Meta-Inference state (Probability 1.0)...
+2026-03-16 16:31:26 | INFO     | __main__:247 - Model Summary: Params: 9.80M, Gflops: 28.60
+2026-03-16 16:31:26 | INFO     | yolox.data.datasets.coco:67 - loading annotations into memory...
+2026-03-16 16:31:26 | INFO     | yolox.data.datasets.coco:67 - Done (t=0.08s)
+2026-03-16 16:31:26 | INFO     | pycocotools.coco:86 - creating index...
+2026-03-16 16:31:26 | INFO     | pycocotools.coco:86 - index created!
+2026-03-16 16:31:26 | INFO     | __main__:264 - loading checkpoint from YOLOX_outputs/tde_yolox_s/epoch_30_ckpt.pth
+2026-03-16 16:31:26 | INFO     | __main__:268 - loaded checkpoint done.
+2026-03-16 16:31:26 | INFO     | __main__:108 - Executing High-Fidelity TDE-YOLOX Fusion...
+2026-03-16 16:31:26 | INFO     | __main__:80 -   -> Protected: TTTAdaptiveStage (Dark2)
+2026-03-16 16:31:26 | INFO     | __main__:294 - Starting TDE-YOLOX OOD Forensic Evaluation...
+D:\YOLOX-3rd\.venv\lib\site-packages\torch\nn\modules\module.py:831: UserWarning: The .grad attribute of a Tensor that is not a leaf Tensor is being accessed. Its .grad attribute won't be populated during autograd.backward(). If you indeed want the .grad field to be populated for a non-leaf Tensor, use .retain_grad() on the non-leaf Tensor. If you access the non-leaf Tensor by mistake, make sure you access the leaf Tensor instead. See github.com/pytorch/pytorch/pull/30531 for more informations. (Triggered internally at aten\src\ATen/core/TensorBody.h:491.)
+  if param.grad is not None:
+100%|##############################################################################################| 7/7 [00:10<00:00,  1.54s/it] 
+2026-03-16 16:31:37 | INFO     | yolox.evaluators.coco_evaluator:286 - Evaluate in main process...
+2026-03-16 16:31:38 | INFO     | yolox.evaluators.coco_evaluator:319 - Loading and preparing results...
+2026-03-16 16:31:38 | INFO     | yolox.evaluators.coco_evaluator:319 - DONE (t=0.27s)
+2026-03-16 16:31:38 | INFO     | pycocotools.coco:367 - creating index...
+2026-03-16 16:31:38 | INFO     | pycocotools.coco:367 - index created!
+2026-03-16 16:31:38 | INFO     | yolox.evaluators.coco_evaluator:324 - Running per image evaluation...
+2026-03-16 16:31:38 | INFO     | yolox.evaluators.coco_evaluator:324 - Evaluate annotation type *bbox*
+2026-03-16 16:31:38 | INFO     | yolox.evaluators.coco_evaluator:324 - DONE (t=0.57s).
+2026-03-16 16:31:38 | INFO     | yolox.evaluators.coco_evaluator:325 - Accumulating evaluation results...
+2026-03-16 16:31:39 | INFO     | yolox.evaluators.coco_evaluator:325 - DONE (t=0.09s).
+2026-03-16 16:31:39 | INFO     | __main__:302 - 
+Average forward time: 26.14 ms, Average NMS time: 1.06 ms, Average inference time: 27.20 ms
+ Average Precision  (AP) @[ IoU=0.50:0.95 | area=   all | maxDets=100 ] = 0.168
+ Average Precision  (AP) @[ IoU=0.50      | area=   all | maxDets=100 ] = 0.303
+ Average Precision  (AP) @[ IoU=0.75      | area=   all | maxDets=100 ] = 0.160
+ Average Precision  (AP) @[ IoU=0.50:0.95 | area= small | maxDets=100 ] = 0.117
+ Average Precision  (AP) @[ IoU=0.50:0.95 | area=medium | maxDets=100 ] = 0.226
+ Average Precision  (AP) @[ IoU=0.50:0.95 | area= large | maxDets=100 ] = 0.401
+ Average Recall     (AR) @[ IoU=0.50:0.95 | area=   all | maxDets=  1 ] = 0.122
+ Average Recall     (AR) @[ IoU=0.50:0.95 | area=   all | maxDets= 10 ] = 0.259
+ Average Recall     (AR) @[ IoU=0.50:0.95 | area=   all | maxDets=100 ] = 0.278
+ Average Recall     (AR) @[ IoU=0.50:0.95 | area= small | maxDets=100 ] = 0.151
+ Average Recall     (AR) @[ IoU=0.50:0.95 | area=medium | maxDets=100 ] = 0.340
+ Average Recall     (AR) @[ IoU=0.50:0.95 | area= large | maxDets=100 ] = 0.471
+per class AP:
+| class   | AP     | class         | AP    | class        | AP     |
+|:--------|:-------|:--------------|:------|:-------------|:-------|
+| car     | 46.130 | bus           | 0.070 | truck        | 35.479 |
+| person  | 19.321 | rider         | 3.366 | bike         | 3.061  |
+| motor   | 10.310 | traffic light | nan   | traffic sign | nan    |
+per class AR:
+| class   | AR     | class         | AR     | class        | AR     |
+|:--------|:-------|:--------------|:-------|:-------------|:-------|
+| car     | 54.597 | bus           | 2.500  | truck        | 45.854 |
+| person  | 29.821 | rider         | 20.000 | bike         | 20.000 |
+| motor   | 21.875 | traffic light | nan    | traffic sign | nan    |
+
+(.venv) PS D:\YOLOX-3rd> python tools/eval.py -f exps/default/test_acdc_night.py -c YOLOX_outputs/tde_yolox_s/epoch_30_ckpt.pth -b
+ 16 -d 1 --conf 0.001 --fp16 --fuse
+2026-03-16 16:32:08 | INFO     | __main__:226 - Args: Namespace(experiment_name='test_acdc_night', name=None, dist_backend='nccl', dist_url=None, batch_size=16, devices=1, num_machines=1, machine_rank=0, exp_file='exps/default/test_acdc_night.py', ckpt='YOLOX_outputs/tde_yolox_s/epoch_30_ckpt.pth', conf=0.001, nms=None, tsize=None, seed=None, fp16=True, fuse=True, trt=False, legacy=False, test=False, speed=False, opts=[])
+2026-03-16 16:32:08 | INFO     | __main__:244 - TDE-YOLOX: Setting Meta-Inference state (Probability 1.0)...
+2026-03-16 16:32:08 | INFO     | __main__:247 - Model Summary: Params: 9.80M, Gflops: 28.60
+2026-03-16 16:32:08 | INFO     | yolox.data.datasets.coco:67 - loading annotations into memory...
+2026-03-16 16:32:08 | INFO     | yolox.data.datasets.coco:67 - Done (t=0.00s)
+2026-03-16 16:32:08 | INFO     | pycocotools.coco:86 - creating index...
+2026-03-16 16:32:08 | INFO     | pycocotools.coco:86 - index created!
+2026-03-16 16:32:08 | INFO     | __main__:264 - loading checkpoint from YOLOX_outputs/tde_yolox_s/epoch_30_ckpt.pth
+2026-03-16 16:32:08 | INFO     | __main__:268 - loaded checkpoint done.
+2026-03-16 16:32:08 | INFO     | __main__:108 - Executing High-Fidelity TDE-YOLOX Fusion...
+2026-03-16 16:32:08 | INFO     | __main__:80 -   -> Protected: TTTAdaptiveStage (Dark2)
+2026-03-16 16:32:08 | INFO     | __main__:294 - Starting TDE-YOLOX OOD Forensic Evaluation...
+D:\YOLOX-3rd\.venv\lib\site-packages\torch\nn\modules\module.py:831: UserWarning: The .grad attribute of a Tensor that is not a leaf Tensor is being accessed. Its .grad attribute won't be populated during autograd.backward(). If you indeed want the .grad field to be populated for a non-leaf Tensor, use .retain_grad() on the non-leaf Tensor. If you access the non-leaf Tensor by mistake, make sure you access the leaf Tensor instead. See github.com/pytorch/pytorch/pull/30531 for more informations. (Triggered internally at aten\src\ATen/core/TensorBody.h:491.)
+  if param.grad is not None:
+100%|##############################################################################################| 7/7 [00:09<00:00,  1.39s/it] 
+2026-03-16 16:32:18 | INFO     | yolox.evaluators.coco_evaluator:286 - Evaluate in main process...
+2026-03-16 16:32:18 | INFO     | yolox.evaluators.coco_evaluator:319 - Loading and preparing results...
+2026-03-16 16:32:18 | INFO     | yolox.evaluators.coco_evaluator:319 - DONE (t=0.12s)
+2026-03-16 16:32:18 | INFO     | pycocotools.coco:367 - creating index...
+2026-03-16 16:32:18 | INFO     | pycocotools.coco:367 - index created!
+2026-03-16 16:32:18 | INFO     | yolox.evaluators.coco_evaluator:324 - Running per image evaluation...
+2026-03-16 16:32:18 | INFO     | yolox.evaluators.coco_evaluator:324 - Evaluate annotation type *bbox*
+2026-03-16 16:32:19 | INFO     | yolox.evaluators.coco_evaluator:324 - DONE (t=0.35s).
+2026-03-16 16:32:19 | INFO     | yolox.evaluators.coco_evaluator:325 - Accumulating evaluation results...
+2026-03-16 16:32:19 | INFO     | yolox.evaluators.coco_evaluator:325 - DONE (t=0.07s).
+2026-03-16 16:32:19 | INFO     | __main__:302 - 
+Average forward time: 18.77 ms, Average NMS time: 0.67 ms, Average inference time: 19.45 ms
+ Average Precision  (AP) @[ IoU=0.50:0.95 | area=   all | maxDets=100 ] = 0.109
+ Average Precision  (AP) @[ IoU=0.50      | area=   all | maxDets=100 ] = 0.235
+ Average Precision  (AP) @[ IoU=0.75      | area=   all | maxDets=100 ] = 0.086
+ Average Precision  (AP) @[ IoU=0.50:0.95 | area= small | maxDets=100 ] = 0.032
+ Average Precision  (AP) @[ IoU=0.50:0.95 | area=medium | maxDets=100 ] = 0.218
+ Average Precision  (AP) @[ IoU=0.50:0.95 | area= large | maxDets=100 ] = 0.265
+ Average Recall     (AR) @[ IoU=0.50:0.95 | area=   all | maxDets=  1 ] = 0.113
+ Average Recall     (AR) @[ IoU=0.50:0.95 | area=   all | maxDets= 10 ] = 0.182
+ Average Recall     (AR) @[ IoU=0.50:0.95 | area=   all | maxDets=100 ] = 0.190
+ Average Recall     (AR) @[ IoU=0.50:0.95 | area= small | maxDets=100 ] = 0.050
+ Average Recall     (AR) @[ IoU=0.50:0.95 | area=medium | maxDets=100 ] = 0.326
+ Average Recall     (AR) @[ IoU=0.50:0.95 | area= large | maxDets=100 ] = 0.410
+per class AP:
+| class   | AP     | class         | AP    | class        | AP    |
+|:--------|:-------|:--------------|:------|:-------------|:------|
+| car     | 34.018 | bus           | nan   | truck        | 6.959 |
+| person  | 12.061 | rider         | 5.175 | bike         | 4.758 |
+| motor   | 2.376  | traffic light | nan   | traffic sign | nan   |
+per class AR:
+| class   | AR     | class         | AR    | class        | AR     |
+|:--------|:-------|:--------------|:------|:-------------|:-------|
+| car     | 43.411 | bus           | nan   | truck        | 35.000 |
+| person  | 18.462 | rider         | 6.923 | bike         | 8.158  |
+| motor   | 2.000  | traffic light | nan   | traffic sign | nan    |
+
+(.venv) PS D:\YOLOX-3rd> python tools/eval.py -f exps/default/test_acdc_rain.py -c YOLOX_outputs/tde_yolox_s/epoch_30_ckpt.pth -b 
+16 -d 1 --conf 0.001 --fp16 --fuse 
+2026-03-16 16:32:46 | INFO     | __main__:226 - Args: Namespace(experiment_name='test_acdc_rain', name=None, dist_backend='nccl', dist_url=None, batch_size=16, devices=1, num_machines=1, machine_rank=0, exp_file='exps/default/test_acdc_rain.py', ckpt='YOLOX_outputs/tde_yolox_s/epoch_30_ckpt.pth', conf=0.001, nms=None, tsize=None, seed=None, fp16=True, fuse=True, trt=False, legacy=False, test=False, speed=False, opts=[])
+2026-03-16 16:32:46 | INFO     | __main__:244 - TDE-YOLOX: Setting Meta-Inference state (Probability 1.0)...
+2026-03-16 16:32:46 | INFO     | __main__:247 - Model Summary: Params: 9.80M, Gflops: 28.60
+2026-03-16 16:32:46 | INFO     | yolox.data.datasets.coco:67 - loading annotations into memory...
+2026-03-16 16:32:47 | INFO     | yolox.data.datasets.coco:67 - Done (t=0.08s)
+2026-03-16 16:32:47 | INFO     | pycocotools.coco:86 - creating index...
+2026-03-16 16:32:47 | INFO     | pycocotools.coco:86 - index created!
+2026-03-16 16:32:47 | INFO     | __main__:264 - loading checkpoint from YOLOX_outputs/tde_yolox_s/epoch_30_ckpt.pth
+2026-03-16 16:32:47 | INFO     | __main__:268 - loaded checkpoint done.
+2026-03-16 16:32:47 | INFO     | __main__:108 - Executing High-Fidelity TDE-YOLOX Fusion...
+2026-03-16 16:32:47 | INFO     | __main__:80 -   -> Protected: TTTAdaptiveStage (Dark2)
+2026-03-16 16:32:47 | INFO     | __main__:294 - Starting TDE-YOLOX OOD Forensic Evaluation...
+D:\YOLOX-3rd\.venv\lib\site-packages\torch\nn\modules\module.py:831: UserWarning: The .grad attribute of a Tensor that is not a leaf Tensor is being accessed. Its .grad attribute won't be populated during autograd.backward(). If you indeed want the .grad field to be populated for a non-leaf Tensor, use .retain_grad() on the non-leaf Tensor. If you access the non-leaf Tensor by mistake, make sure you access the leaf Tensor instead. See github.com/pytorch/pytorch/pull/30531 for more informations. (Triggered internally at aten\src\ATen/core/TensorBody.h:491.)
+  if param.grad is not None:
+100%|##############################################################################################| 7/7 [00:09<00:00,  1.42s/it] 
+2026-03-16 16:32:57 | INFO     | yolox.evaluators.coco_evaluator:286 - Evaluate in main process...
+2026-03-16 16:32:57 | INFO     | yolox.evaluators.coco_evaluator:319 - Loading and preparing results...
+2026-03-16 16:32:58 | INFO     | yolox.evaluators.coco_evaluator:319 - DONE (t=0.27s)
+2026-03-16 16:32:58 | INFO     | pycocotools.coco:367 - creating index...
+2026-03-16 16:32:58 | INFO     | pycocotools.coco:367 - index created!
+2026-03-16 16:32:58 | INFO     | yolox.evaluators.coco_evaluator:324 - Running per image evaluation...
+2026-03-16 16:32:58 | INFO     | yolox.evaluators.coco_evaluator:324 - Evaluate annotation type *bbox*
+2026-03-16 16:32:58 | INFO     | yolox.evaluators.coco_evaluator:324 - DONE (t=0.58s).
+2026-03-16 16:32:58 | INFO     | yolox.evaluators.coco_evaluator:325 - Accumulating evaluation results...
+2026-03-16 16:32:58 | INFO     | yolox.evaluators.coco_evaluator:325 - DONE (t=0.10s).
+2026-03-16 16:32:58 | INFO     | __main__:302 - 
+Average forward time: 20.62 ms, Average NMS time: 0.60 ms, Average inference time: 21.22 ms
+ Average Precision  (AP) @[ IoU=0.50:0.95 | area=   all | maxDets=100 ] = 0.149
+ Average Precision  (AP) @[ IoU=0.50      | area=   all | maxDets=100 ] = 0.269
+ Average Precision  (AP) @[ IoU=0.75      | area=   all | maxDets=100 ] = 0.133
+ Average Precision  (AP) @[ IoU=0.50:0.95 | area= small | maxDets=100 ] = 0.037
+ Average Precision  (AP) @[ IoU=0.50:0.95 | area=medium | maxDets=100 ] = 0.148
+ Average Precision  (AP) @[ IoU=0.50:0.95 | area= large | maxDets=100 ] = 0.441
+ Average Recall     (AR) @[ IoU=0.50:0.95 | area=   all | maxDets=  1 ] = 0.135
+ Average Recall     (AR) @[ IoU=0.50:0.95 | area=   all | maxDets= 10 ] = 0.240
+ Average Recall     (AR) @[ IoU=0.50:0.95 | area=   all | maxDets=100 ] = 0.256
+ Average Recall     (AR) @[ IoU=0.50:0.95 | area= small | maxDets=100 ] = 0.064
+ Average Recall     (AR) @[ IoU=0.50:0.95 | area=medium | maxDets=100 ] = 0.268
+ Average Recall     (AR) @[ IoU=0.50:0.95 | area= large | maxDets=100 ] = 0.577
+per class AP:
+| class   | AP     | class         | AP     | class        | AP     |
+|:--------|:-------|:--------------|:-------|:-------------|:-------|
+| car     | 45.375 | bus           | 15.297 | truck        | 23.815 |
+| person  | 13.907 | rider         | 2.310  | bike         | 0.018  |
+| motor   | 3.377  | traffic light | nan    | traffic sign | nan    |
+per class AR:
+| class   | AR     | class         | AR     | class        | AR     |
+|:--------|:-------|:--------------|:-------|:-------------|:-------|
+| car     | 53.954 | bus           | 29.063 | truck        | 40.625 |
+| person  | 24.394 | rider         | 10.000 | bike         | 2.222  |
+| motor   | 19.167 | traffic light | nan    | traffic sign | nan    |
+
+(.venv) PS D:\YOLOX-3rd> python tools/eval.py -f exps/default/test_acdc_fog.py -c YOLOX_outputs/tde_yolox_s/epoch_30_ckpt.pth -b 1
+6 -d 1 --conf 0.001 --fp16 --fuse 
+2026-03-16 16:33:25 | INFO     | __main__:226 - Args: Namespace(experiment_name='test_acdc_fog', name=None, dist_backend='nccl', dist_url=None, batch_size=16, devices=1, num_machines=1, machine_rank=0, exp_file='exps/default/test_acdc_fog.py', ckpt='YOLOX_outputs/tde_yolox_s/epoch_30_ckpt.pth', conf=0.001, nms=None, tsize=None, seed=None, fp16=True, fuse=True, trt=False, legacy=False, test=False, speed=False, opts=[])
+2026-03-16 16:33:25 | INFO     | __main__:244 - TDE-YOLOX: Setting Meta-Inference state (Probability 1.0)...
+2026-03-16 16:33:25 | INFO     | __main__:247 - Model Summary: Params: 9.80M, Gflops: 28.60
+2026-03-16 16:33:25 | INFO     | yolox.data.datasets.coco:67 - loading annotations into memory...
+2026-03-16 16:33:25 | INFO     | yolox.data.datasets.coco:67 - Done (t=0.08s)
+2026-03-16 16:33:25 | INFO     | pycocotools.coco:86 - creating index...
+2026-03-16 16:33:25 | INFO     | pycocotools.coco:86 - index created!
+2026-03-16 16:33:25 | INFO     | __main__:264 - loading checkpoint from YOLOX_outputs/tde_yolox_s/epoch_30_ckpt.pth
+2026-03-16 16:33:25 | INFO     | __main__:268 - loaded checkpoint done.
+2026-03-16 16:33:25 | INFO     | __main__:108 - Executing High-Fidelity TDE-YOLOX Fusion...
+2026-03-16 16:33:25 | INFO     | __main__:80 -   -> Protected: TTTAdaptiveStage (Dark2)
+2026-03-16 16:33:25 | INFO     | __main__:294 - Starting TDE-YOLOX OOD Forensic Evaluation...
+D:\YOLOX-3rd\.venv\lib\site-packages\torch\nn\modules\module.py:831: UserWarning: The .grad attribute of a Tensor that is not a leaf Tensor is being accessed. Its .grad attribute won't be populated during autograd.backward(). If you indeed want the .grad field to be populated for a non-leaf Tensor, use .retain_grad() on the non-leaf Tensor. If you access the non-leaf Tensor by mistake, make sure you access the leaf Tensor instead. See github.com/pytorch/pytorch/pull/30531 for more informations. (Triggered internally at aten\src\ATen/core/TensorBody.h:491.)
+  if param.grad is not None:
+100%|##############################################################################################| 7/7 [00:09<00:00,  1.36s/it] 
+2026-03-16 16:33:35 | INFO     | yolox.evaluators.coco_evaluator:286 - Evaluate in main process...
+2026-03-16 16:33:35 | INFO     | yolox.evaluators.coco_evaluator:319 - Loading and preparing results...
+2026-03-16 16:33:35 | INFO     | yolox.evaluators.coco_evaluator:319 - DONE (t=0.13s)
+2026-03-16 16:33:35 | INFO     | pycocotools.coco:367 - creating index...
+2026-03-16 16:33:35 | INFO     | pycocotools.coco:367 - index created!
+2026-03-16 16:33:35 | INFO     | yolox.evaluators.coco_evaluator:324 - Running per image evaluation...
+2026-03-16 16:33:35 | INFO     | yolox.evaluators.coco_evaluator:324 - Evaluate annotation type *bbox*
+2026-03-16 16:33:35 | INFO     | yolox.evaluators.coco_evaluator:324 - DONE (t=0.40s).
+2026-03-16 16:33:35 | INFO     | yolox.evaluators.coco_evaluator:325 - Accumulating evaluation results...
+2026-03-16 16:33:36 | INFO     | yolox.evaluators.coco_evaluator:325 - DONE (t=0.09s).
+2026-03-16 16:33:36 | INFO     | __main__:302 - 
+Average forward time: 19.36 ms, Average NMS time: 0.56 ms, Average inference time: 19.92 ms
+ Average Precision  (AP) @[ IoU=0.50:0.95 | area=   all | maxDets=100 ] = 0.265
+ Average Precision  (AP) @[ IoU=0.50      | area=   all | maxDets=100 ] = 0.469
+ Average Precision  (AP) @[ IoU=0.75      | area=   all | maxDets=100 ] = 0.242
+ Average Precision  (AP) @[ IoU=0.50:0.95 | area= small | maxDets=100 ] = 0.077
+ Average Precision  (AP) @[ IoU=0.50:0.95 | area=medium | maxDets=100 ] = 0.396
+ Average Precision  (AP) @[ IoU=0.50:0.95 | area= large | maxDets=100 ] = 0.329
+ Average Recall     (AR) @[ IoU=0.50:0.95 | area=   all | maxDets=  1 ] = 0.268
+ Average Recall     (AR) @[ IoU=0.50:0.95 | area=   all | maxDets= 10 ] = 0.397
+ Average Recall     (AR) @[ IoU=0.50:0.95 | area=   all | maxDets=100 ] = 0.403
+ Average Recall     (AR) @[ IoU=0.50:0.95 | area= small | maxDets=100 ] = 0.130
+ Average Recall     (AR) @[ IoU=0.50:0.95 | area=medium | maxDets=100 ] = 0.504
+ Average Recall     (AR) @[ IoU=0.50:0.95 | area= large | maxDets=100 ] = 0.484
+per class AP:
+| class   | AP     | class         | AP     | class        | AP     |
+|:--------|:-------|:--------------|:-------|:-------------|:-------|
+| car     | 58.161 | bus           | 26.716 | truck        | 23.409 |
+| person  | 21.728 | rider         | 14.257 | bike         | 30.114 |
+| motor   | 11.114 | traffic light | nan    | traffic sign | nan    |
+per class AR:
+| class   | AR     | class         | AR     | class        | AR     |
+|:--------|:-------|:--------------|:-------|:-------------|:-------|
+| car     | 64.746 | bus           | 68.000 | truck        | 41.463 |
+| person  | 38.710 | rider         | 17.273 | bike         | 35.455 |
+| motor   | 16.364 | traffic light | nan    | traffic sign | nan    |
+
+(.venv) PS D:\YOLOX-3rd>
