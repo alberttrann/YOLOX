@@ -3,7 +3,8 @@
 > **Technical README for the simpler TDE implementation that produced the reported epoch-30 ACDC results.**
 >
 > This document describes the implementation **as it was run**, not the later TDE-vNext redesign. It also records known implementation caveats rather than silently correcting them, because this version is valuable precisely as an empirical reference point.
-
+>
+> A more detailed technical report can be read at [TDE-2.0.4-document.pdf](TDE-2.0.4-document.pdf)
 ---
 
 ## 1. Executive summary
