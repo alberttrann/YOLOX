@@ -1,17 +1,22 @@
 #!/usr/bin/env python
 # -*- encoding: utf-8 -*-
 # Copyright (c) Megvii Inc. All rights reserved.
+# Integrated for TDE-YOLOX v3.1: Hierarchical BQSA & Symmetrical Scale-AttnRes PAFPN
 
 import torch
 import torch.nn as nn
-
 from .darknet import CSPDarknet
-from .network_blocks import BaseConv, CSPLayer, DWConv
+from .network_blocks import BaseConv
+from .tribrid_neck import P5ExclusiveDenseAttention, C2f_BQSA_P4, C2f_BQSA_P3, ScaleAttnRes
 
-
-from .tribrid_neck import C2f_Tribrid
 
 class YOLOPAFPN(nn.Module):
+    """
+    TDE-YOLOX v3.1 Master Neck:
+      - Top-Down Pass: BQSA (P5 Dense Exclusive -> P4 Gumbel Reindex -> P3 Block Reuse)
+      - Bottom-Up Pass: Symmetrical Scale-AttnRes depth softmax attention across N3, N4, N5
+      - Preserves hierarchical anchor access for the Engram Head
+    """
     def __init__(
         self,
         depth=1.0,
@@ -20,86 +25,63 @@ class YOLOPAFPN(nn.Module):
         in_channels=[256, 512, 1024],
         depthwise=False,
         act="silu",
-        # Passing TTT parameters to inner backbone
-        ttt_lr=0.005,
-        ttt_noise_std=0.05
+        ttt_lr=0.05,
+        ttt_noise_std=0.08
     ):
         super().__init__()
-        # Instantiate the TTT-Aware Backbone
+        self.in_features = in_features
+        self.in_channels = in_channels
+        
+        # 1. Backbone with GroupNorm Focus & Functional TTT-Dark2
         self.backbone = CSPDarknet(
-            depth, width, out_features=in_features, 
+            depth, width, out_features=in_features,
             depthwise=depthwise, act=act,
             ttt_lr=ttt_lr, ttt_noise_std=ttt_noise_std
         )
-        self.in_features = in_features
-        self.in_channels = in_channels
-
+        
+        c3, c4, c5 = [int(x * width) for x in in_channels]  # 128, 256, 512 for width=0.5
         self.upsample = nn.Upsample(scale_factor=2, mode="nearest")
         
-        # Lateral convolutions
-        self.lateral_conv0 = BaseConv(int(in_channels[2] * width), int(in_channels[1] * width), 1, 1, act=act)
-        self.reduce_conv1 = BaseConv(int(in_channels[1] * width), int(in_channels[0] * width), 1, 1, act=act)
-        self.bu_conv2 = BaseConv(int(in_channels[0] * width), int(in_channels[0] * width), 3, 2, act=act)
-        self.bu_conv1 = BaseConv(int(in_channels[1] * width), int(in_channels[1] * width), 3, 2, act=act)
+        # Top-Down BQSA Components
+        self.lateral_c5 = BaseConv(c5, c4, 1, 1, act=act)
+        self.p5_dense_attn = P5ExclusiveDenseAttention(c5)
+        self.p4_bqsa = C2f_BQSA_P4(c4 + c4, c4, n=round(3 * depth))
+        self.reduce_p4 = BaseConv(c4, c3, 1, 1, act=act)
+        self.p3_bqsa = C2f_BQSA_P3(c3 + c3, c3, n=round(3 * depth))
         
-        # Replace every CSPLayer with C2f_Tribrid
-        # C3_p4: lateral_conv0(P5) [256] + P4 [256] = 512
-        self.C3_p4 = C2f_Tribrid(
-            int(2 * in_channels[1] * width), 
-            int(in_channels[1] * width), 
-            round(3 * depth), False, depthwise=depthwise, act=act
-        )
+        # Bottom-Up Downsamplers
+        self.down_n3 = BaseConv(c3, c4, 3, 2, act=act)
+        self.down_n4 = BaseConv(c4, c5, 3, 2, act=act)
         
-        # C3_p3: reduce_conv1(p4) [128] + P3 [128] = 256
-        self.C3_p3 = C2f_Tribrid(
-            int(2 * in_channels[0] * width), 
-            int(in_channels[0] * width), 
-            round(3 * depth), False, depthwise=depthwise, act=act
-        )
+        # Bottom-Up Scale-AttnRes Highways with Spatial Area Normalization Factors
+        # N3 (80x80): spatial_ratio = 6400 / 400 = 16.0
+        self.attnres_n3 = ScaleAttnRes(dim=c3, num_sources=2, spatial_ratio=16.0)
+        # N4 (40x40): spatial_ratio = 1600 / 400 = 4.0
+        self.attnres_n4 = ScaleAttnRes(dim=c4, num_sources=3, spatial_ratio=4.0)
+        # N5 (20x20): spatial_ratio = 400 / 400 = 1.0
+        self.attnres_n5 = ScaleAttnRes(dim=c5, num_sources=3, spatial_ratio=1.0)
+
+    def forward(self, input, targets=None, ttt_prob=None):
+        # 1. Forward through Backbone
+        out_features, proj_loss, phase_loss = self.backbone(input, ttt_prob=ttt_prob)
+        c3 = out_features["dark3"]  # [B, 128, 80, 80]
+        c4 = out_features["dark4"]  # [B, 256, 40, 40]
+        c5 = out_features["dark5"]  # [B, 512, 20, 20]
         
-        # C3_n3: bu_conv2(p3) [128] + fpn_out1 [128] = 256
-        self.C3_n3 = C2f_Tribrid(
-            int(2 * in_channels[0] * width), 
-            int(in_channels[1] * width), 
-            round(3 * depth), False, depthwise=depthwise, act=act
-        )
+        # 2. TOP-DOWN REASONING PASS (BQSA Cascade)
+        p5_feat, p5_saliency, h_s = self.p5_dense_attn(c5)
         
-        # C3_n4: bu_conv1(n3) [256] + fpn_out0 [256] = 512
-        self.C3_n4 = C2f_Tribrid(
-            int(2 * in_channels[1] * width), 
-            int(in_channels[2] * width), 
-            round(3 * depth), False, depthwise=depthwise, act=act
-        )
-
-    def forward(self, input, ttt_prob=0.0):
-        """
-        Args:
-            inputs: input images.
-            ttt_prob: Probability of running TTT (passed from YOLOX).
-        """
-
-        #  backbone
-        out_features = self.backbone(input, ttt_prob=ttt_prob)
-        features = [out_features[f] for f in self.in_features]
-        [x2, x1, x0] = features
-
-        fpn_out0 = self.lateral_conv0(x0)  # 1024->512/32
-        f_out0 = self.upsample(fpn_out0)  # 512/16
-        f_out0 = torch.cat([f_out0, x1], 1)  # 512->1024/16
-        f_out0 = self.C3_p4(f_out0)  # 1024->512/16
-
-        fpn_out1 = self.reduce_conv1(f_out0)  # 512->256/16
-        f_out1 = self.upsample(fpn_out1)  # 256/8
-        f_out1 = torch.cat([f_out1, x2], 1)  # 256->512/8
-        pan_out2 = self.C3_p3(f_out1)  # 512->256/8
-
-        p_out1 = self.bu_conv2(pan_out2)  # 256->256/16
-        p_out1 = torch.cat([p_out1, fpn_out1], 1)  # 256->512/16
-        pan_out1 = self.C3_n3(p_out1)  # 512->512/16
-
-        p_out0 = self.bu_conv1(pan_out1)  # 512->512/32
-        p_out0 = torch.cat([p_out0, fpn_out0], 1)  # 512->1024/32
-        pan_out0 = self.C3_n4(p_out0)  # 1024->1024/32
-
-        outputs = (pan_out2, pan_out1, pan_out0)
-        return outputs
+        p4_in = torch.cat([self.upsample(self.lateral_c5(p5_feat)), c4], dim=1)
+        p4_out, p4_indices, indexer_loss = self.p4_bqsa(p4_in, p5_saliency, h_s, targets=targets)
+        
+        p3_in = torch.cat([self.upsample(self.reduce_p4(p4_out)), c3], dim=1)
+        p3_out = self.p3_bqsa(p3_in, p4_indices)
+        
+        # 3. BOTTOM-UP SCALE-ATTNRES GRADIENT HIGHWAY (E4, R4)
+        n3_out = self.attnres_n3([p3_out, c3])
+        n4_out = self.attnres_n4([p4_out, self.down_n3(n3_out), c4])
+        n5_out = self.attnres_n5([p5_feat, self.down_n4(n4_out), c5])
+        
+        # Hierarchical anchor tuple returned cleanly to head (R1)
+        # Scale 0 (P3) queries P4_out; Scale 1 (P4) queries P5_feat; Scale 2 (P5) queries P5_feat
+        return ((n3_out, n4_out, n5_out), (p3_out, p4_out, p5_feat)), proj_loss, phase_loss, indexer_loss

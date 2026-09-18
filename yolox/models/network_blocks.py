@@ -1,16 +1,19 @@
 #!/usr/bin/env python
 # -*- encoding: utf-8 -*-
 # Copyright (c) Megvii Inc. All rights reserved.
+# Integrated for TDE-YOLOX v3.1: GroupNorm Instance Centering & Parameter Invariance
 
+import math
 import torch
 import torch.nn as nn
-import math
+
 
 class SiLU(nn.Module):
     """export-friendly version of nn.SiLU()"""
     @staticmethod
     def forward(x):
         return x * torch.sigmoid(x)
+
 
 def get_activation(name="silu", inplace=True):
     if name == "silu":
@@ -20,16 +23,16 @@ def get_activation(name="silu", inplace=True):
     elif name == "lrelu":
         module = nn.LeakyReLU(0.1, inplace=inplace)
     else:
-        raise AttributeError("Unsupported act type: {}".format(name))
+        raise AttributeError(f"Unsupported act type: {name}")
     return module
 
+
 class BaseConv(nn.Module):
-    """Standard Conv2d -> Batchnorm -> Activation block"""
+    """Standard Conv2d -> BatchNorm2d -> Activation block"""
     def __init__(
         self, in_channels, out_channels, ksize, stride, groups=1, bias=False, act="silu"
     ):
         super().__init__()
-        # same padding
         pad = (ksize - 1) // 2
         self.conv = nn.Conv2d(
             in_channels,
@@ -49,14 +52,12 @@ class BaseConv(nn.Module):
     def fuseforward(self, x):
         return self.act(self.conv(x))
 
+
 class BaseConvGN(nn.Module):
     """
-    TDE-YOLOX EXCLUSIVE: Conv2d -> GroupNorm -> Activation block.
-    
-    Robustness Feature: Dynamic Group Calculation.
-    Instead of hard-failing to LayerNorm (groups=1), this calculates the 
-    largest valid group count that is closest to the desired target (16 or 8).
-    This preserves the 'Group' semantics even with odd channel counts.
+    Conv2d -> GroupNorm -> Activation block.
+    Stateless instance-level normalization: eliminates frozen running-statistic DC shifts
+    under adverse weather (fog, blinding snow, extreme dynamic range shifts).
     """
     def __init__(
         self, in_channels, out_channels, ksize, stride, groups=1, bias=False, act="silu", target_groups=16
@@ -73,34 +74,32 @@ class BaseConvGN(nn.Module):
             bias=bias,
         )
         
-        # Robust Group Calculation
+        # Robust group count derivation: guarantees valid divisibility
         if out_channels % target_groups == 0:
             actual_groups = target_groups
         else:
-            # Find largest divisor <= target_groups (prefer 8, then 4, etc.)
             actual_groups = math.gcd(out_channels, target_groups)
-            if actual_groups < 4: 
-                # If we can't find a good group size, find ANY divisor > 1
-                # This avoids LayerNorm collapse unless absolutely necessary
+            if actual_groups < 4:
                 for i in range(target_groups, 1, -1):
                     if out_channels % i == 0:
                         actual_groups = i
                         break
-        
+                else:
+                    actual_groups = 1  # Fallback to LayerNorm behavior if prime
+
         self.gn = nn.GroupNorm(actual_groups, out_channels)
         self.act = get_activation(act, inplace=True)
 
     def forward(self, x):
         return self.act(self.gn(self.conv(x)))
-        
+
     def fuseforward(self, x):
-        # GroupNorm cannot be fused into Conv weights mathematically for inference speedup
-        # because it depends on instance statistics, unlike BatchNorm which uses fixed running stats.
-        # We perform standard forward to be safe.
+        # GroupNorm is instance-dependent and cannot be statically folded into conv weights
         return self.forward(x)
 
+
 class DWConv(nn.Module):
-    """Depthwise Conv + Conv"""
+    """Depthwise Conv + Pointwise Conv with BatchNorm"""
     def __init__(self, in_channels, out_channels, ksize, stride=1, act="silu"):
         super().__init__()
         self.dconv = BaseConv(
@@ -119,15 +118,11 @@ class DWConv(nn.Module):
         x = self.dconv(x)
         return self.pconv(x)
 
+
 class DWConvGN(nn.Module):
-    """
-    TDE-YOLOX EXCLUSIVE: Depthwise Conv + Conv with GroupNorm.
-    Essential for TTT-Stage 1 where both Depthwise and Pointwise layers 
-    need to be adaptable without buffer dependency.
-    """
+    """Depthwise Conv + Pointwise Conv with GroupNorm (TTT-Safe)"""
     def __init__(self, in_channels, out_channels, ksize, stride=1, act="silu"):
         super().__init__()
-        # Depthwise part: groups = in_channels
         self.dconv = BaseConvGN(
             in_channels,
             in_channels,
@@ -136,7 +131,6 @@ class DWConvGN(nn.Module):
             groups=in_channels,
             act=act,
         )
-        # Pointwise part: standard convolution
         self.pconv = BaseConvGN(
             in_channels, out_channels, ksize=1, stride=1, groups=1, act=act
         )
@@ -145,8 +139,9 @@ class DWConvGN(nn.Module):
         x = self.dconv(x)
         return self.pconv(x)
 
+
 class Bottleneck(nn.Module):
-    # Standard bottleneck
+    """Standard bottleneck with switchable Normalization layer type"""
     def __init__(
         self,
         in_channels,
@@ -155,21 +150,19 @@ class Bottleneck(nn.Module):
         expansion=0.5,
         depthwise=False,
         act="silu",
-        use_gn=False # TTT-Ready Flag
+        use_gn=False
     ):
         super().__init__()
         hidden_channels = int(out_channels * expansion)
         
-        # Expert Selector: Dynamically choose Norm type based on stage requirement
         if use_gn:
             ConvBlock = BaseConvGN
             DWConvBlock = DWConvGN
         else:
             ConvBlock = BaseConv
             DWConvBlock = DWConv
-            
+
         Conv = DWConvBlock if depthwise else ConvBlock
-        
         self.conv1 = ConvBlock(in_channels, hidden_channels, 1, stride=1, act=act)
         self.conv2 = Conv(hidden_channels, out_channels, 3, stride=1, act=act)
         self.use_add = shortcut and in_channels == out_channels
@@ -180,8 +173,9 @@ class Bottleneck(nn.Module):
             y = y + x
         return y
 
+
 class ResLayer(nn.Module):
-    "Residual layer with `in_channels` inputs."
+    """Residual layer with `in_channels` inputs."""
     def __init__(self, in_channels: int):
         super().__init__()
         mid_channels = in_channels // 2
@@ -196,8 +190,9 @@ class ResLayer(nn.Module):
         out = self.layer2(self.layer1(x))
         return x + out
 
+
 class SPPBottleneck(nn.Module):
-    """Spatial pyramid pooling layer used in YOLOv3-SPP"""
+    """Spatial pyramid pooling layer used in YOLOv3-SPP / YOLOX-SPP"""
     def __init__(
         self, in_channels, out_channels, kernel_sizes=(5, 9, 13), activation="silu"
     ):
@@ -219,8 +214,9 @@ class SPPBottleneck(nn.Module):
         x = self.conv2(x)
         return x
 
+
 class CSPLayer(nn.Module):
-    """C3 in yolov5, CSP Bottleneck with 3 convolutions"""
+    """CSP Bottleneck with recursive GroupNorm propagation support"""
     def __init__(
         self,
         in_channels,
@@ -230,27 +226,15 @@ class CSPLayer(nn.Module):
         expansion=0.5,
         depthwise=False,
         act="silu",
-        use_gn=False # TTT-Ready Flag
+        use_gn=False
     ):
-        """
-        Args:
-            in_channels (int): input channels.
-            out_channels (int): output channels.
-            n (int): number of Bottlenecks. Default value: 1.
-        """
         super().__init__()
-        hidden_channels = int(out_channels * expansion)  # hidden channels
-        
-        # Propagate GN choice to all internal components
-        if use_gn:
-            ConvBlock = BaseConvGN
-        else:
-            ConvBlock = BaseConv
-            
+        hidden_channels = int(out_channels * expansion)
+        ConvBlock = BaseConvGN if use_gn else BaseConv
+
         self.conv1 = ConvBlock(in_channels, hidden_channels, 1, stride=1, act=act)
         self.conv2 = ConvBlock(in_channels, hidden_channels, 1, stride=1, act=act)
         self.conv3 = ConvBlock(2 * hidden_channels, out_channels, 1, stride=1, act=act)
-        
         module_list = [
             Bottleneck(
                 hidden_channels, hidden_channels, shortcut, 1.0, depthwise, act=act, use_gn=use_gn
@@ -266,16 +250,19 @@ class CSPLayer(nn.Module):
         x = torch.cat((x_1, x_2), dim=1)
         return self.conv3(x)
 
+
 class Focus(nn.Module):
-    """Focus width and height information into channel space."""
+    """
+    Focus width and height information into channel space.
+    Upgraded for TDE-YOLOX v3.1: Uses BaseConvGN to prevent frozen-BN saturation
+    on un-normalized adverse weather pixel distributions.
+    """
     def __init__(self, in_channels, out_channels, ksize=1, stride=1, act="silu"):
         super().__init__()
-        # Focus layer remains standard BN (Stage 0) as per TDE-YOLOX design
-        # to ensure initial pixel statistics are handled by standard mechanism.
-        self.conv = BaseConv(in_channels * 4, out_channels, ksize, stride, act=act)
+        # Input has in_channels * 4 after space-to-depth slicing
+        self.conv = BaseConvGN(in_channels * 4, out_channels, ksize, stride, act=act)
 
     def forward(self, x):
-        # shape of x (b,c,w,h) -> y(b,4c,w/2,h/2)
         patch_top_left = x[..., ::2, ::2]
         patch_top_right = x[..., ::2, 1::2]
         patch_bot_left = x[..., 1::2, ::2]

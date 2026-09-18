@@ -103,7 +103,9 @@ class Trainer:
         inps, targets = self.exp.preprocess(inps, targets, self.input_size)
         data_end_time = time.time()
 
-        with torch.cuda.amp.autocast(enabled=self.amp_training):
+        # Safely read FP16 status from self.args or self.scaler
+        is_amp = getattr(self.args, "fp16", False) or getattr(self.scaler, "_enabled", False)
+        with torch.cuda.amp.autocast(enabled=is_amp):
             outputs = self.model(inps, targets)
 
         loss = outputs["total_loss"]
@@ -121,12 +123,78 @@ class Trainer:
             param_group["lr"] = lr
 
         iter_end_time = time.time()
-        self.meter.update(
-            iter_time=iter_end_time - iter_start_time,
-            data_time=data_end_time - iter_start_time,
-            lr=lr,
-            **outputs,
-        )
+
+        self.outputs = outputs
+        
+        metric_dict = {
+            "iter_time": iter_end_time - iter_start_time,
+            "data_time": data_end_time - iter_start_time,
+            "lr": lr,
+        }
+        
+        for k, v in outputs.items():
+            if torch.is_tensor(v):
+                metric_dict[k] = v.detach().cpu().item()
+            elif isinstance(v, (int, float)):
+                metric_dict[k] = float(v)
+                
+        self.meter.update(**metric_dict)
+
+    def after_iter(self):
+        """
+        Logging and TensorBoard / WandB metric tracking.
+        """
+        if (self.iter + 1) % self.exp.print_interval == 0:
+            curr_lr = self.optimizer.param_groups[0]['lr']
+            
+            left_iters = self.max_iter - self.iter - 1
+            avg_time = self.meter["iter_time"].global_avg if "iter_time" in self.meter else 0
+            eta_seconds = avg_time * left_iters
+            eta_str = "ETA: {}".format(datetime.timedelta(seconds=int(eta_seconds)))
+
+            progress_str = "epoch: [{}/{}][{}/{}]".format(
+                self.epoch + 1, self.max_epoch, self.iter + 1, self.max_iter
+            )
+            
+            loss_meter = self.meter.get_filtered_meter("loss")
+            loss_str = ", ".join(
+                ["{}: {:.3f}".format(k, v.avg) for k, v in loss_meter.items()]
+            )
+
+            logger.info(
+                "{}, mem: {:.0f}Mb, {}, {}, lr: {:.3e}".format(
+                    progress_str,
+                    gpu_mem_usage(), 
+                    eta_str,
+                    loss_str,
+                    curr_lr, 
+                )
+            )
+
+            if hasattr(self.meter, "clear_meters"):
+                self.meter.clear_meters()
+            else:
+                self.meter.clear()
+
+            if self.rank == 0:
+                if self.args.logger == "tensorboard":
+                    self.tblogger.add_scalar(
+                        "train/lr", self.meter["lr"].latest, self.progress_in_iter
+                    )
+                    for k, v in loss_meter.items():
+                        self.tblogger.add_scalar(
+                            f"train/{k}", v.latest, self.progress_in_iter
+                        )
+                if self.args.logger == "wandb":
+                    metrics = {"train/" + k: v.latest for k, v in loss_meter.items()}
+                    metrics.update({"train/lr": self.meter["lr"].latest})
+                    self.wandb_logger.log_metrics(metrics, step=self.progress_in_iter)
+
+        # Multi-scale resizing check (Disabled since multiscale_range = 0, but guarded)
+        if self.exp.multiscale_range > 0 and (self.progress_in_iter + 1) % 10 == 0:
+            self.input_size = self.exp.random_resize(
+                self.train_loader, self.epoch, self.rank, self.is_distributed
+            )
 
     def before_train(self):
         logger.info("args: {}".format(self.args))
@@ -257,80 +325,6 @@ class Trainer:
     def before_iter(self):
         pass
 
-    def after_iter(self):
-        """
-        Safe value unpacking + Optimizer-linked LR logging.
-        """
-        # Unified Metric Unpacking 
-        for k, v in self.outputs.items():
-            if k in ["total_loss", "iou_loss", "l1_loss", "conf_loss", "cls_loss", "mem_loss", "ttt_prob"]:
-                if torch.is_tensor(v):
-                    val = v.detach().cpu().item()
-                else:
-                    try:
-                        val = float(v)
-                    except:
-                        continue
-                self.meter.update(**{k: val})
-
-        # 2. Logging logic
-        if (self.iter + 1) % self.exp.print_interval == 0:
-            curr_lr = self.optimizer.param_groups[0]['lr']
-            
-            left_iters = self.max_iter - self.iter - 1
-            avg_time = self.meter["iter_time"].global_avg if "iter_time" in self.meter else 0
-            eta_seconds = avg_time * left_iters
-            eta_str = "ETA: {}".format(datetime.timedelta(seconds=int(eta_seconds)))
-
-            progress_str = "epoch: [{}/{}][{}/{}]".format(
-                self.epoch + 1, self.max_epoch, self.iter + 1, self.max_iter
-            )
-            
-            loss_meter = self.meter.get_filtered_meter("loss")
-            loss_str = ", ".join(
-                ["{}: {:.3f}".format(k, v.avg) for k, v in loss_meter.items()]
-            )
-
-            logger.info(
-                "{}, mem: {:.0f}Mb, {}, {}, lr: {:.3e}".format(
-                    progress_str,
-                    gpu_mem_usage(), 
-                    eta_str,
-                    loss_str,
-                    curr_lr, 
-                )
-            )
-
-            if hasattr(self.meter, "clear_meters"):
-                self.meter.clear_meters()
-            else:
-                self.meter.clear()
-
-            if self.rank == 0:
-                if self.args.logger == "tensorboard":
-                    self.tblogger.add_scalar(
-                        "train/lr", self.meter["lr"].latest, self.progress_in_iter)
-                    for k, v in loss_meter.items():
-                        self.tblogger.add_scalar(
-                            f"train/{k}", v.latest, self.progress_in_iter)
-                if self.args.logger == "wandb":
-                    metrics = {"train/" + k: v.latest for k, v in loss_meter.items()}
-                    metrics.update({
-                        "train/lr": self.meter["lr"].latest
-                    })
-                    self.wandb_logger.log_metrics(metrics, step=self.progress_in_iter)
-                if self.args.logger == 'mlflow':
-                    logs = {"train/" + k: v.latest for k, v in loss_meter.items()}
-                    logs.update({"train/lr": self.meter["lr"].latest})
-                    self.mlflow_logger.on_log(self.args, self.exp, self.epoch+1, logs)
-
-            self.meter.clear_meters()
-
-        # random resizing
-        if (self.progress_in_iter + 1) % 10 == 0:
-            self.input_size = self.exp.random_resize(
-                self.train_loader, self.epoch, self.rank, self.is_distributed
-            )
 
     @property
     def progress_in_iter(self):
