@@ -41,7 +41,8 @@ class AntiCollisionEngramBank(nn.Module):
         D = self.latent_dim
         
         p_interp = F.interpolate(anchor_feat, size=(H, W), mode='bilinear', align_corners=False)
-        q = p_interp + self.w_hf * self.dw_hf(h_local)
+        # Tanh bounds the high-freq injection strictly between [-1.0, 1.0]
+        q = p_interp + torch.tanh(self.w_hf) * self.dw_hf(h_local)
         
         # Hyperspherical Hard Attention strictly in single-precision FP32 (Z1, L1, W3)
         q_fp32 = q.float()
@@ -65,11 +66,12 @@ class AntiCollisionEngramBank(nn.Module):
         max_p, _ = torch.max(p_conv, dim=-1, keepdim=True)
         uncertainty = 1.0 - max_p
         
-        # 4. GRAPE-AP SPATIAL DISTANCE PENALTY (Executed natively in q.dtype - Half/Float safe)
+        # 4. GRAPE-AP SPATIAL DISTANCE PENALTY 
         h_flat = h_local.permute(0, 2, 3, 1).reshape(B, H * W, C)
         slope_q = F.softplus(torch.matmul(h_flat, self.v_q))
         slope_k = F.softplus(torch.matmul(retrieved_memory, self.v_k))
-        dist_penalty = self.omega * (slope_q.unsqueeze(-1) + slope_k.unsqueeze(-1))
+        # Clamp omega to prevent it from permanently overriding the Bayesian gate
+        dist_penalty = torch.clamp(self.omega, min=0.0, max=2.0) * (slope_q.unsqueeze(-1) + slope_k.unsqueeze(-1))
         
         # Gate Logit with negative baseline offset
         gate_logit = 5.0 * uncertainty - dist_penalty - 2.5
@@ -194,7 +196,8 @@ class TDE_Head(YOLOXHead):
             aux_memory_logits.append(raw_scores)
             
             mem_conv = self.manifold_decoders[k](mem_restored)
-            restored_feat = (1.0 - gate) * cls_feat + gate * mem_conv
+            # Additive Gated Memory (cls_feat is ALWAYS preserved at 100%)
+            restored_feat = cls_feat + gate * mem_conv
             restored_feat = restored_feat + self.post_engram_dw[k](restored_feat)
             
             cls_out = self.cls_preds[k](restored_feat)
@@ -395,10 +398,15 @@ class TDE_Head(YOLOXHead):
         topk_ious, _ = torch.topk(hybrid_overlap, n_candidate_k, dim=1)
         dynamic_ks = torch.clamp(topk_ious.sum(1).int(), min=1, max=15)
 
-        # 4. Classification Matching Cost
+        # 4. Classification Matching Cost (Guarded against CUDA Loss.cu >= 0 and <= 1 assertion)
         gt_cls_per_image = F.one_hot(gt_classes.to(torch.int64), self.num_classes).float()
         with torch.cuda.amp.autocast(enabled=False):
             cls_prob = (cls_preds_.float().sigmoid_() * obj_preds_.float().sigmoid_()).sqrt()
+            
+            # NUMERICAL GUARD: Clamp to [0.0, 1.0 - 1e-7] to prevent floating point rounding > 1.0
+            cls_prob = torch.clamp(cls_prob, min=0.0, max=1.0 - 1e-7)
+            cls_prob = torch.nan_to_num(cls_prob, nan=0.0)
+            
             pair_wise_cls_loss = F.binary_cross_entropy(
                 cls_prob.unsqueeze(0).repeat(num_gt, 1, 1),
                 gt_cls_per_image.unsqueeze(1).repeat(1, num_in_boxes_anchor, 1),

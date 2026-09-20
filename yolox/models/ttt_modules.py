@@ -11,7 +11,7 @@ class GRN(nn.Module):
     Global Response Normalization (ConvNeXt V2).
     Forces channel competition to prevent representation collapse in masked autoencoders.
     """
-    def __init__(self, dim, eps=1e-6):
+    def __init__(self, dim, eps=1e-5):
         super().__init__()
         self.gamma = nn.Parameter(torch.zeros(1, 1, 1, dim))
         self.beta = nn.Parameter(torch.zeros(1, 1, 1, dim))
@@ -216,7 +216,13 @@ class TTTAdaptiveStage(nn.Module):
                 feat_initial = self.backbone_stage(x_curr)
                 clean_target = feat_initial.detach()
                 mask = self._get_robust_contrast_mask(clean_target)
-                noise_map = torch.randn_like(clean_target) * self.noise_std
+                # INFERENCE CLEAN GUARD:
+                # In training mode, inject noise for contrastive denoising.
+                # In inference mode, adapt strictly via Masked Feature Modeling (zero noise).
+                if self.training:
+                    noise_map = torch.randn_like(clean_target) * self.noise_std
+                else:
+                    noise_map = torch.zeros_like(clean_target)
 
             # Closure for functorch dual-number gradient computation
             def inner_grad_fn(p_adapt_b, p_adapt_p):
@@ -230,7 +236,7 @@ class TTTAdaptiveStage(nn.Module):
             updated_backbone_params = {**backbone_params, **backbone_buffers}
             for name, g in grads_backbone.items():
                 lr_key = name.replace('.', '_')
-                effective_lr = F.softplus(self.ttt_lrs[lr_key])
+                effective_lr = torch.clamp(F.softplus(self.ttt_lrs[lr_key]), min=1e-4, max=0.25)
                 updated_backbone_params[name] = (backbone_params[name].float() - effective_lr * g).to(input_dtype)
 
         # Compute direct first-order auxiliary projector loss during training

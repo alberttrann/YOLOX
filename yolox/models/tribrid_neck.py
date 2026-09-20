@@ -39,7 +39,11 @@ class ScaleAttnRes(nn.Module):
         V = torch.stack(sources, dim=0)  # [M, B, C, H, W]
         K = torch.stack([self.norm(s) for s in sources], dim=0)
         
-        logits = torch.einsum('c, m b c h w -> m b h w', self.w, K) * self.scale
+        # Clamp query magnitude to prevent Softmax gradient death
+        # Bounds logits to a safe range, ensuring the routing can always dynamically adapt
+        w_safe = torch.clamp(self.w, min=-5.0, max=5.0)
+        
+        logits = torch.einsum('c, m b c h w -> m b h w', w_safe, K) * self.scale
         weights = F.softmax(logits, dim=0)
         
         return torch.sum(weights.unsqueeze(2) * V, dim=0)
@@ -150,7 +154,8 @@ class P5ExclusiveDenseAttention(nn.Module):
         # 4. Dual-Input Gated Residual Highway
         h_ratio = torch.clamp(h_s / math.log(max(2, N)), 0.0, 1.0)
         g_xsa = torch.sigmoid(self.w_r1(x) + self.w_r2(z_spatial) + (self.lambda_fog * h_ratio))
-        p5_feat = (1.0 - g_xsa) * x + g_xsa * z_spatial
+        # Additive Gated Residual (C5 is ALWAYS preserved at 100%)
+        p5_feat = x + g_xsa * z_spatial
         
         return p5_feat, saliency, h_s
 
@@ -268,7 +273,10 @@ class C2f_BQSA_P4(nn.Module):
         masked_scores = block_scores * pool_mask - (1.0 - pool_mask) * 1e4
         
         if self.training:
-            gumbel = -torch.empty_like(masked_scores).exponential_().log()
+            # Safe FP32 Gumbel noise prevents 0.0 -> log(0) -> -inf -> NaN explosion
+            u = torch.rand_like(masked_scores, dtype=torch.float32)
+            gumbel = -torch.log(-torch.log(u + 1e-7) + 1e-7).to(masked_scores.dtype)
+            
             soft_scores = F.softmax((masked_scores + gumbel) / self.tau, dim=-1)
             _, topk_idx = torch.topk(soft_scores, k_actual, dim=-1)
             

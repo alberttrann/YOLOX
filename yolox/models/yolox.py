@@ -39,7 +39,7 @@ class YOLOX(nn.Module):
         self.warmup_end = 10
         self.ramp_end = 50
         self.prob_start = 0.1
-        self.prob_end = 0.6
+        self.prob_end = 0.30  # (Was 0.60 - lowered to eliminate post-E25 turbulence)
 
     def set_meta_training_state(self, epoch, max_epochs):
         self.current_epoch = epoch
@@ -49,9 +49,9 @@ class YOLOX(nn.Module):
         if hasattr(head_ref, "current_epoch"):
             head_ref.current_epoch = epoch
 
-        # Cosine Gumbel-Softmax Temperature Annealing tau: 1.0 -> 0.1
-        tau_min = 0.1
-        tau_max = 1.0
+        # Floor Gumbel temperature at 0.50 (Prevents hyper-sharp block collapse on large objects)
+        tau_min = 0.50  # (Was 0.10 - raised to keep buses/trucks from dropping 3.3 pp)
+        tau_max = 1.00
         decay_horizon = max(1.0, float(max_epochs - 20))
         progress = min(1.0, float(epoch) / decay_horizon)
         current_tau = tau_min + 0.5 * (tau_max - tau_min) * (1.0 + math.cos(progress * math.pi))

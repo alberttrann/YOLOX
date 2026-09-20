@@ -108,18 +108,37 @@ class Muon(Optimizer):
         return loss
 
 
+class ProportionalMuonParamGroup(dict):
+    """
+    Protects Muon's learning rate from being crushed by the SGD scheduler.
+    Scales Muon proportionally (0.02 -> 0.004) instead of overwriting to 0.00075.
+    """
+    def __init__(self, *args, initial_lr=0.02, base_lr=0.0025, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.initial_lr = initial_lr
+        self.base_lr = base_lr
+
+    def __setitem__(self, key, value):
+        if key == "lr":
+            # Scale proportionally based on SGD decay ratio
+            scale = max(0.05, value / max(1e-7, self.base_lr))
+            super().__setitem__("lr", self.initial_lr * scale)
+        else:
+            super().__setitem__(key, value)
+
+
 class CombinedOptimizer:
-    """
-    Composite Multi-Engine Optimizer Wrapper.
-    Unifies Muon, Momentum SGD, and Meta-SGD under standard PyTorch Optimizer API.
-    Guarantees seamless compatibility with torch.cuda.amp.GradScaler.
-    """
     def __init__(self, optimizers):
         self.optimizers = optimizers
-        # Aggregate all parameter groups for AMP GradScaler discovery
         self.param_groups = []
         for opt in self.optimizers:
-            self.param_groups.extend(opt.param_groups)
+            if isinstance(opt, Muon):
+                # Protect each Muon parameter group
+                for pg in opt.param_groups:
+                    wrapped_pg = ProportionalMuonParamGroup(pg, initial_lr=pg.get("lr", 0.02))
+                    self.param_groups.append(wrapped_pg)
+            else:
+                self.param_groups.extend(opt.param_groups)
 
     def zero_grad(self, set_to_none=False):
         for opt in self.optimizers:
