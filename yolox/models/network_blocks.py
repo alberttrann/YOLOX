@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 # -*- encoding: utf-8 -*-
 # Copyright (c) Megvii Inc. All rights reserved.
-# Integrated for TDE-YOLOX v3.1: GroupNorm Instance Centering & Parameter Invariance
+# Integrated for TDE-YOLOX v3.1: Certified GroupNorm & Network Primitives
 
 import math
 import torch
@@ -9,7 +9,7 @@ import torch.nn as nn
 
 
 class SiLU(nn.Module):
-    """export-friendly version of nn.SiLU()"""
+    """Export-friendly version of nn.SiLU()"""
     @staticmethod
     def forward(x):
         return x * torch.sigmoid(x)
@@ -55,7 +55,7 @@ class BaseConv(nn.Module):
 
 class BaseConvGN(nn.Module):
     """
-    Conv2d -> GroupNorm -> Activation block.
+    TDE-YOLOX Certified: Conv2d -> GroupNorm -> Activation block.
     Stateless instance-level normalization: eliminates frozen running-statistic DC shifts
     under adverse weather (fog, blinding snow, extreme dynamic range shifts).
     """
@@ -74,7 +74,7 @@ class BaseConvGN(nn.Module):
             bias=bias,
         )
         
-        # Robust group count derivation: guarantees valid divisibility
+        # Robust group count derivation: guarantees valid channel divisibility
         if out_channels % target_groups == 0:
             actual_groups = target_groups
         else:
@@ -87,7 +87,7 @@ class BaseConvGN(nn.Module):
                 else:
                     actual_groups = 1  # Fallback to LayerNorm behavior if prime
 
-        self.gn = nn.GroupNorm(actual_groups, out_channels)
+        self.gn = nn.GroupNorm(actual_groups, out_channels, eps=1e-5)
         self.act = get_activation(act, inplace=True)
 
     def forward(self, x):
@@ -254,12 +254,12 @@ class CSPLayer(nn.Module):
 class Focus(nn.Module):
     """
     Focus width and height information into channel space.
-    Upgraded for TDE-YOLOX v3.1: Uses BaseConvGN to prevent frozen-BN saturation
-    on un-normalized adverse weather pixel distributions.
+    Upgraded for TDE-YOLOX v3.1: Uses BaseConvGN to perform instance-level
+    centering directly on pixel space, cancelling the additive Koschmieder DC haze offset A.
     """
     def __init__(self, in_channels, out_channels, ksize=1, stride=1, act="silu"):
         super().__init__()
-        # Input has in_channels * 4 after space-to-depth slicing
+        # Input has in_channels * 4 after space-to-depth slicing (e.g. 12 channels)
         self.conv = BaseConvGN(in_channels * 4, out_channels, ksize, stride, act=act)
 
     def forward(self, x):

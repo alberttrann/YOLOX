@@ -28,7 +28,7 @@ from yolox.utils.checkpoint import load_ckpt
 
 def fuse_conv_bn(conv, bn):
     """
-    Fuses standard Convolution and BatchNorm2d weights mathematically.
+    Fuses standard Convolution and BatchNorm2d weights mathematically in FP32.
     W_fused = W * (gamma / sqrt(var + eps))
     B_fused = (B - mean) * (gamma / sqrt(var + eps)) + beta
     """
@@ -41,18 +41,18 @@ def fuse_conv_bn(conv, bn):
         dilation=conv.dilation,
         groups=conv.groups,
         bias=True,
-    ).requires_grad_(False).to(conv.weight.device)
+    ).requires_grad_(False).to(device=conv.weight.device, dtype=conv.weight.dtype)
 
-    w_conv = conv.weight.clone().view(conv.out_channels, -1)
-    scale = bn.weight.div(torch.sqrt(bn.eps + bn.running_var))
+    w_conv = conv.weight.float().view(conv.out_channels, -1)
+    scale = bn.weight.float().div(torch.sqrt(bn.eps + bn.running_var.float()))
     w_bn = torch.diag(scale)
-    fused_conv.weight.copy_(torch.mm(w_bn, w_conv).view(fused_conv.weight.shape))
+    fused_weight = torch.mm(w_bn, w_conv).view(fused_conv.weight.shape).to(conv.weight.dtype)
+    fused_conv.weight.copy_(fused_weight)
 
-    b_conv = conv.bias if conv.bias is not None else torch.zeros(conv.out_channels, device=conv.weight.device)
-    b_bn = bn.bias - bn.weight.mul(bn.running_mean).div(torch.sqrt(bn.running_var + bn.eps))
+    b_conv = conv.bias.float() if conv.bias is not None else torch.zeros(conv.out_channels, device=conv.weight.device)
+    b_bn = bn.bias.float() - bn.weight.float().mul(bn.running_mean.float()).div(torch.sqrt(bn.running_var.float() + bn.eps))
     
-    # Pure PyTorch matrix multiplication (Eliminates NumPy apply_along_axis bug)
-    fused_bias = torch.mm(w_bn, b_conv.reshape(-1, 1)).reshape(-1) + b_bn
+    fused_bias = (torch.mm(w_bn, b_conv.reshape(-1, 1)).reshape(-1) + b_bn).to(conv.weight.dtype)
     fused_conv.bias.copy_(fused_bias)
 
     return fused_conv
@@ -62,7 +62,7 @@ def fuse_tde_model(model):
     """
     SELECTIVE HIGH-FIDELITY FUSION:
     Protects TTTAdaptiveStage and all BaseConvGN layers from fusion.
-    Fuses strictly standard Conv-BN pairs in deep stages.
+    Redirects child.forward -> child.fuseforward to eliminate redundant Python nn.Identity dispatches.
     """
     from yolox.models.ttt_modules import TTTAdaptiveStage
     from yolox.models.network_blocks import BaseConv, BaseConvGN
@@ -78,8 +78,8 @@ def fuse_tde_model(model):
                     fused_conv = fuse_conv_bn(child.conv, child.bn)
                     child.conv = fused_conv
                     child.bn = nn.Identity()
+                    child.forward = child.fuseforward  # Direct C++ execution!
             elif isinstance(child, BaseConvGN):
-                # GroupNorm cannot be statically folded into conv weights
                 continue
             else:
                 recursive_fuse(child)
@@ -139,7 +139,7 @@ def main(exp, args, num_gpu):
     # FORCE ZERO-SHOT INFERENCE ADAPTATION
     m = model.module if hasattr(model, "module") else model
     if hasattr(m, "set_meta_training_state"):
-        logger.info("TDE-YOLOX: Enforcing Meta-Inference state (TTT probability = 1.0, Tau = 0.1)...")
+        logger.info("TDE-YOLOX: Enforcing Meta-Inference state (TTT probability = 1.0, Tau = 0.50)...")
         m.set_meta_training_state(exp.max_epoch, exp.max_epoch)
 
     evaluator = exp.get_evaluator(args.batch_size, is_distributed, args.test, args.legacy)
@@ -150,22 +150,48 @@ def main(exp, args, num_gpu):
     model.cuda(rank)
     model.eval()
 
-    # Load checkpoint through remapping engine
+    # Load checkpoint with strict ModelEMA priority
     ckpt_file = args.ckpt if args.ckpt else os.path.join(file_name, "best_ckpt.pth")
     logger.info(f"Loading checkpoint from: {ckpt_file}")
     ckpt = torch.load(ckpt_file, map_location=f"cuda:{rank}")
-    
-    ckpt_state = ckpt["model"] if "model" in ckpt else ckpt
+
+    if isinstance(ckpt, dict):
+        if "ema" in ckpt and ckpt["ema"] is not None:
+            logger.info("Loading ModelEMA shadow weights for evaluation...")
+            ckpt_state = ckpt["ema"]
+        elif "model" in ckpt and ckpt["model"] is not None:
+            logger.info("Loading standard model weights for evaluation...")
+            ckpt_state = ckpt["model"]
+        else:
+            ckpt_state = ckpt
+    else:
+        ckpt_state = ckpt
+
+    while isinstance(ckpt_state, dict) and "model" in ckpt_state and isinstance(ckpt_state["model"], dict):
+        ckpt_state = ckpt_state["model"]
+
     model = load_ckpt(model, ckpt_state)
+
+    # Selective fusion executed BEFORE DDP wrapping
+    if args.fuse:
+        model = fuse_tde_model(model)
 
     if is_distributed:
         model = DDP(model, device_ids=[rank])
 
-    if args.fuse:
-        model = fuse_tde_model(model)
+    if args.trt:
+        assert not args.fuse and not is_distributed and args.batch_size == 1
+        trt_file = os.path.join(file_name, "model_trt.pth")
+        assert os.path.exists(trt_file), "TensorRT model is not found! Run tools/trt.py first!"
+        model.head.decode_in_inference = False
+        decoder = model.head.decode_outputs
+    else:
+        trt_file = None
+        decoder = None
 
     logger.info("Executing TDE-YOLOX v3.1 Benchmark Evaluation...")
-    *_, summary = evaluator.evaluate(model, is_distributed, args.fp16, None, None, exp.test_size)
+    eval_fp16 = args.fp16 and not args.trt
+    *_, summary = evaluator.evaluate(model, is_distributed, eval_fp16, trt_file, decoder, exp.test_size)
     logger.info("\n" + summary)
 
 

@@ -7,7 +7,7 @@ import os
 import torch
 import torch.nn as nn
 from yolox.exp import Exp as MyExp
-from yolox.optimizers.muon import Muon, CombinedOptimizer
+from yolox.optimizers.muon import Muon, CombinedOptimizer, ProportionalMuonParamGroup
 
 
 class Exp(MyExp):
@@ -24,20 +24,17 @@ class Exp(MyExp):
         self.init_ttt_lr = 0.05      # Stage 1 GroupNorm adaptation rate
         self.ttt_noise_std = 0.08    # Contrastive Gaussian denoising intensity
 
-        # --- DATASET & RESOLUTION LOCKING (Defect M4, F2) ---
+        # --- DATASET & RESOLUTION LOCKING ---
         self.input_size = (640, 640)
         self.test_size = (640, 640)
-        self.multiscale_range = 0    # Strictly lock canvas to 640x640 (prevents shape crashes)
+        self.multiscale_range = 0    # Strictly lock canvas to 640x640 (prevents block shape collapse)
         self.mosaic_prob = 0.0       # Disabled from Epoch 1 (prevents seam variance corruption)
         self.enable_mixup = False    # Disabled from Epoch 1
 
-        # --- STRICT ZSDA PROTOCOL PATHS (Defect D7, S6, K6) ---
+        # --- STRICT ZSDA PROTOCOL PATHS ---
         self.data_dir = "D:/YOLOX-3RD/bdd100k/bdd100k/bdd100k/images"
-        # Train strictly on clean daylight images from BDD train set
         self.train_ann = "D:/YOLOX-3RD/bdd100k/bdd100k/bdd100k/images/annotations/tde_train_clean_coco.json"
-        # Validate strictly on clean images for model selection (No transductive leak!)
         self.val_ann = "D:/YOLOX-3RD/bdd100k/bdd100k/bdd100k/images/annotations/tde_val_clean_coco.json"
-        # Adverse test set evaluated only once on frozen final checkpoint
         self.test_ann = "D:/YOLOX-3RD/bdd100k/bdd100k/bdd100k/images/annotations/tde_test_adverse_coco.json"
 
         # --- TRAINING SCHEDULE ---
@@ -68,6 +65,8 @@ class Exp(MyExp):
                 if isinstance(m, nn.BatchNorm2d):
                     m.eps = 1e-3
                     m.momentum = 0.03
+                elif isinstance(m, nn.GroupNorm):
+                    m.eps = 1e-5
 
         if getattr(self, "model", None) is None:
             in_channels = [256, 512, 1024]
@@ -110,17 +109,15 @@ class Exp(MyExp):
 
     def get_optimizer(self, batch_size):
         """
-        TRIPLE-ENGINE OPTIMIZER PARTITION (Defects K1, Z2, O1, Factor 4).
-        Partitions 100% of parameters with zero omissions:
-          - Engine 1 (Muon): Prototypes [576, 128], BQSA linear projections, manifold decoders
-          - Engine 2 (SGD): Convolutions (decay=5e-4), Normalization & Biases (decay=0.0)
-          - Engine 3 (Meta-SGD): Stage 1 TTT learning rates (lr=5e-4, decay=0.0)
+        TRIPLE-ENGINE OPTIMIZER PARTITION:
+          - Engine 1 (Muon): Prototypes [576, 128], BQSA 1x1 projections, local/anchor projectors, manifold decoders
+          - Engine 2 (Momentum SGD): 4D Convolutions (decay=5e-4), Normalizations & Biases (decay=0.0)
+          - Engine 3 (Meta-SGD): Stage 1 TTT learning rates (lr=5e-4, lr_factor=0.05, decay=0.0)
         """
         if "optimizer" in self.__dict__:
             return self.optimizer
 
         base_lr = self.basic_lr_per_img * batch_size
-
         all_params = set(self.model.parameters())
         registered_params = set()
 
@@ -140,8 +137,8 @@ class Exp(MyExp):
                 registered_params.add(p)
                 continue
 
-            # Identify BQSA 1x1 Projections and Head Decoders
-            if any(k in name for k in ["manifold_decoders", "anchor_projectors", "p4_bqsa.qkv", "p4_bqsa.proj", "p3_bqsa.qkv", "p3_bqsa.proj", "p5_dense_attn.qkv", "p5_dense_attn.proj"]):
+            # Identify BQSA 1x1 Projections, Anchor/Local Projectors, and Head Decoders
+            if any(k in name for k in ["manifold_decoders", "anchor_projectors", "local_projectors", "p4_bqsa.qkv", "p4_bqsa.proj", "p3_bqsa.qkv", "p3_bqsa.proj", "p5_dense_attn.qkv", "p5_dense_attn.proj"]):
                 if "weight" in name and p.dim() in [2, 4]:
                     pg_muon.append(p)
                     registered_params.add(p)
@@ -157,39 +154,26 @@ class Exp(MyExp):
             if "bias" in name:
                 pg_sgd_no_decay.append(p)
                 registered_params.add(p)
-            elif any(k in name for k in ["gn.", "bn.", "norm."]) and "weight" in name:
+            elif (any(k in name for k in ["gn.", "bn.", "norm.", "bn1.", "net.1."])) and "weight" in name:
                 pg_sgd_no_decay.append(p)
                 registered_params.add(p)
-            elif any(k in name for k in ["attnres", ".w", "mask_token", "gr_gate", "gamma", "beta", "v_q", "v_k", "omega", "w_hf"]):
+            elif any(k in name for k in ["attnres", ".w", "mask_token", "gr_gate", "w_r1", "w_r2", "gamma", "beta", "v_q", "v_k", "omega", "w_hf"]):
                 pg_sgd_no_decay.append(p)
                 registered_params.add(p)
             else:
                 pg_sgd_decay.append(p)
                 registered_params.add(p)
 
-        # CRITICAL ASSERTION: Zero parameters dropped!
         unassigned = all_params - registered_params
-        assert len(unassigned) == 0, f"Defect K1 failure: {len(unassigned)} parameters dropped from optimizer: {unassigned}"
+        assert len(unassigned) == 0, f"Unassigned parameters detected: {unassigned}"
 
-        # Instantiate Engine 1: Muon Optimizer
-        opt_muon = Muon(
-            pg_muon,
-            lr=0.02,
-            momentum=0.95,
-            nesterov=True,
-            ns_steps=5,
-            weight_decay=0.0
-        )
-
-        # Instantiate Engine 2 & 3: Multi-Group Momentum SGD
+        opt_muon = Muon(pg_muon, lr=0.02, momentum=0.95, nesterov=True, ns_steps=5, weight_decay=0.0)
         sgd_groups = [
-            {"params": pg_sgd_decay, "weight_decay": self.weight_decay, "lr": base_lr},
-            {"params": pg_sgd_no_decay, "weight_decay": 0.0, "lr": base_lr},
-            {"params": pg_meta, "weight_decay": 0.0, "lr": base_lr * 0.05}  # Meta-LR velocity reduction (O1)
+            {"params": pg_sgd_decay, "weight_decay": self.weight_decay, "lr": base_lr, "lr_factor": 1.0},
+            {"params": pg_sgd_no_decay, "weight_decay": 0.0, "lr": base_lr, "lr_factor": 1.0},
+            {"params": pg_meta, "weight_decay": 0.0, "lr": base_lr * 0.05, "lr_factor": 0.05}
         ]
         opt_sgd = torch.optim.SGD(sgd_groups, momentum=self.momentum, nesterov=True)
-
-        # Wrap into unified CombinedOptimizer
         self.optimizer = CombinedOptimizer([opt_muon, opt_sgd])
         return self.optimizer
 
@@ -201,7 +185,7 @@ class Exp(MyExp):
             name="",
             img_size=self.input_size,
             preproc=TrainTransform(
-                max_labels=50,
+                max_labels=120,  # Restores full capacity for crowded urban scenes
                 flip_prob=self.flip_prob,
                 hsv_prob=self.hsv_prob
             ),
@@ -211,9 +195,13 @@ class Exp(MyExp):
 
     def get_eval_dataset(self, **kwargs):
         from yolox.data import COCODataset, ValTransform
+        testdev = kwargs.get("testdev", False)
+        target_ann = self.test_ann if testdev else self.val_ann
+        eval_data_dir = getattr(self, "eval_data_dir", self.data_dir)
+        
         return COCODataset(
-            data_dir=self.data_dir,
-            json_file=self.val_ann,
+            data_dir=eval_data_dir,
+            json_file=target_ann,
             name="",
             img_size=self.test_size,
             preproc=ValTransform(legacy=kwargs.get("legacy", False)),

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # Copyright (c) Megvii, Inc. and its affiliates.
+# Integrated for TDE-YOLOX v3.1: Certified Multi-Engine Trainer & Synchronization Barrier
 
 import datetime
 import os
@@ -7,6 +8,7 @@ import time
 from loguru import logger
 
 import torch
+import torch.nn.functional as F
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.tensorboard import SummaryWriter
 
@@ -38,7 +40,7 @@ class Trainer:
         self.exp = exp
         self.args = args
 
-        # training related attributes
+        # Training related attributes
         self.max_epoch = exp.max_epoch
         self.amp_training = args.fp16
         self.scaler = torch.cuda.amp.GradScaler(enabled=args.fp16)
@@ -49,22 +51,21 @@ class Trainer:
         self.use_model_ema = exp.ema
         self.save_history_ckpt = exp.save_history_ckpt
 
-        # data/dataloader related attributes
+        # Data/dataloader related attributes
         self.data_type = torch.float16 if args.fp16 else torch.float32
         self.input_size = exp.input_size
-        self.best_ap = 0
+        self.best_ap = 0.0
+        self.last_ap = None
         self.start_epoch = 0
         self.outputs = {}
         self._loaded_ema_state = None
 
-        # metric record
+        # Metric record
         self.meter = MeterBuffer(window_size=exp.print_interval)
         self.file_name = os.path.join(exp.output_dir, args.experiment_name)
 
         if self.rank == 0:
             os.makedirs(self.file_name, exist_ok=True)
-            
-            # Redirect temporary JSON evaluation files to the D: drive project folder
             temp_dir = os.path.join(self.file_name, "temp")
             os.makedirs(temp_dir, exist_ok=True)
             os.environ["TEMP"] = temp_dir
@@ -103,13 +104,17 @@ class Trainer:
         iter_start_time = time.time()
 
         inps, targets = self.prefetcher.next()
+        
+        # Asynchronous CUDA stream memory barrier guarantees data is committed to VRAM
+        if torch.cuda.is_available():
+            torch.cuda.current_stream().synchronize()
+
         inps = inps.to(self.data_type)
         targets = targets.to(self.data_type)
         targets.requires_grad = False
         inps, targets = self.exp.preprocess(inps, targets, self.input_size)
         data_end_time = time.time()
 
-        # Safely determine AMP execution
         is_amp = getattr(self.args, "fp16", False) or getattr(self.scaler, "_enabled", False)
         with torch.cuda.amp.autocast(enabled=is_amp):
             outputs = self.model(inps, targets)
@@ -118,12 +123,36 @@ class Trainer:
 
         self.optimizer.zero_grad()
         self.scaler.scale(loss).backward()
-        self.scaler.step(self.optimizer)
-        self.scaler.update()
 
-        # Update ModelEMA shadow weights
-        if self.use_model_ema:
+        # Multi-Engine Unscaling & Global Gradient Clipping
+        if hasattr(self.optimizer, "optimizers"):
+            for opt in self.optimizer.optimizers:
+                self.scaler.unscale_(opt)
+        else:
+            self.scaler.unscale_(self.optimizer)
+
+        total_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=10.0)
+        
+        # All-or-Nothing Multi-Engine Step Execution
+        scale_before = self.scaler.get_scale()
+        if hasattr(self.optimizer, "optimizers"):
+            for opt in self.optimizer.optimizers:
+                self.scaler.step(opt)
+        else:
+            self.scaler.step(self.optimizer)
+
+        self.scaler.update()
+        scale_after = self.scaler.get_scale()
+
+        # ModelEMA update strictly gated on successful optimizer step
+        step_successful = (scale_after >= scale_before)
+        if self.use_model_ema and step_successful:
             self.ema_model.update(self.model)
+            # Post-EMA Riemannian Retraction onto unit hypersphere S^127
+            with torch.no_grad():
+                for m in self.ema_model.ema.modules():
+                    if hasattr(m, "prototypes") and getattr(m.prototypes, "is_hypersphere", False):
+                        m.prototypes.data.copy_(F.normalize(m.prototypes.data, p=2, dim=-1, eps=1e-5))
 
         # Update learning rates while respecting per-group lr_factor
         lr = self.lr_scheduler.update_lr(self.progress_in_iter + 1)
@@ -132,8 +161,6 @@ class Trainer:
             param_group["lr"] = lr * factor
 
         iter_end_time = time.time()
-
-        # Store outputs for after_iter metric logging
         self.outputs = outputs
         
         metric_dict = {
@@ -142,21 +169,24 @@ class Trainer:
             "lr": lr,
         }
         
+        # Track all 10 active loss components
+        active_metrics = [
+            "total_loss", "iou_loss", "nwd_loss", "l1_loss", "conf_loss", 
+            "cls_loss", "mem_loss", "proj_loss", "phase_loss", "idx_loss", 
+            "rep_loss", "ttt_prob"
+        ]
         for k, v in outputs.items():
-            if torch.is_tensor(v):
-                metric_dict[k] = v.detach().cpu().item()
-            elif isinstance(v, (int, float)):
-                metric_dict[k] = float(v)
+            if k in active_metrics:
+                if torch.is_tensor(v):
+                    metric_dict[k] = v.detach().cpu().item()
+                elif isinstance(v, (int, float)):
+                    metric_dict[k] = float(v)
                 
         self.meter.update(**metric_dict)
 
     def after_iter(self):
-        """
-        Logging and TensorBoard / WandB metric tracking.
-        """
         if (self.iter + 1) % self.exp.print_interval == 0:
             curr_lr = self.optimizer.param_groups[0]['lr']
-            
             left_iters = self.max_iter - self.iter - 1
             avg_time = self.meter["iter_time"].global_avg if "iter_time" in self.meter else 0
             eta_seconds = avg_time * left_iters
@@ -167,17 +197,11 @@ class Trainer:
             )
             
             loss_meter = self.meter.get_filtered_meter("loss")
-            loss_str = ", ".join(
-                ["{}: {:.3f}".format(k, v.avg) for k, v in loss_meter.items()]
-            )
+            loss_str = ", ".join(["{}: {:.3f}".format(k, v.avg) for k, v in loss_meter.items()])
 
             logger.info(
                 "{}, mem: {:.0f}Mb, {}, {}, lr: {:.3e}".format(
-                    progress_str,
-                    gpu_mem_usage(), 
-                    eta_str,
-                    loss_str,
-                    curr_lr, 
+                    progress_str, gpu_mem_usage(), eta_str, loss_str, curr_lr
                 )
             )
 
@@ -188,43 +212,26 @@ class Trainer:
 
             if self.rank == 0:
                 if self.args.logger == "tensorboard":
-                    self.tblogger.add_scalar(
-                        "train/lr", self.meter["lr"].latest, self.progress_in_iter
-                    )
+                    self.tblogger.add_scalar("train/lr", self.meter["lr"].latest, self.progress_in_iter)
                     for k, v in loss_meter.items():
-                        self.tblogger.add_scalar(
-                            f"train/{k}", v.latest, self.progress_in_iter
-                        )
+                        self.tblogger.add_scalar(f"train/{k}", v.latest, self.progress_in_iter)
                 if self.args.logger == "wandb":
                     metrics = {"train/" + k: v.latest for k, v in loss_meter.items()}
                     metrics.update({"train/lr": self.meter["lr"].latest})
                     self.wandb_logger.log_metrics(metrics, step=self.progress_in_iter)
 
-        # Multi-scale resizing check
-        if self.exp.multiscale_range > 0 and (self.progress_in_iter + 1) % 10 == 0:
-            self.input_size = self.exp.random_resize(
-                self.train_loader, self.epoch, self.rank, self.is_distributed
-            )
-
     def before_train(self):
         logger.info("args: {}".format(self.args))
         logger.info("exp value:\n{}".format(self.exp))
 
-        # model related init
         torch.cuda.set_device(self.local_rank)
         model = self.exp.get_model()
-        logger.info(
-            "Model Summary: {}".format(get_model_info(model, self.exp.test_size))
-        )
+        logger.info("Model Summary: {}".format(get_model_info(model, self.exp.test_size)))
         model.to(self.device)
 
-        # solver related init
         self.optimizer = self.exp.get_optimizer(self.args.batch_size)
-
-        # resume model and optimizer state
         model = self.resume_train(model)
 
-        # data related init
         self.no_aug = self.start_epoch >= self.max_epoch - self.exp.no_aug_epochs
         self.train_loader = self.exp.get_data_loader(
             batch_size=self.args.batch_size,
@@ -245,45 +252,33 @@ class Trainer:
         if self.is_distributed:
             model = DDP(model, device_ids=[self.local_rank], broadcast_buffers=False)
 
-        # MODEL EMA INITIALIZATION & RESTORATION
+        # ModelEMA Initialization with Zero-Step Fresh Warmup Protection
         if self.use_model_ema:
             self.ema_model = ModelEMA(model, 0.9998)
-            self.ema_model.updates = self.max_iter * self.start_epoch
-            
-            # RESTORE EMA SHADOW WEIGHTS 
             if self._loaded_ema_state is not None:
                 self.ema_model.ema.load_state_dict(self._loaded_ema_state)
+                self.ema_model.updates = self.max_iter * self.start_epoch
                 logger.info("Successfully restored ModelEMA shadow weights from checkpoint!")
             else:
-                logger.info("No EMA state found in checkpoint; initialized ModelEMA from current model.")
+                self.ema_model.updates = 0
+                logger.info("No EMA state found; initialized fresh ModelEMA with zero-step warmup.")
 
         self.model = model
-
-        self.evaluator = self.exp.get_evaluator(
-            batch_size=self.args.batch_size, is_distributed=self.is_distributed
-        )
+        self.evaluator = self.exp.get_evaluator(batch_size=self.args.batch_size, is_distributed=self.is_distributed)
 
         if self.rank == 0:
             if self.args.logger == "tensorboard":
                 self.tblogger = SummaryWriter(os.path.join(self.file_name, "tensorboard"))
             elif self.args.logger == "wandb":
-                self.wandb_logger = WandbLogger.initialize_wandb_logger(
-                    self.args,
-                    self.exp,
-                    self.evaluator.dataloader.dataset
-                )
+                self.wandb_logger = WandbLogger.initialize_wandb_logger(self.args, self.exp, self.evaluator.dataloader.dataset)
             elif self.args.logger == "mlflow":
                 self.mlflow_logger = MlflowLogger()
                 self.mlflow_logger.setup(args=self.args, exp=self.exp)
-            else:
-                raise ValueError("logger must be either 'tensorboard', 'mlflow' or 'wandb'")
 
         logger.info("Training start...")
 
     def after_train(self):
-        logger.info(
-            "Training of experiment is done and the best AP is {:.2f}".format(self.best_ap * 100)
-        )
+        logger.info("Training of experiment is done and the best AP is {:.2f}".format(self.best_ap * 100))
         if self.rank == 0:
             if self.args.logger == "wandb":
                 self.wandb_logger.finish()
@@ -298,12 +293,10 @@ class Trainer:
                 self.mlflow_logger.on_train_end(self.args, file_name=self.file_name, metadata=metadata)
 
     def before_epoch(self):
-        # 1. Update the Meta-Learning Engine state on the main model
         model = self.model.module if hasattr(self.model, "module") else self.model
         if hasattr(model, "set_meta_training_state"):
             model.set_meta_training_state(self.epoch + 1, self.max_epoch)
             
-        # 2. Synchronize Meta-Learning state to ModelEMA model as well!
         if self.use_model_ema and hasattr(self.ema_model.ema, "set_meta_training_state"):
             self.ema_model.ema.set_meta_training_state(self.epoch + 1, self.max_epoch)
 
@@ -322,11 +315,16 @@ class Trainer:
                 self.save_ckpt(ckpt_name="last_mosaic_epoch")
 
     def after_epoch(self):
-        self.save_ckpt(ckpt_name="latest")
-
         if (self.epoch + 1) % self.exp.eval_interval == 0:
             all_reduce_norm(self.model)
             self.evaluate_and_save_model()
+            
+        # Persist latest checkpoint strictly after evaluation so self.last_ap is updated
+        current_eval_ap = getattr(self, "last_ap", None)
+        self.save_ckpt(ckpt_name="latest", ap=current_eval_ap)
+        
+        # Multi-GPU barrier prevents race conditions across epoch transitions
+        synchronize()
 
     def before_iter(self):
         pass
@@ -338,22 +336,20 @@ class Trainer:
     def resume_train(self, model):
         if self.args.resume:
             logger.info("resume training")
-            if self.args.ckpt is None:
-                ckpt_file = os.path.join(self.file_name, "latest" + "_ckpt.pth")
-            else:
-                ckpt_file = self.args.ckpt
-
+            ckpt_file = self.args.ckpt if self.args.ckpt else os.path.join(self.file_name, "latest_ckpt.pth")
             ckpt = torch.load(ckpt_file, map_location=self.device)
             
-            # Load training model state
-            model.load_state_dict(ckpt["model"])
+            clean_model_state = {k[7:] if k.startswith("module.") else k: v for k, v in ckpt["model"].items()}
+            model.load_state_dict(clean_model_state)
             self.optimizer.load_state_dict(ckpt["optimizer"])
-            self.best_ap = ckpt.pop("best_ap", 0)
+            
+            if "scaler" in ckpt and ckpt["scaler"] is not None and hasattr(self, "scaler"):
+                self.scaler.load_state_dict(ckpt["scaler"])
+                
+            self.best_ap = ckpt.pop("best_ap", 0.0)
+            raw_ema = ckpt.get("ema", None)
+            self._loaded_ema_state = {k[7:] if k.startswith("module.") else k: v for k, v in raw_ema.items()} if raw_ema else None
 
-            # Store EMA state for before_train initialization
-            self._loaded_ema_state = ckpt.get("ema", None)
-
-            # Parse start_epoch
             if self.args.start_epoch is not None:
                 self.start_epoch = max(0, self.args.start_epoch - 1)
             elif "start_epoch" in ckpt:
@@ -361,30 +357,28 @@ class Trainer:
             else:
                 self.start_epoch = 0
 
-            logger.info(
-                "loaded checkpoint '{}' (resuming from epoch {})".format(
-                    ckpt_file, self.start_epoch + 1
-                )
-            )
+            logger.info("loaded checkpoint '{}' (resuming from epoch {})".format(ckpt_file, self.start_epoch + 1))
         else:
             if self.args.ckpt is not None:
                 logger.info("loading checkpoint for fine tuning")
                 ckpt_file = self.args.ckpt
                 raw_ckpt = torch.load(ckpt_file, map_location=self.device)
                 
-                # Check for EMA presence even during fine-tuning
                 if isinstance(raw_ckpt, dict):
                     ckpt_state = raw_ckpt.get("model", raw_ckpt)
-                    self._loaded_ema_state = raw_ckpt.get("ema", None)
-                    if "start_epoch" in raw_ckpt and self.args.start_epoch is None:
-                        self.start_epoch = raw_ckpt["start_epoch"]
+                    raw_ema = raw_ckpt.get("ema", None)
+                    self._loaded_ema_state = {k[7:] if k.startswith("module.") else k: v for k, v in raw_ema.items()} if raw_ema else None
+                    self.best_ap = raw_ckpt.get("best_ap", 0.0)
                 else:
                     ckpt_state = raw_ckpt
 
                 model = load_ckpt(model, ckpt_state)
-
+                
+                # Fine-tuning from base weights always starts at Epoch 0!
                 if self.args.start_epoch is not None:
                     self.start_epoch = max(0, self.args.start_epoch - 1)
+                else:
+                    self.start_epoch = 0
             else:
                 self.start_epoch = 0
 
@@ -395,8 +389,10 @@ class Trainer:
             evalmodel = self.ema_model.ema
         else:
             evalmodel = self.model
-            if is_parallel(evalmodel):
-                evalmodel = evalmodel.module
+
+        # Universal parallel model unwrapping for both live models and EMA models
+        if is_parallel(evalmodel):
+            evalmodel = evalmodel.module
 
         with adjust_status(evalmodel, training=False):
             (ap50_95, ap50, summary), predictions = self.exp.eval(
@@ -405,6 +401,7 @@ class Trainer:
 
         update_best_ckpt = ap50_95 > self.best_ap
         self.best_ap = max(self.best_ap, ap50_95)
+        self.last_ap = ap50_95
 
         if self.rank == 0:
             if self.args.logger == "tensorboard":
@@ -417,14 +414,6 @@ class Trainer:
                     "train/epoch": self.epoch + 1,
                 })
                 self.wandb_logger.log_images(predictions)
-            if self.args.logger == "mlflow":
-                logs = {
-                    "val/COCOAP50": ap50,
-                    "val/COCOAP50_95": ap50_95,
-                    "val/best_ap": round(self.best_ap, 3),
-                    "train/epoch": self.epoch + 1,
-                }
-                self.mlflow_logger.on_log(self.args, self.exp, self.epoch+1, logs)
             logger.info("\n" + summary)
         synchronize()
 
@@ -436,13 +425,22 @@ class Trainer:
         if self.rank == 0:
             logger.info("Save weights to {}".format(self.file_name))
             
-            # Save BOTH live training model AND ModelEMA shadow weights
+            raw_model_state = self.model.state_dict()
+            clean_model_state = {k[7:] if k.startswith("module.") else k: v for k, v in raw_model_state.items()}
+            
+            if self.use_model_ema and self.ema_model.ema is not None:
+                raw_ema_state = self.ema_model.ema.state_dict()
+                clean_ema_state = {k[7:] if k.startswith("module.") else k: v for k, v in raw_ema_state.items()}
+            else:
+                clean_ema_state = None
+
             ckpt_state = {
                 "start_epoch": self.epoch + 1,
                 "max_epoch": self.max_epoch,
-                "model": self.model.state_dict(),
-                "ema": self.ema_model.ema.state_dict() if self.use_model_ema else None,
+                "model": clean_model_state,
+                "ema": clean_ema_state,
                 "optimizer": self.optimizer.state_dict(),
+                "scaler": self.scaler.state_dict() if hasattr(self, "scaler") and self.scaler is not None else None,
                 "best_ap": self.best_ap,
                 "curr_ap": ap,
                 "curr_iter": self.progress_in_iter,
