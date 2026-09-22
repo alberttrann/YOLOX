@@ -290,14 +290,15 @@ class C2f_BQSA_P4(nn.Module):
         feat_cond = self.mbconv(self.ca(self.simam(feat)))
         
         # 2. Dynamic Pool Gating
-        s_up = F.interpolate(p5_saliency, size=(H, W), mode='nearest')
+        # Dynamic Pool Gating with FP32 Stability Floor
+        s_up = F.interpolate(p5_saliency.float(), size=(H, W), mode='nearest')
         block_saliency = F.avg_pool2d(s_up, kernel_size=bs, stride=bs).view(B, -1)
         
         mu_s = block_saliency.mean(dim=-1, keepdim=True)
-        sigma_s = block_saliency.std(dim=-1, keepdim=True)
-        h_ratio = torch.clamp(h_s / math.log(max(2, total_blocks)), 0.0, 1.0)
+        sigma_s = torch.clamp(block_saliency.std(dim=-1, keepdim=True), min=1e-5)
+        h_ratio = torch.clamp(h_s.float() / math.log(max(2, total_blocks)), 0.0, 1.0)
         tau_pool = torch.clamp(mu_s - 3.0 * h_ratio * sigma_s, min=0.0)
-        pool_mask = (block_saliency >= tau_pool).float()
+        pool_mask = (block_saliency >= tau_pool).to(feat.dtype)
         
         # 3. Block Scoring & STE Gumbel-Softmax Top-K
         scores = self.indexer(feat_cond)
