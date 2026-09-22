@@ -158,8 +158,11 @@ class P5ExclusiveDenseAttention(nn.Module):
         
         # 1. Commuting 2D Position Encoding on Disjoint Subspaces
         q, k = self.rope(q, k, H, W)
-        attn = torch.matmul(q, k.transpose(-2, -1)) * self.scale
-        attn = F.softmax(attn, dim=-1)
+        # Execute matmul and softmax in FP32 to eliminate the 65,504 FP16 overflow ceiling!
+        q_fp32 = q.float()
+        k_fp32 = k.float()
+        attn = torch.matmul(q_fp32, k_fp32.transpose(-2, -1)) * self.scale
+        attn = F.softmax(attn, dim=-1).to(v.dtype)
         
         # 2. Zero-Allocation Analytical Diagonal Subtraction for Exclusive Centrality
         diag_elements = attn.diagonal(dim1=-2, dim2=-1)
@@ -338,8 +341,12 @@ class C2f_BQSA_P4(nn.Module):
         v_sel = v_sel.permute(0, 2, 1, 3).reshape(B, C, k_actual * tokens_per_b)
         
         q_flat = q.reshape(B, C, H * W)
-        attn = torch.matmul(q_flat.transpose(-2, -1), k_sel) * (C ** -0.5)
-        attn = F.softmax(attn, dim=-1)
+        
+        q_fp32 = q_flat.transpose(-2, -1).float()
+        k_fp32 = k_sel.float()
+        attn = torch.matmul(q_fp32, k_fp32) * (C ** -0.5)
+        attn = F.softmax(attn, dim=-1).to(v_sel.dtype)
+        
         context = torch.matmul(v_sel, attn.transpose(-2, -1)).reshape(B, C, H, W)
         
         gate = torch.sigmoid(self.gr_gate)
@@ -421,8 +428,11 @@ class C2f_BQSA_P3(nn.Module):
         k_loc = k_sel.reshape(B * k_actual, C, tokens_per_b)
         v_loc = v_sel.permute(0, 1, 3, 2).reshape(B * k_actual, tokens_per_b, C)
         
-        attn = torch.bmm(q_loc, k_loc) * (C ** -0.5)
-        attn = F.softmax(attn, dim=-1)
+        q_fp32 = q_loc.float()
+        k_fp32 = k_loc.float()
+        attn = torch.bmm(q_fp32, k_fp32) * (C ** -0.5)
+        attn = F.softmax(attn, dim=-1).to(v_loc.dtype)
+        
         ctx_loc = torch.bmm(attn, v_loc).reshape(B, k_actual, tokens_per_b, C)
         
         # Rank-3 TensorRT-Safe ScatterElements on NVIDIA Drive Orin
