@@ -166,15 +166,16 @@ class P5ExclusiveDenseAttention(nn.Module):
         saliency_sum = attn.sum(dim=-2) - diag_elements
         saliency = saliency_sum.mean(dim=1).reshape(B, 1, H, W) / max(1.0, float(N - 1))
         
-        # Standardize saliency to establish robust dynamic range for entropy estimation
-        s_flat = saliency.flatten(1)
+        # Execute strictly in float32 to prevent float16 underflow (1e-8 -> 0.0 -> log(0) -> -inf -> NaN)
+        s_flat = saliency.flatten(1).float()
         s_mean = s_flat.mean(dim=-1, keepdim=True)
-        s_std = s_flat.std(dim=-1, keepdim=True) + 1e-6
+        s_std = torch.clamp(s_flat.std(dim=-1, keepdim=True), min=1e-5)
         s_standardized = (s_flat - s_mean) / s_std
         
+        # Softmax * LogSoftmax identity guarantees zero log(0.0) singularities
         s_prob = F.softmax(s_standardized, dim=-1)
-        # Detach oracle entropy sensor to eliminate infinite subgradient loops
-        h_s = (-torch.sum(s_prob * torch.log(s_prob + 1e-8), dim=-1).mean()).detach()
+        s_log_prob = F.log_softmax(s_standardized, dim=-1)
+        h_s = (-torch.sum(s_prob * s_log_prob, dim=-1).mean()).detach()
         
         # 3. Dense Multi-Head Aggregation & FP32 Gram-Schmidt XSA Subtraction
         y = torch.matmul(attn, v)
