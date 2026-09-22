@@ -167,7 +167,16 @@ class Exp(MyExp):
         unassigned = all_params - registered_params
         assert len(unassigned) == 0, f"Unassigned parameters detected: {unassigned}"
 
+        # Instantiate Engine 1: Muon Optimizer
         opt_muon = Muon(pg_muon, lr=0.02, momentum=0.95, nesterov=True, ns_steps=5, weight_decay=0.0)
+        
+        # NATIVE YOLOX PROPORTIONAL SCALING:
+        # Base SGD LR is 0.0025. Muon LR is 0.02.
+        # Ratio = 0.02 / 0.0025 = 8.0x!
+        for pg in opt_muon.param_groups:
+            pg["lr_factor"] = 0.02 / base_lr  # Exactly 8.0!
+
+        # Instantiate Engine 2 & 3: Multi-Group Momentum SGD
         sgd_groups = [
             {"params": pg_sgd_decay, "weight_decay": self.weight_decay, "lr": base_lr, "lr_factor": 1.0},
             {"params": pg_sgd_no_decay, "weight_decay": 0.0, "lr": base_lr, "lr_factor": 1.0},

@@ -97,8 +97,14 @@ class AdaptiveNWDloss(nn.Module):
         c_adaptive_safe = torch.clamp(c_adaptive, min=8.0)
 
         # 3. Dimensionless Normalized Wasserstein Distance
+        # DFA-YOLO Scale-Sensitive Factor: Certified Friction-Free (Bounded in [1.0, 2.0])
+        # Amplifies Wasserstein supervision for small vulnerable road users (Bikes, Motors, Signs)
+        area_gt = torch.clamp(g_w * g_h, min=1.0)
+        gamma_scale = torch.exp(-area_gt / 1000.0)
+
+        # Dimensionless Normalized Wasserstein Distance with Scale Boost
         nwd = torch.exp(-self.kappa * (torch.sqrt(w2_sq) / c_adaptive_safe))
-        loss = 1.0 - nwd
+        loss = (1.0 + gamma_scale) * (1.0 - nwd)
 
         if self.reduction == "mean":
             return loss.mean().float()
