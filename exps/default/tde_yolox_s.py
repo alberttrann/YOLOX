@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding:utf-8 -*-
 # Copyright (c) Megvii Inc. All rights reserved.
-# Integrated for TDE-YOLOX v3.1: Triple-Engine Optimizer & Strict ZSDA Protocol
+# Integrated for TDE-YOLOX v3.1: Unified MuSGD Optimizer & Strict ZSDA Protocol
 
 import os
 import torch
 import torch.nn as nn
 from yolox.exp import Exp as MyExp
-from yolox.optimizers.muon import Muon, CombinedOptimizer, ProportionalMuonParamGroup
+from yolox.optimizers.muon import MuSGD
 
 
 class Exp(MyExp):
@@ -27,7 +27,7 @@ class Exp(MyExp):
         # --- DATASET & RESOLUTION LOCKING ---
         self.input_size = (640, 640)
         self.test_size = (640, 640)
-        self.multiscale_range = 0    # Strictly lock canvas to 640x640 (prevents block shape collapse)
+        self.multiscale_range = 0    # Strictly lock canvas to 640x640 (preserves 10x10 block grid)
         self.mosaic_prob = 0.0       # Disabled from Epoch 1 (prevents seam variance corruption)
         self.enable_mixup = False    # Disabled from Epoch 1
 
@@ -109,10 +109,11 @@ class Exp(MyExp):
 
     def get_optimizer(self, batch_size):
         """
-        TRIPLE-ENGINE OPTIMIZER PARTITION:
-          - Engine 1 (Muon): Prototypes [576, 128], BQSA 1x1 projections, local/anchor projectors, manifold decoders
-          - Engine 2 (Momentum SGD): 4D Convolutions (decay=5e-4), Normalizations & Biases (decay=0.0)
-          - Engine 3 (Meta-SGD): Stage 1 TTT learning rates (lr=5e-4, lr_factor=0.05, decay=0.0)
+        NATIVE MuSGD OPTIMIZER PARTITION:
+          - Group 0 (Muon): Prototypes [576, 128], BQSA projections, manifold decoders (lr=0.02, lr_factor=8.0, WD=0.0)
+          - Group 1 (SGD): 4D Convolutions (lr=base_lr, lr_factor=1.0, WD=5e-4)
+          - Group 2 (SGD): Normalizations, Biases, and Scalers (lr=base_lr, lr_factor=1.0, WD=0.0)
+          - Group 3 (Meta-SGD): Stage 1 TTT learning rates (lr=base_lr*0.05, lr_factor=0.05, WD=0.0)
         """
         if "optimizer" in self.__dict__:
             return self.optimizer
@@ -126,31 +127,30 @@ class Exp(MyExp):
         pg_sgd_decay = []
         pg_sgd_no_decay = []
 
-        # 1. Partition Muon Parameters (2D Matrices: Prototypes, 1x1 Projections, Decoders)
+        # Partition parameters strictly
         for name, p in self.model.named_parameters():
             if not p.requires_grad:
                 continue
 
-            # Identify Engram Prototypes [576, 128]
+            # 1. 2D Matrices and Prototypes -> Muon
             if "prototypes" in name:
                 pg_muon.append(p)
                 registered_params.add(p)
                 continue
 
-            # Identify BQSA 1x1 Projections, Anchor/Local Projectors, and Head Decoders
             if any(k in name for k in ["manifold_decoders", "anchor_projectors", "local_projectors", "p4_bqsa.qkv", "p4_bqsa.proj", "p3_bqsa.qkv", "p3_bqsa.proj", "p5_dense_attn.qkv", "p5_dense_attn.proj"]):
-                if "weight" in name and p.dim() in [2, 4]:
+                if p.dim() in [2, 4]:
                     pg_muon.append(p)
                     registered_params.add(p)
                     continue
 
-            # 2. Partition Meta-SGD Parameters (Stage 1 TTT Learning Rates)
+            # 2. Stage 1 TTT Step Sizes -> Meta-SGD
             if "ttt_lrs" in name:
                 pg_meta.append(p)
                 registered_params.add(p)
                 continue
 
-            # 3. Partition Momentum SGD Parameters
+            # 3. 1D Biases, Normalizations, and Scalers -> SGD No-Decay
             if "bias" in name:
                 pg_sgd_no_decay.append(p)
                 registered_params.add(p)
@@ -161,29 +161,27 @@ class Exp(MyExp):
                 pg_sgd_no_decay.append(p)
                 registered_params.add(p)
             else:
+                # 4. Standard 4D Convolution Weights -> SGD Decay
                 pg_sgd_decay.append(p)
                 registered_params.add(p)
 
+        # Zero parameter omissions assertion
         unassigned = all_params - registered_params
         assert len(unassigned) == 0, f"Unassigned parameters detected: {unassigned}"
 
-        # Instantiate Engine 1: Muon Optimizer
-        opt_muon = Muon(pg_muon, lr=0.02, momentum=0.95, nesterov=True, ns_steps=5, weight_decay=0.0)
-        
-        # NATIVE YOLOX PROPORTIONAL SCALING:
-        # Base SGD LR is 0.0025. Muon LR is 0.02.
-        # Ratio = 0.02 / 0.0025 = 8.0x!
-        for pg in opt_muon.param_groups:
-            pg["lr_factor"] = 0.02 / base_lr  # Exactly 8.0!
-
-        # Instantiate Engine 2 & 3: Multi-Group Momentum SGD
-        sgd_groups = [
-            {"params": pg_sgd_decay, "weight_decay": self.weight_decay, "lr": base_lr, "lr_factor": 1.0},
-            {"params": pg_sgd_no_decay, "weight_decay": 0.0, "lr": base_lr, "lr_factor": 1.0},
-            {"params": pg_meta, "weight_decay": 0.0, "lr": base_lr * 0.05, "lr_factor": 0.05}
+        # Native Unified Parameter Groups
+        param_groups = [
+            # Group 0: Muon (lr_factor = 0.02 / 0.0025 = 8.0x)
+            {"params": pg_muon, "use_muon": True, "lr": 0.02, "lr_factor": 0.02 / base_lr, "momentum": 0.95, "weight_decay": 0.0},
+            # Group 1: Standard 4D Convolutions
+            {"params": pg_sgd_decay, "use_muon": False, "lr": base_lr, "lr_factor": 1.0, "momentum": 0.9, "weight_decay": self.weight_decay, "nesterov": True},
+            # Group 2: Biases, Normalizations, and Scalers
+            {"params": pg_sgd_no_decay, "use_muon": False, "lr": base_lr, "lr_factor": 1.0, "momentum": 0.9, "weight_decay": 0.0, "nesterov": True},
+            # Group 3: Meta-SGD Step Sizes
+            {"params": pg_meta, "use_muon": False, "lr": base_lr * 0.05, "lr_factor": 0.05, "momentum": 0.9, "weight_decay": 0.0, "nesterov": True},
         ]
-        opt_sgd = torch.optim.SGD(sgd_groups, momentum=self.momentum, nesterov=True)
-        self.optimizer = CombinedOptimizer([opt_muon, opt_sgd])
+
+        self.optimizer = MuSGD(param_groups, muon=1.0, sgd=0.0)
         return self.optimizer
 
     def get_dataset(self, cache=False, cache_type="ram"):
@@ -194,7 +192,7 @@ class Exp(MyExp):
             name="",
             img_size=self.input_size,
             preproc=TrainTransform(
-                max_labels=120,  # Restores full capacity for crowded urban scenes
+                max_labels=120,  # Restores full capacity for dense traffic scenes
                 flip_prob=self.flip_prob,
                 hsv_prob=self.hsv_prob
             ),
