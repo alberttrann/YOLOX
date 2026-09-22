@@ -169,13 +169,14 @@ class P5ExclusiveDenseAttention(nn.Module):
         saliency_sum = attn.sum(dim=-2) - diag_elements
         saliency = saliency_sum.mean(dim=1).reshape(B, 1, H, W) / max(1.0, float(N - 1))
         
-        # Execute strictly in float32 to prevent float16 underflow (1e-8 -> 0.0 -> log(0) -> -inf -> NaN)
         s_flat = saliency.flatten(1).float()
         s_mean = s_flat.mean(dim=-1, keepdim=True)
-        s_std = torch.clamp(s_flat.std(dim=-1, keepdim=True), min=1e-5)
+        # Clamp variance BEFORE sqrt to eliminate sqrt(negative_roundoff) = NaN!
+        s_var = torch.clamp(torch.var(s_flat, dim=-1, keepdim=True, unbiased=False), min=1e-8)
+        s_std = torch.sqrt(s_var) + 1e-5
         s_standardized = (s_flat - s_mean) / s_std
         
-        # Softmax * LogSoftmax identity guarantees zero log(0.0) singularities
+        # Softmax * LogSoftmax identity in FP32 guarantees zero log(0.0) singularities
         s_prob = F.softmax(s_standardized, dim=-1)
         s_log_prob = F.log_softmax(s_standardized, dim=-1)
         h_s = (-torch.sum(s_prob * s_log_prob, dim=-1).mean()).detach()
@@ -292,39 +293,46 @@ class C2f_BQSA_P4(nn.Module):
         # 1. Tribrid Conditioning Stack
         feat_cond = self.mbconv(self.ca(self.simam(feat)))
         
-        # 2. Dynamic Pool Gating
-        # Dynamic Pool Gating with FP32 Stability Floor
+        # 2. Dynamic Pool Gating with Guaranteed Minimum 1-Block Law
         s_up = F.interpolate(p5_saliency.float(), size=(H, W), mode='nearest')
         block_saliency = F.avg_pool2d(s_up, kernel_size=bs, stride=bs).view(B, -1)
         
         mu_s = block_saliency.mean(dim=-1, keepdim=True)
-        sigma_s = torch.clamp(block_saliency.std(dim=-1, keepdim=True), min=1e-5)
+        # Clamp variance BEFORE sqrt!
+        var_s = torch.clamp(torch.var(block_saliency, dim=-1, keepdim=True, unbiased=False), min=1e-8)
+        sigma_s = torch.sqrt(var_s) + 1e-5
+        
         h_ratio = torch.clamp(h_s.float() / math.log(max(2, total_blocks)), 0.0, 1.0)
         tau_pool = torch.clamp(mu_s - 3.0 * h_ratio * sigma_s, min=0.0)
         pool_mask = (block_saliency >= tau_pool).to(feat.dtype)
         
-        # 3. Block Scoring & STE Gumbel-Softmax Top-K
+        # MINIMUM 1-BLOCK LAW: Ensure at least the top-1 saliency block is active
+        empty_mask = (pool_mask.sum(dim=-1, keepdim=True) == 0)
+        if empty_mask.any():
+            top1_fallback = torch.zeros_like(pool_mask).scatter_(-1, block_saliency.argmax(dim=-1, keepdim=True), 1.0)
+            pool_mask = torch.where(empty_mask, top1_fallback, pool_mask)
+        
+        # 3. Block Scoring & STE Gumbel-Softmax Top-K (EXECUTED IN FP32)
         scores = self.indexer(feat_cond)
         block_scores = F.avg_pool2d(scores, kernel_size=bs, stride=bs).view(B, -1)
-        masked_scores = block_scores * pool_mask - (1.0 - pool_mask) * 1e4
+        
+        # Use -500.0 instead of -10000.0 to prevent underflow to -inf
+        # -500.0 / 0.5 = -1000.0 (exp(-1000) = 0.0 cleanly, without -inf)
+        masked_scores_fp32 = block_scores.float() * pool_mask.float() - (1.0 - pool_mask.float()) * 500.0
         
         if self.training:
-            # Safe FP32 Gumbel noise prevents 0.0 -> log(0) -> -inf -> NaN
-            u = torch.rand_like(masked_scores, dtype=torch.float32)
-            # OLD:
-            # gumbel = -torch.empty_like(masked_scores).exponential_().log()
-
-            # NEW (Guards against log(0.0) = -inf -> NaN):
-            u = torch.rand_like(masked_scores, dtype=torch.float32)
-            gumbel = -torch.log(-torch.log(u + 1e-7) + 1e-7).to(masked_scores.dtype)
-            soft_scores = F.softmax((masked_scores + gumbel) / self.tau, dim=-1)
-            _, topk_idx = torch.topk(soft_scores, k_actual, dim=-1)
+            u = torch.rand_like(masked_scores_fp32, dtype=torch.float32)
+            gumbel = -torch.log(-torch.log(u + 1e-7) + 1e-7)
+            # Softmax computed in FP32 eliminates underflow to NaN
+            soft_scores_fp32 = F.softmax((masked_scores_fp32 + gumbel) / max(0.1, float(self.tau)), dim=-1)
+            soft_scores = soft_scores_fp32.to(masked_scores_fp32.dtype)
             
+            _, topk_idx = torch.topk(soft_scores, k_actual, dim=-1)
             hard_mask = torch.zeros_like(soft_scores).scatter_(-1, topk_idx, 1.0)
             ste_mask = (hard_mask - soft_scores).detach() + soft_scores
-            ste_weights = torch.gather(ste_mask, -1, topk_idx).unsqueeze(-1).unsqueeze(-1)
+            ste_weights = torch.gather(ste_mask, -1, topk_idx).unsqueeze(-1).unsqueeze(-1).to(feat.dtype)
         else:
-            _, topk_idx = torch.topk(masked_scores, k_actual, dim=-1)
+            _, topk_idx = torch.topk(masked_scores_fp32, k_actual, dim=-1)
             ste_weights = 1.0
 
         # 4. Sparse Cross-Attention
