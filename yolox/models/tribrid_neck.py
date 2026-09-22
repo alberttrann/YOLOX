@@ -306,6 +306,11 @@ class C2f_BQSA_P4(nn.Module):
         if self.training:
             # Safe FP32 Gumbel noise prevents 0.0 -> log(0) -> -inf -> NaN
             u = torch.rand_like(masked_scores, dtype=torch.float32)
+            # OLD:
+            # gumbel = -torch.empty_like(masked_scores).exponential_().log()
+
+            # NEW (Guards against log(0.0) = -inf -> NaN):
+            u = torch.rand_like(masked_scores, dtype=torch.float32)
             gumbel = -torch.log(-torch.log(u + 1e-7) + 1e-7).to(masked_scores.dtype)
             soft_scores = F.softmax((masked_scores + gumbel) / self.tau, dim=-1)
             _, topk_idx = torch.topk(soft_scores, k_actual, dim=-1)

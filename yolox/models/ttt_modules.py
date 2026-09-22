@@ -267,12 +267,17 @@ class TTTAdaptiveStage(nn.Module):
                 lr_key = name.replace('.', '_')
                 effective_lr = torch.clamp(F.softplus(self.ttt_lrs[lr_key]), min=1e-4, max=0.25)
                 
-                # Inference autograd tape pruning eliminates VRAM retention
-                if not self.training:
-                    effective_lr = effective_lr.detach()
-                    g = g.detach()
-                    
-                updated_backbone_params[name] = (backbone_params[name].float() - effective_lr * g).to(input_dtype)
+                # OLD:
+                # if not self.training:
+                #     effective_lr = effective_lr.detach()
+                #     g = g.detach()
+
+                # NEW (First-Order MAML Invariant: Unconditionally detach g):
+                # Eliminates the second-order Hessian matrix explosion in FP16!
+                effective_lr = torch.clamp(F.softplus(self.ttt_lrs[lr_key]), min=1e-4, max=0.25)
+                g_detached = g.detach()
+
+                updated_backbone_params[name] = (backbone_params[name].float() - effective_lr * g_detached).to(input_dtype)
 
         # Compute direct first-order auxiliary projector loss during training in FP32
         if self.training:

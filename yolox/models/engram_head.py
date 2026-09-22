@@ -549,8 +549,10 @@ class TDE_Head(YOLOXHead):
         gt_cls_per_image = F.one_hot(gt_classes.to(torch.int64), self.num_classes).float()
         with torch.cuda.amp.autocast(enabled=False):
             cls_prob = (cls_preds_.float().sigmoid_() * obj_preds_.float().sigmoid_()).sqrt()
+            # Prevents float16 rounding > 1.0 from triggering log(negative) = NaN in BCE
             cls_prob = torch.clamp(cls_prob, min=0.0, max=1.0 - 1e-7)
             cls_prob = torch.nan_to_num(cls_prob, nan=0.0)
+            
             pair_wise_cls_loss = F.binary_cross_entropy(
                 cls_prob.unsqueeze(0).repeat(num_gt, 1, 1),
                 gt_cls_per_image.unsqueeze(1).repeat(1, num_in_boxes_anchor, 1),
