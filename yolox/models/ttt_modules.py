@@ -204,6 +204,11 @@ class TTTAdaptiveStage(nn.Module):
                 if not self.training:
                     effective_lr = effective_lr.detach()
                     g = g.detach()
+                # ADD .detach() TO PREVENT NON-LEAF TRACKING DURING INFERENCE:
+                new_val = (backbone_params[name].float() - effective_lr * g).to(input_dtype)
+                if not self.training:
+                    new_val = new_val.detach()
+                updated_backbone_params[name] = new_val
                     
                 updated_backbone_params[name] = (backbone_params[name].float() - effective_lr * g).to(input_dtype)
 
