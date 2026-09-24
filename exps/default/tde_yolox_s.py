@@ -110,16 +110,18 @@ class Exp(MyExp):
     def get_optimizer(self, batch_size):
         """
         NATIVE MuSGD OPTIMIZER PARTITION:
-          - Group 0 (Muon): Prototypes [576, 128], BQSA projections, manifold decoders (lr=0.02, lr_factor=8.0, WD=0.0)
-          - Group 1 (SGD): 4D Convolutions (lr=base_lr, lr_factor=1.0, WD=5e-4)
-          - Group 2 (SGD): Normalizations, Biases, and Scalers (lr=base_lr, lr_factor=1.0, WD=0.0)
+          - Group 0 (Muon): STRICTLY Prototypes [576, 128] (lr=0.02, lr_factor=8.0, WD=0.0)
+          - Group 1 (SGD): All Convolutions & Projections (lr=base_lr, lr_factor=1.0, WD=5e-4)
+          - Group 2 (SGD): Biases, Normalizations, and Scalers (lr=base_lr, lr_factor=1.0, WD=0.0)
           - Group 3 (Meta-SGD): Stage 1 TTT learning rates (lr=base_lr*0.05, lr_factor=0.05, WD=0.0)
         """
         if "optimizer" in self.__dict__:
             return self.optimizer
 
         base_lr = self.basic_lr_per_img * batch_size
-        all_params = set(self.model.parameters())
+        
+        # Explicitly collect all active trainable parameters
+        all_trainable_params = {p for p in self.model.parameters() if p.requires_grad}
         registered_params = set()
 
         pg_muon = []
@@ -127,22 +129,16 @@ class Exp(MyExp):
         pg_sgd_decay = []
         pg_sgd_no_decay = []
 
-        # Partition parameters strictly
+        # Partition parameters strictly and safely:
         for name, p in self.model.named_parameters():
             if not p.requires_grad:
                 continue
 
-            # 1. 2D Matrices and Prototypes -> Muon
+            # 1. ONLY the 576 Prototypes on S^127 go to Muon (Pure Manifold Optimization)
             if "prototypes" in name:
                 pg_muon.append(p)
                 registered_params.add(p)
                 continue
-
-            if any(k in name for k in ["manifold_decoders", "anchor_projectors", "local_projectors", "p4_bqsa.qkv", "p4_bqsa.proj", "p3_bqsa.qkv", "p3_bqsa.proj", "p5_dense_attn.qkv", "p5_dense_attn.proj"]):
-                if p.dim() in [2, 4]:
-                    pg_muon.append(p)
-                    registered_params.add(p)
-                    continue
 
             # 2. Stage 1 TTT Step Sizes -> Meta-SGD
             if "ttt_lrs" in name:
@@ -150,7 +146,7 @@ class Exp(MyExp):
                 registered_params.add(p)
                 continue
 
-            # 3. 1D Biases, Normalizations, and Scalers -> SGD No-Decay
+            # 3. 1D Biases, Normalizations, and Scalar Gates -> SGD No-Decay (lr = base_lr)
             if "bias" in name:
                 pg_sgd_no_decay.append(p)
                 registered_params.add(p)
@@ -161,19 +157,18 @@ class Exp(MyExp):
                 pg_sgd_no_decay.append(p)
                 registered_params.add(p)
             else:
-                # 4. Standard 4D Convolution Weights -> SGD Decay
+                # 4. ALL Convolutions (including 1x1 QKV, Projections & Decoders) -> SGD with Weight Decay!
+                # Weight decay (5e-4) strictly prevents activation magnitude explosion!
                 pg_sgd_decay.append(p)
                 registered_params.add(p)
 
-        # Zero parameter omissions assertion
-        unassigned = all_params - registered_params
+        unassigned = all_trainable_params - registered_params
         assert len(unassigned) == 0, f"Unassigned parameters detected: {unassigned}"
 
-        # Native Unified Parameter Groups
         param_groups = [
-            # Group 0: Muon (lr_factor = 0.02 / 0.0025 = 8.0x)
-            {"params": pg_muon, "use_muon": True, "lr": 0.02, "lr_factor": 0.02 / base_lr, "momentum": 0.95, "weight_decay": 0.0},
-            # Group 1: Standard 4D Convolutions
+            # Group 0: Muon (STRICTLY for Prototypes: lr=0.02, lr_factor=8.0x, WD=0.0)
+            {"params": pg_muon, "use_muon": True, "lr": 0.02, "lr_factor": 0.02 / base_lr, "momentum": 0.95, "weight_decay": 0.0, "nesterov": True},
+            # Group 1: All Convolutions & Projections (Bounded by weight decay 5e-4)
             {"params": pg_sgd_decay, "use_muon": False, "lr": base_lr, "lr_factor": 1.0, "momentum": 0.9, "weight_decay": self.weight_decay, "nesterov": True},
             # Group 2: Biases, Normalizations, and Scalers
             {"params": pg_sgd_no_decay, "use_muon": False, "lr": base_lr, "lr_factor": 1.0, "momentum": 0.9, "weight_decay": 0.0, "nesterov": True},

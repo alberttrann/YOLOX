@@ -339,12 +339,24 @@ class Trainer:
             ckpt_file = self.args.ckpt if self.args.ckpt else os.path.join(self.file_name, "latest_ckpt.pth")
             ckpt = torch.load(ckpt_file, map_location=self.device)
             
+            # Gracefully handles parameter group restructuring
             clean_model_state = {k[7:] if k.startswith("module.") else k: v for k, v in ckpt["model"].items()}
             model.load_state_dict(clean_model_state)
-            self.optimizer.load_state_dict(ckpt["optimizer"])
+            
+            try:
+                self.optimizer.load_state_dict(ckpt["optimizer"])
+                logger.info("Optimizer state successfully restored from checkpoint.")
+            except Exception as e:
+                logger.warning(
+                    f"Optimizer parameter groups restructured: {e}. "
+                    "Fresh momentum buffers initialized for updated parameter groups."
+                )
             
             if "scaler" in ckpt and ckpt["scaler"] is not None and hasattr(self, "scaler"):
-                self.scaler.load_state_dict(ckpt["scaler"])
+                try:
+                    self.scaler.load_state_dict(ckpt["scaler"])
+                except Exception:
+                    pass
                 
             self.best_ap = ckpt.pop("best_ap", 0.0)
             raw_ema = ckpt.get("ema", None)

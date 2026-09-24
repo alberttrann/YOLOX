@@ -1,8 +1,3 @@
-#!/usr/bin/env python
-# -*- encoding: utf-8 -*-
-# Copyright (c) Megvii Inc. All rights reserved.
-# Integrated for TDE-YOLOX v3.1: Decoupled Anti-Collision Engram Head & Calibrated SimOTA
-
 import math
 import torch
 import torch.nn as nn
@@ -15,16 +10,6 @@ from .yolo_head import YOLOXHead
 
 
 class AntiCollisionEngramBank(nn.Module):
-    """
-    Hyperspherical Engram Associative Memory Bank.
-    Certified for TDE-YOLOX v3.1:
-      - 576 Canonical Prototypes on unit hypersphere S^127 evaluated in FP32 at T=16.0.
-      - LogMeanExp extraction eliminates +4.16 logit inflation.
-      - Margin-Aware Bayesian Confusion Gate detects inter-class competition (Car vs Truck).
-      - Objectness-conditioned uncertainty prevents empty fog clouds from opening the gate.
-      - Continuous Blizzard Soft-Cutoff (Sigmoid at 5.69 nats) wired directly to P5 optical entropy.
-      - Exact phase-aligned coarse anchor upsampling (align_corners=True).
-    """
     def __init__(self, num_classes=9, num_modes=64, latent_dim=128, temperature=16.0):
         super().__init__()
         self.num_classes = num_classes
@@ -32,7 +17,6 @@ class AntiCollisionEngramBank(nn.Module):
         self.latent_dim = latent_dim
         self.temperature = temperature
         
-        # 576 Canonical Prototypes on unit hypersphere S^127 [576, 128]
         self.prototypes = nn.Parameter(torch.randn(num_classes * num_modes, latent_dim))
         nn.init.orthogonal_(self.prototypes)
         self.prototypes.is_hypersphere = True
@@ -48,17 +32,19 @@ class AntiCollisionEngramBank(nn.Module):
         B, C, H, W = h_local.shape
         D = self.latent_dim
         
-        # Exact phase-aligned coarse anchor upsampling eliminates -0.25 px coordinate shift
         p_interp = F.interpolate(anchor_feat, size=(H, W), mode='bilinear', align_corners=True)
         dw_local = self.dw_hf(h_local)
         
-        # Scale-normalize both components so tanh(w_hf) is an exact, un-drifted ratio
-        p_scale = p_interp * torch.rsqrt(p_interp.pow(2).mean(dim=1, keepdim=True) + 1e-5)
-        dw_scale = dw_local * torch.rsqrt(dw_local.pow(2).mean(dim=1, keepdim=True) + 1e-5)
+        # === FP32 RMS SHIELD: Prevents 65504 squared accumulation overflow ===
+        p_fp32 = p_interp.float()
+        dw_fp32 = dw_local.float()
         
-        q = p_scale + torch.tanh(self.w_hf) * dw_scale
+        p_scale = p_fp32 * torch.rsqrt(p_fp32.pow(2).mean(dim=1, keepdim=True) + 1e-5)
+        dw_scale = dw_fp32 * torch.rsqrt(dw_fp32.pow(2).mean(dim=1, keepdim=True) + 1e-5)
         
-        # Hyperspherical Hard Attention strictly in single-precision FP32
+        q = (p_scale + torch.tanh(self.w_hf.float()) * dw_scale).to(h_local.dtype)
+        # =====================================================================
+        
         q_fp32 = q.float()
         p_fp32 = self.prototypes.float()
         
@@ -71,12 +57,10 @@ class AntiCollisionEngramBank(nn.Module):
         retrieved_memory_fp32 = torch.matmul(attn_weights, p_norm)
         retrieved_memory = retrieved_memory_fp32.to(q.dtype)
         
-        # Mode-normalized LogMeanExp eliminates artificial +4.16 positive logit inflation
         scores_by_class = scores_fp32.view(B, H * W, self.num_classes, self.num_modes)
         log_k = math.log(float(self.num_modes))
-        raw_class_scores = torch.logsumexp(scores_by_class, dim=-1) - log_k  # [B, HW, 9] in FP32
+        raw_class_scores = torch.logsumexp(scores_by_class, dim=-1) - log_k
         
-        # Margin-Aware Bayesian Predictive Confusion
         z_conv_flat = z_conv_logits.permute(0, 2, 3, 1).reshape(B, H * W, -1)
         p_conv = torch.sigmoid(z_conv_flat.detach())
         top2_p, _ = torch.topk(p_conv, k=2, dim=-1)
@@ -84,11 +68,9 @@ class AntiCollisionEngramBank(nn.Module):
         p_top2 = top2_p[..., 1:2]
         margin = torch.clamp(p_top1 - p_top2, min=0.0, max=1.0)
         
-        # Pre-conditioning uncertainty by detached objectness prevents empty fog clouds from opening gate
         obj_flat = objectness_mask.permute(0, 2, 3, 1).reshape(B, H * W, 1)
         uncertainty = (1.0 - margin) * obj_flat.detach()
         
-        # GRAPE-AP Spatial Distance Penalty on Normalized Directional Manifold
         h_flat = h_local.permute(0, 2, 3, 1).reshape(B, H * W, C)
         h_dir = F.normalize(h_flat, p=2, dim=-1, eps=1e-5)
         mem_dir = F.normalize(retrieved_memory, p=2, dim=-1, eps=1e-5)
@@ -100,11 +82,9 @@ class AntiCollisionEngramBank(nn.Module):
         gate_logit = 5.0 * uncertainty - dist_penalty - 2.5
         g_raw = torch.sigmoid(gate_logit) * obj_flat
         
-        # Curriculum Gate Floor (Epochs 1-15)
         curriculum_floor = 0.20 * max(0.0, 1.0 - float(epoch) / 15.0)
         g_effective = torch.max(g_raw, torch.tensor(curriculum_floor, device=q.device, dtype=q.dtype))
         
-        # Continuous Blizzard Soft-Cutoff (Sigmoid at 5.69 nats eliminates binary chattering)
         blizzard_gate = torch.sigmoid(10.0 * (5.69 - h_s)).to(q.dtype)
         g_final = g_effective * blizzard_gate
             
@@ -115,28 +95,11 @@ class AntiCollisionEngramBank(nn.Module):
 
 
 class TDE_Head(YOLOXHead):
-    """
-    Decoupled Anti-Collision Engram Head.
-    Certified for TDE-YOLOX v3.1:
-      - Strictly memory-free regression tower with zero-initialized initial biases.
-      - Symmetrical GIoU + Scale-Adaptive NWD hybrid loss with late-stage hand-off at Epoch 65.
-      - Aspect-ratio adaptive SimOTA matching with unbiased dynamic-K rounding.
-      - Additive gated memory injection with a 50% ceiling and 0.2 * tanh bilateral smoothing.
-    """
-    def __init__(
-        self,
-        num_classes=9,
-        width=1.0,
-        strides=[8, 16, 32],
-        in_channels=[256, 512, 1024],
-        act="silu",
-        depthwise=False
-    ):
+    def __init__(self, num_classes=9, width=1.0, strides=[8, 16, 32], in_channels=[256, 512, 1024], act="silu", depthwise=False):
         super().__init__(num_classes, width, strides, in_channels, act, depthwise)
         self.latent_dim = 128
         self.current_epoch = 0
         
-        # Explicitly enforce GIoU and Symmetrical Scale-Adaptive NWD
         self.iou_loss = IOUloss(reduction="none", loss_type="giou")
         self.nwd_loss = AdaptiveNWDloss(kappa=2.0, reduction="none")
         
@@ -147,11 +110,10 @@ class TDE_Head(YOLOXHead):
         self.obj_preds = nn.ModuleList()
         self.stems = nn.ModuleList()
         
-        c4 = int(in_channels[1] * width)  # 256
-        c5 = int(in_channels[2] * width)  # 512
-        feat_c = int(256 * width)         # 128
+        c4 = int(in_channels[1] * width)
+        c5 = int(in_channels[2] * width)
+        feat_c = int(256 * width)
         
-        # Dedicated hierarchical anchor projectors (P4->P3, P5->P4, P5->P5)
         self.anchor_projectors = nn.ModuleList([
             nn.Conv2d(c4, self.latent_dim, kernel_size=1),
             nn.Conv2d(c5, self.latent_dim, kernel_size=1),
@@ -167,13 +129,10 @@ class TDE_Head(YOLOXHead):
             in_c = int(in_channels[i] * width)
             self.stems.append(BaseConv(in_c, feat_c, 1, 1, act=act))
             
-            # Regression Tower: Strictly Memory-Free Conv Highway
             self.reg_convs.append(nn.Sequential(
                 BaseConv(feat_c, feat_c, 3, 1, act=act),
                 BaseConv(feat_c, feat_c, 3, 1, act=act)
             ))
-            
-            # Classification Tower: Engram-Augmented Manifold
             self.cls_convs.append(nn.Sequential(
                 BaseConv(feat_c, feat_c, 3, 1, act=act),
                 BaseConv(feat_c, feat_c, 3, 1, act=act)
@@ -200,14 +159,16 @@ class TDE_Head(YOLOXHead):
 
     def initialize_biases(self, prior_prob):
         super().initialize_biases(prior_prob)
-        # Guarantees zero initial bounding-box coordinate distortion at step 0
         for conv in self.reg_preds:
             if conv.bias is not None:
                 nn.init.zeros_(conv.bias)
 
     def forward(self, inputs, labels=None, imgs=None):
-        # Unpack h_s optical entropy oracle directly from PAFPN
         xin, p_anchors, h_s = inputs
+        
+        # Secondary backstop guard on optical entropy
+        h_s = torch.nan_to_num(h_s, nan=math.log(400.0), posinf=math.log(400.0), neginf=0.0)
+
         outputs = []
         origin_preds = []
         x_shifts = []
@@ -220,13 +181,11 @@ class TDE_Head(YOLOXHead):
         for k, (cls_conv, reg_conv, stride_l, x) in enumerate(zip(self.cls_convs, self.reg_convs, self.strides, xin)):
             x = self.stems[k](x)
             
-            # 1. REGRESSION PATH (Memory-Free)
             reg_feat = reg_conv(x)
             reg_out = self.reg_preds[k](reg_feat)
             obj_out = self.obj_preds[k](reg_feat)
             obj_mask = torch.sigmoid(obj_out)
 
-            # 2. CLASSIFICATION PATH (Engram-Augmented)
             cls_feat = cls_conv(x)
             z_conv = self.cls_preds[k](cls_feat)
             
@@ -240,17 +199,13 @@ class TDE_Head(YOLOXHead):
             
             mem_conv = self.manifold_decoders[k](mem_restored)
             
-            # Additive Gated Memory with 50% max ceiling (preserves sensory baseline in dense fog)
             gate_clamped = torch.clamp(gate, min=0.0, max=0.50)
             restored_feat = cls_feat + gate_clamped * mem_conv
-            
-            # Bounded post-Engram bilateral spatial smoothing (prevents sub-pixel over-smoothing)
             restored_feat = restored_feat + 0.2 * torch.tanh(self.post_engram_dw[k](restored_feat))
             cls_out = self.cls_preds[k](restored_feat)
 
             if self.training:
                 output = torch.cat([reg_out, obj_out, cls_out], 1)
-                # Fixed: Pass xin[0].dtype directly as torch.dtype object
                 output, grid = self.get_output_and_grid(output, k, stride_l, xin[0].dtype)
                 x_shifts.append(grid[:, :, 0])
                 y_shifts.append(grid[:, :, 1])
@@ -298,7 +253,6 @@ class TDE_Head(YOLOXHead):
         output = output.permute(0, 1, 3, 4, 2).reshape(batch_size, hsize * wsize, -1)
         grid = grid.view(1, -1, 2)
         
-        # Out-of-place tensor construction eliminates in-place slice mutation & version 2 autograd errors
         xy = (output[..., :2] + grid) * stride
         wh = torch.exp(torch.clamp(output[..., 2:4], min=-10.0, max=10.0)) * stride
         rest = output[..., 4:]
@@ -311,7 +265,6 @@ class TDE_Head(YOLOXHead):
         strides = []
         for (hsize, wsize), stride in zip(self.hw, self.strides):
             yv, xv = meshgrid([torch.arange(hsize, device=outputs.device), torch.arange(wsize, device=outputs.device)])
-            # Flatten spatial grid to [1, H*W, 2] sequence for clean multi-scale concatenation
             grid = torch.stack((xv, yv), 2).view(1, -1, 2)
             grids.append(grid)
             shape = grid.shape[:2]
@@ -320,7 +273,6 @@ class TDE_Head(YOLOXHead):
         grids = torch.cat(grids, dim=1).to(dtype=dtype, device=outputs.device)
         strides = torch.cat(strides, dim=1).to(dtype=dtype, device=outputs.device)
 
-        # Clamping scale logits to [-10, 10] and enforcing >= 1.0 px physical sensor floor
         raw_scales = torch.exp(torch.clamp(outputs[..., 2:4], min=-10.0, max=10.0)) * strides
         box_scales = torch.clamp(raw_scales, min=1.0)
 
@@ -401,50 +353,40 @@ class TDE_Head(YOLOXHead):
 
         num_fg = max(num_fg, 1.0)
         
-        # Dynamic Bounding-Box Alignment Transition at Epoch 65
         if self.current_epoch >= 65:
             reg_weight = 4.0
-            nwd_weight = 0.5  # Hand precision over to sharp polygonal alignment
+            nwd_weight = 0.5
         else:
             reg_weight = 3.0
-            nwd_weight = 2.0  # Retain smooth Gaussian transport in early/mid training
+            nwd_weight = 2.0
 
-        # Evaluate bounding box losses strictly in single-precision FP32
         loss_giou = (self.iou_loss(bbox_preds.view(-1, 4)[fg_masks_concat], reg_targets_concat)).sum() / num_fg
         loss_nwd = (self.nwd_loss(bbox_preds.view(-1, 4)[fg_masks_concat], reg_targets_concat)).sum() / num_fg
 
-        loss_obj = (self.bcewithlog_loss(obj_preds.view(-1, 1), obj_targets_concat)).sum() / num_fg
-        # LS-YOLO + DFA-YOLO Synthesis: Normalized Dynamic-Gamma Focal Loss
-        # Certified Friction-Free:
-        #   1. Clamped probabilities and detached focal weights eliminate pow() NaN singularities.
-        #   2. Mean-normalized weights preserve global loss magnitude (zero optimizer shock).
-        fg_cls_preds = cls_preds.view(-1, self.num_classes)[fg_masks_concat]
+        obj_preds_fp32 = obj_preds.view(-1, 1).float()
+        loss_obj = F.binary_cross_entropy_with_logits(obj_preds_fp32, obj_targets_concat.float(), reduction="sum") / num_fg
+
+        fg_cls_preds = cls_preds.view(-1, self.num_classes)[fg_masks_concat].float()
         
-        # Mean-Normalized Inverse-Frequency Class Weights (Mean == 1.000)
-        # Class order: [car, bus, truck, person, rider, bike, motor, traffic light, traffic sign]
         class_weights = torch.tensor(
             [0.43, 1.20, 0.94, 0.71, 1.52, 1.35, 1.68, 0.60, 0.56],
-            device=fg_cls_preds.device, dtype=fg_cls_preds.dtype
+            device=fg_cls_preds.device, dtype=torch.float32
         ).view(1, -1)
 
         p_cls = torch.sigmoid(fg_cls_preds)
-        p_t = p_cls * cls_targets_concat + (1.0 - p_cls) * (1.0 - cls_targets_concat)
+        p_t = p_cls * cls_targets_concat.float() + (1.0 - p_cls) * (1.0 - cls_targets_concat.float())
         p_t_safe = torch.clamp(p_t, min=1e-4, max=1.0 - 1e-4)
 
-        # Bounded Dynamic Gamma: gamma_adapt in [0.5, 2.0]
         gamma_adapt = torch.clamp(2.0 * (1.0 - torch.exp(-3.0 * p_t_safe)), min=0.5, max=2.0)
-        
-        # Detached focal factor acts strictly as an adaptive sample weight (Zero autograd distortion)
         focal_factor = (1.0 - p_t_safe).pow(gamma_adapt).detach()
 
-        raw_bce = self.bcewithlog_loss(fg_cls_preds, cls_targets_concat)
+        raw_bce = F.binary_cross_entropy_with_logits(fg_cls_preds, cls_targets_concat.float(), reduction="none")
         loss_cls = (class_weights * focal_factor * raw_bce).sum() / num_fg
         
         loss_l1 = 0.0
         if self.use_l1:
             l1_targets_concat = torch.cat(l1_targets, 0)
             raw_l1 = (self.l1_loss(origin_preds.view(-1, 4)[fg_masks_concat], l1_targets_concat)).sum() / num_fg
-            # Smooth 2-epoch linear L1 ramp-in eliminates +1.5 loss step shock
             l1_ramp = min(1.0, (self.current_epoch - 65 + 1.0) / 2.0) if self.current_epoch >= 65 else 1.0
             loss_l1 = raw_l1 * l1_ramp
 
@@ -465,7 +407,6 @@ class TDE_Head(YOLOXHead):
     def get_geometry_constraint(
         self, gt_bboxes_per_image, expanded_strides, x_shifts, y_shifts, center_radius=2.5
     ):
-        """Aspect-ratio adaptive geometric center constraint prevents anchor starvation on long vehicles."""
         expanded_strides_per_image = expanded_strides[0]
         x_centers_per_image = ((x_shifts[0] + 0.5) * expanded_strides_per_image).unsqueeze(0)
         y_centers_per_image = ((y_shifts[0] + 0.5) * expanded_strides_per_image).unsqueeze(0)
@@ -499,7 +440,6 @@ class TDE_Head(YOLOXHead):
         bboxes_preds_per_image, expanded_strides, x_shifts, y_shifts,
         cls_preds, obj_preds
     ):
-        # 1. Geometry Filter with Aspect-Ratio Adaptive Radius
         fg_mask, geometry_relation = self.get_geometry_constraint(
             gt_bboxes_per_image, expanded_strides, x_shifts, y_shifts, center_radius=2.5
         )
@@ -509,7 +449,6 @@ class TDE_Head(YOLOXHead):
         obj_preds_ = obj_preds[batch_idx][fg_mask]
         num_in_boxes_anchor = bboxes_preds.shape[0]
 
-        # Early exit if zero anchors match geometric constraint (prevents CUDA k=0 crash)
         if num_in_boxes_anchor == 0:
             return (
                 gt_classes.new_zeros((0,)),
@@ -519,7 +458,6 @@ class TDE_Head(YOLOXHead):
                 0.0
             )
 
-        # 2. Pairwise IoU and Symmetrical Scale-Adaptive NWD
         pair_wise_ious = bboxes_iou(gt_bboxes_per_image, bboxes_preds, False)
 
         p_c = bboxes_preds[:, :2]
@@ -531,35 +469,28 @@ class TDE_Head(YOLOXHead):
         s_dist_sq = (p_s.unsqueeze(0) - g_s.unsqueeze(1)).pow(2).sum(-1) / 4.0
         w2_sq = c_dist_sq + s_dist_sq + 1e-7
 
-        # Enforce symmetrical 8.0 px scale floor matching AdaptiveNWDloss
         diag_gt = torch.sqrt(g_s.pow(2).sum(-1) + 1e-7).unsqueeze(1) + 1e-5
         diag_gt_safe = torch.clamp(diag_gt, min=8.0)
         pair_wise_nwd = torch.exp(-2.0 * (torch.sqrt(w2_sq) / diag_gt_safe))
 
-        # 3. Dynamic-K Allocation with Unbiased Rounding and Late-Stage Tightening
         k_ceiling = 10 if self.current_epoch >= 65 else 15
         hybrid_overlap = 0.5 * (pair_wise_ious + pair_wise_nwd)
         n_candidate_k = max(1, min(15, hybrid_overlap.size(1)))
         topk_ious, _ = torch.topk(hybrid_overlap, n_candidate_k, dim=1)
         
-        # Unbiased mathematical rounding eliminates systematic downward anchor starvation
         dynamic_ks = torch.clamp(torch.round(topk_ious.sum(1)).int(), min=1, max=k_ceiling)
 
-        # 4. Classification Matching Cost
         gt_cls_per_image = F.one_hot(gt_classes.to(torch.int64), self.num_classes).float()
         with torch.cuda.amp.autocast(enabled=False):
             cls_prob = (cls_preds_.float().sigmoid_() * obj_preds_.float().sigmoid_()).sqrt()
-            # Prevents float16 rounding > 1.0 from triggering log(negative) = NaN in BCE
             cls_prob = torch.clamp(cls_prob, min=0.0, max=1.0 - 1e-7)
             cls_prob = torch.nan_to_num(cls_prob, nan=0.0)
-            
             pair_wise_cls_loss = F.binary_cross_entropy(
                 cls_prob.unsqueeze(0).repeat(num_gt, 1, 1),
                 gt_cls_per_image.unsqueeze(1).repeat(1, num_in_boxes_anchor, 1),
                 reduction="none"
             ).sum(-1)
 
-        # 5. Dynamic Cost Synchronization with Active Loss Weights
         if self.current_epoch >= 65:
             cost_iou_w = 3.0
             cost_nwd_w = 0.5
@@ -583,7 +514,6 @@ class TDE_Head(YOLOXHead):
     def simota_matching_guarded(self, cost, pair_wise_ious, gt_classes, num_gt, fg_mask, dynamic_ks, num_in_boxes_anchor):
         matching_matrix = torch.zeros_like(cost, dtype=torch.uint8)
 
-        # Candidate ceiling clamp guarantees k never exceeds available candidate anchors
         for gt_idx in range(num_gt):
             k_safe = min(int(dynamic_ks[gt_idx].item()), num_in_boxes_anchor)
             _, pos_idx = torch.topk(
