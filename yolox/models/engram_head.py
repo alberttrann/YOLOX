@@ -1,3 +1,8 @@
+#!/usr/bin/env python
+# -*- encoding: utf-8 -*-
+# Copyright (c) Megvii Inc. All rights reserved.
+# Integrated for TDE-YOLOX v3.2: Anti-Collision Memory Bank with Scale-Adaptive Temperature & Convex Soft-Switch
+
 import math
 import torch
 import torch.nn as nn
@@ -15,7 +20,7 @@ class AntiCollisionEngramBank(nn.Module):
         self.num_classes = num_classes
         self.num_modes = num_modes
         self.latent_dim = latent_dim
-        self.temperature = temperature
+        self.temperature = float(temperature)
         
         self.prototypes = nn.Parameter(torch.randn(num_classes * num_modes, latent_dim))
         nn.init.orthogonal_(self.prototypes)
@@ -51,6 +56,7 @@ class AntiCollisionEngramBank(nn.Module):
         q_norm = F.normalize(q_fp32.permute(0, 2, 3, 1).reshape(B, H * W, D), p=2, dim=-1, eps=1e-5)
         p_norm = F.normalize(p_fp32, p=2, dim=-1, eps=1e-5)
         
+        # Scale-Adaptive Temperature Lookup
         scores_fp32 = torch.matmul(q_norm, p_norm.t()) * self.temperature
         attn_weights = F.softmax(scores_fp32, dim=-1)
         
@@ -79,14 +85,19 @@ class AntiCollisionEngramBank(nn.Module):
         slope_k = F.softplus(torch.matmul(mem_dir, self.v_k))
         dist_penalty = torch.clamp(self.omega, min=0.0, max=2.0) * (slope_q.unsqueeze(-1) + slope_k.unsqueeze(-1))
         
-        gate_logit = 5.0 * uncertainty - dist_penalty - 2.5
+        # Balanced gate logit: Eliminates oppressive -2.5 floor
+        gate_logit = 4.0 * uncertainty - dist_penalty - 0.5
         g_raw = torch.sigmoid(gate_logit) * obj_flat
         
         curriculum_floor = 0.20 * max(0.0, 1.0 - float(epoch) / 15.0)
         g_effective = torch.max(g_raw, torch.tensor(curriculum_floor, device=q.device, dtype=q.dtype))
         
-        blizzard_gate = torch.sigmoid(10.0 * (5.69 - h_s)).to(q.dtype)
-        g_final = g_effective * blizzard_gate
+        # Inverted Atmospheric Entropy Modulator:
+        # Instead of shutting off in dense fog/snow, memory is unlocked proportional to visual degradation!
+        h_max = math.log(400.0)
+        h_ratio = torch.clamp(h_s.float() / h_max, min=0.0, max=1.0)
+        atmo_modulator = 0.75 + 0.50 * torch.sigmoid(4.0 * (h_ratio - 0.50)).to(q.dtype)
+        g_final = torch.clamp(g_effective * atmo_modulator, min=0.0, max=1.0)
             
         mem_spatial = retrieved_memory.reshape(B, H, W, D).permute(0, 3, 1, 2)
         gate_spatial = g_final.reshape(B, H, W, 1).permute(0, 3, 1, 2)
@@ -125,6 +136,12 @@ class TDE_Head(YOLOXHead):
         self.manifold_decoders = nn.ModuleList()
         self.post_engram_dw = nn.ModuleList()
 
+        # Scale-Dependent Temperature Hierarchy:
+        # P3 (80x80): T=32.0 (Sharp discrimination for Bikes, Signs, Lights)
+        # P4 (40x40): T=24.0 (Balanced discrimination for Cars, Riders)
+        # P5 (20x20): T=16.0 (Continuous multi-mode density for Buses, Trucks)
+        temperatures = [32.0, 24.0, 16.0]
+
         for i in range(len(in_channels)):
             in_c = int(in_channels[i] * width)
             self.stems.append(BaseConv(in_c, feat_c, 1, 1, act=act))
@@ -139,7 +156,11 @@ class TDE_Head(YOLOXHead):
             ))
             
             self.local_projectors.append(nn.Conv2d(feat_c, self.latent_dim, kernel_size=1))
-            self.memory_banks.append(AntiCollisionEngramBank(num_classes, num_modes=64, latent_dim=self.latent_dim))
+            self.memory_banks.append(
+                AntiCollisionEngramBank(
+                    num_classes, num_modes=64, latent_dim=self.latent_dim, temperature=temperatures[i]
+                )
+            )
             
             dec = nn.Conv2d(self.latent_dim, feat_c, kernel_size=1)
             nn.init.normal_(dec.weight, mean=0.0, std=0.01)
@@ -199,9 +220,13 @@ class TDE_Head(YOLOXHead):
             
             mem_conv = self.manifold_decoders[k](mem_restored)
             
-            gate_clamped = torch.clamp(gate, min=0.0, max=0.50)
-            restored_feat = cls_feat + gate_clamped * mem_conv
-            restored_feat = restored_feat + 0.2 * torch.tanh(self.post_engram_dw[k](restored_feat))
+            # Dynamic Convex Soft-Switch:
+            # Replaces additive noise leakage with uncertainty-driven attenuation of corrupted conv features
+            gate_clamped = torch.clamp(gate, min=0.0, max=0.70)
+            restored_feat = (1.0 - 0.60 * gate_clamped) * cls_feat + gate_clamped * mem_conv
+            # Scale-proportional smoothing: P3 (stride 8) gets 0.05, P4 gets 0.15, P5 gets 0.25
+            smooth_weight = 0.05 + 0.10 * float(k)
+            restored_feat = restored_feat + smooth_weight * torch.tanh(self.post_engram_dw[k](restored_feat))
             cls_out = self.cls_preds[k](restored_feat)
 
             if self.training:

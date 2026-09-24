@@ -1,9 +1,7 @@
 #!/usr/bin/env python
 # -*- encoding: utf-8 -*-
 # Copyright (c) Megvii Inc. All rights reserved.
-# Integrated for TDE-YOLOX v3.1: Certified BQSA Neck & Symmetrical Scale-AttnRes Highway
-#
-# PATCH v3.1.4 — Definitive FP32 Invariant Armor (2026-09-23)
+# Integrated for TDE-YOLOX v3.2: HySparse2-Augmented BQSA Neck & Symmetrical Scale-AttnRes
 
 import math
 import torch
@@ -142,7 +140,6 @@ class P5ExclusiveDenseAttention(nn.Module):
 
         s_flat = saliency.flatten(1).float()
         s_mean = s_flat.mean(dim=-1, keepdim=True)
-        # Clamping variance >= 1e-8 BEFORE sqrt eliminates sqrt(negative_roundoff) = NaN!
         s_var = torch.clamp(torch.var(s_flat, dim=-1, keepdim=True, unbiased=False), min=1e-8)
         s_std = torch.sqrt(s_var) + 1e-5
         s_standardized = torch.clamp((s_flat - s_mean) / s_std, min=-20.0, max=20.0)
@@ -154,7 +151,7 @@ class P5ExclusiveDenseAttention(nn.Module):
         h_s_fallback = math.log(max(2, N))
         h_s = torch.nan_to_num(h_s_raw, nan=h_s_fallback, posinf=h_s_fallback, neginf=0.0)
 
-        # 3. VALUE AGGREGATION STRICTLY IN FP32 (Eliminates the 400-term half-precision overflow!)
+        # 3. Value Aggregation strictly in FP32
         y_fp32 = torch.matmul(attn_fp32, v.float())
         v_fp32 = v.float()
         v_norm_sq = (v_fp32 * v_fp32).sum(dim=-1, keepdim=True) + 1e-5
@@ -271,19 +268,26 @@ class C2f_BQSA_P4(nn.Module):
             top1_fallback = torch.zeros_like(pool_mask).scatter_(-1, block_saliency.argmax(dim=-1, keepdim=True), 1.0)
             pool_mask = torch.where(empty_mask, top1_fallback, pool_mask)
 
-        # 3. Block Scoring & STE Gumbel-Softmax Top-K in FP32 with -500.0 Floor
+        # 3. HYSPARSE2-AUGMENTED BLOCK SCORING & STE GUMBEL-SOFTMAX
         scores = self.indexer(feat_cond)
-        block_scores = F.avg_pool2d(scores, kernel_size=bs, stride=bs).view(B, -1)
         
-        # -500.0 floor prevents division by tau underflowing to -inf in FP16!
+        # Hybrid Max-Avg Saliency Pooling: Eliminates the 1/16 small object dilution bottleneck
+        scores_avg = F.avg_pool2d(scores, kernel_size=bs, stride=bs).view(B, -1)
+        scores_max = F.max_pool2d(scores, kernel_size=bs, stride=bs).view(B, -1)
+        block_scores = 0.5 * scores_avg + 0.5 * scores_max
+
+        # Guarded Masked Scores with -500.0 Floor
         masked_scores_fp32 = block_scores.float() * pool_mask.float() - (1.0 - pool_mask.float()) * 500.0
 
         if self.training:
             u = torch.rand_like(masked_scores_fp32, dtype=torch.float32)
             gumbel = -torch.log(-torch.log(u + 1e-7) + 1e-7)
 
+            # HySparse2 Optical Entropy-Sharpened Temperature (Non-blocking GPU tensor)
+            tau_adaptive = torch.clamp(self.tau * (1.0 - 0.35 * h_ratio), min=0.10)
+
             soft_scores = F.softmax(
-                (masked_scores_fp32 + gumbel) / max(0.1, float(self.tau)), dim=-1
+                (masked_scores_fp32 + gumbel) / tau_adaptive, dim=-1
             ).to(feat.dtype)
 
             _, topk_idx = torch.topk(soft_scores, k_actual, dim=-1)
