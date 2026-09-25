@@ -19,28 +19,25 @@ class Exp(MyExp):
         self.exp_name = os.path.split(os.path.realpath(__file__))[1].split(".")[0]
         self.act = "silu"
 
-        # --- RESEARCH HYPERPARAMETERS (TDE-YOLOX v3.1) ---
+        # --- RESEARCH HYPERPARAMETERS (TDE-YOLOX v3.2) ---
         self.num_classes = 9         # BDD100K 9 detection categories
         self.init_ttt_lr = 0.05      # Stage 1 GroupNorm adaptation rate
         self.ttt_noise_std = 0.08    # Contrastive Gaussian denoising intensity
 
-        # --- DATASET & RESOLUTION LOCKING ---
+        # --- DATASET & CURRICULUM AUGMENTATION ---
         self.input_size = (640, 640)
         self.test_size = (640, 640)
-        self.multiscale_range = 0    # Strictly lock canvas to 640x640 (preserves 10x10 block grid)
-        self.mosaic_prob = 0.0       # Disabled from Epoch 1 (prevents seam variance corruption)
-        self.enable_mixup = False    # Disabled from Epoch 1
-
-        # --- STRICT ZSDA PROTOCOL PATHS ---
-        self.data_dir = "D:/YOLOX-3RD/bdd100k/bdd100k/bdd100k/images"
-        self.train_ann = "D:/YOLOX-3RD/bdd100k/bdd100k/bdd100k/images/annotations/tde_train_clean_coco.json"
-        self.val_ann = "D:/YOLOX-3RD/bdd100k/bdd100k/bdd100k/images/annotations/tde_val_clean_coco.json"
-        self.test_ann = "D:/YOLOX-3RD/bdd100k/bdd100k/bdd100k/images/annotations/tde_test_adverse_coco.json"
+        self.multiscale_range = 0    # Locked to 640x640 (preserves 10x10 block grid)
+        
+        # Controlled Mosaic Curriculum: 
+        # 0.50 probability prevents clean BDD saturation before Epoch 40 while preserving TTT stability!
+        self.mosaic_prob = 0.50      
+        self.enable_mixup = False    # Kept False to avoid severe feature blending
 
         # --- TRAINING SCHEDULE ---
         self.max_epoch = 80
         self.warmup_epochs = 10
-        self.no_aug_epochs = 15      # Activates L1 box offset regression loss
+        self.no_aug_epochs = 15      # Activates L1 box offset regression loss at Epoch 65
         self.min_lr_ratio = 0.05
         self.basic_lr_per_img = 0.01 / 64.0
         self.weight_decay = 0.0005
@@ -51,7 +48,6 @@ class Exp(MyExp):
 
         self.data_num_workers = 0
         self.batch_size = 16
-
         self.test_conf = 0.001
         self.nmsthre = 0.65
 
