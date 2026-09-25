@@ -19,20 +19,25 @@ class Exp(MyExp):
         self.exp_name = os.path.split(os.path.realpath(__file__))[1].split(".")[0]
         self.act = "silu"
 
-        # --- RESEARCH HYPERPARAMETERS (TDE-YOLOX v3.2) ---
+        # --- RESEARCH HYPERPARAMETERS (TDE-YOLOX v3.1) ---
         self.num_classes = 9         # BDD100K 9 detection categories
         self.init_ttt_lr = 0.05      # Stage 1 GroupNorm adaptation rate
         self.ttt_noise_std = 0.08    # Contrastive Gaussian denoising intensity
 
-        # --- DATASET & CURRICULUM AUGMENTATION ---
+        # --- DATASET & RESOLUTION LOCKING ---
         self.input_size = (640, 640)
         self.test_size = (640, 640)
-        self.multiscale_range = 0    # Locked to 640x640 (preserves 10x10 block grid)
-        
+        self.multiscale_range = 0    # Strictly lock canvas to 640x640 (preserves 10x10 block grid)
         # Controlled Mosaic Curriculum: 
         # 0.50 probability prevents clean BDD saturation before Epoch 40 while preserving TTT stability!
         self.mosaic_prob = 0.50      
         self.enable_mixup = False    # Kept False to avoid severe feature blending
+
+        # --- STRICT ZSDA PROTOCOL PATHS ---
+        self.data_dir = "D:/YOLOX-3RD/bdd100k/bdd100k/bdd100k/images"
+        self.train_ann = "D:/YOLOX-3RD/bdd100k/bdd100k/bdd100k/images/annotations/tde_train_clean_coco.json"
+        self.val_ann = "D:/YOLOX-3RD/bdd100k/bdd100k/bdd100k/images/annotations/tde_val_clean_coco.json"
+        self.test_ann = "D:/YOLOX-3RD/bdd100k/bdd100k/bdd100k/images/annotations/tde_test_adverse_coco.json"
 
         # --- TRAINING SCHEDULE ---
         self.max_epoch = 80
