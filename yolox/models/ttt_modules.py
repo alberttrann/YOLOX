@@ -1,3 +1,8 @@
+#!/usr/bin/env python
+# -*- encoding: utf-8 -*-
+# Copyright (c) Megvii Inc. All rights reserved.
+# Integrated for TDE-YOLOX v3.3: Bounded Meta-Step Engine & Spatially-Standardized Variance Masking
+
 import math
 import torch
 import torch.nn as nn
@@ -5,7 +10,12 @@ import torch.nn.functional as F
 from torch.func import functional_call, grad
 import contextlib
 
+
 class GRN(nn.Module):
+    """
+    Global Response Normalization (ConvNeXt V2).
+    Forces channel competition to prevent feature collapse during masked reconstruction.
+    """
     def __init__(self, dim, eps=1e-5):
         super().__init__()
         self.gamma = nn.Parameter(torch.zeros(1, 1, 1, dim))
@@ -19,7 +29,12 @@ class GRN(nn.Module):
         x_calibrated = self.gamma * (x_p * nx) + self.beta + x_p
         return x_calibrated.permute(0, 3, 1, 2).contiguous()
 
+
 class TTTProjector(nn.Module):
+    """
+    Lightweight Autoencoder for Stage 1 Self-Supervised Adaptation.
+    Architecture: Conv1x1 -> GroupNorm -> GELU -> GRN -> Conv1x1.
+    """
     def __init__(self, in_channels, hidden_ratio=0.5):
         super().__init__()
         hidden = max(16, int(in_channels * hidden_ratio))
@@ -35,7 +50,9 @@ class TTTProjector(nn.Module):
     def forward(self, x):
         return self.net(x)
 
+
 class SimAM(nn.Module):
+    """Parameter-free Energy-based Attention. Suppresses atmospheric background noise."""
     def __init__(self, eps=1e-4):
         super().__init__()
         self.eps = eps
@@ -48,7 +65,9 @@ class SimAM(nn.Module):
         y = x_minus_mu_sq / (4.0 * (var_fp32 + self.eps)) + 0.5
         return x * torch.sigmoid(y).to(x.dtype)
 
+
 class CoordinateAttention(nn.Module):
+    """Spatial coordinate bias injection (1D X-pool and Y-pool) for geometric context."""
     def __init__(self, in_channels, reduction=32):
         super().__init__()
         mip = max(8, in_channels // reduction)
@@ -75,34 +94,39 @@ class CoordinateAttention(nn.Module):
         att_w = 2.0 * torch.sigmoid(self.conv_w(x_w))
         return identity * att_h * att_w
 
+
 class FP32AdaptiveAvgPool2d(nn.AdaptiveAvgPool2d):
     """
-    FP32 Shielded Pooling to prevent FP16 accumulator overflow.
-    Has no weights, so it perfectly preserves checkpoint loading compatibility.
+    FP32 Shielded Pooling to prevent half-precision accumulator overflow.
+    Has no weights, preserving checkpoint loading compatibility.
     """
     def forward(self, x):
         return super().forward(x.float()).to(x.dtype)
 
+
 class MBConvConditioner(nn.Module):
-    """MaxViT-inspired local structural conditioner."""
+    """MaxViT-inspired local structural conditioner (Depthwise 3x3 + SE + Pointwise 1x1)."""
     def __init__(self, dim):
         super().__init__()
         self.dw = nn.Conv2d(dim, dim, kernel_size=3, padding=1, groups=dim)
         self.pw = nn.Conv2d(dim, dim, kernel_size=1)
-        
-        # RESTORED: Exact same variable name and 5-layer structure as your checkpoint!
         self.se = nn.Sequential(
-            FP32AdaptiveAvgPool2d(1),                        # Index 0 (no weights)
-            nn.Conv2d(dim, max(8, dim // 4), kernel_size=1), # Index 1 (matches se.1.weight)
-            nn.ReLU(),                                       # Index 2
-            nn.Conv2d(max(8, dim // 4), dim, kernel_size=1), # Index 3 (matches se.3.weight)
-            nn.Sigmoid()                                     # Index 4
+            FP32AdaptiveAvgPool2d(1),
+            nn.Conv2d(dim, max(8, dim // 4), kernel_size=1),
+            nn.ReLU(),
+            nn.Conv2d(max(8, dim // 4), dim, kernel_size=1),
+            nn.Sigmoid()
         )
 
     def forward(self, x):
         return x + self.se(x) * self.pw(self.dw(x))
 
+
 class TTTAdaptiveStage(nn.Module):
+    """
+    TDE-YOLOX v3.3 Bounded Adaptive Stage.
+    Certified Spatially-Standardized Variance Masking & Invariant Leaf Purity.
+    """
     def __init__(self, stage_module, in_channels, init_ttt_lr=0.05, noise_std=0.08):
         super().__init__()
         self.backbone_stage = stage_module
@@ -115,29 +139,31 @@ class TTTAdaptiveStage(nn.Module):
             if 'gn' in name or 'norm' in name:
                 self.ttt_lrs[name.replace('.', '_')] = nn.Parameter(torch.tensor(init_raw))
 
-    def _get_robust_contrast_mask(self, feat):
+    def _get_robust_contrast_mask(self, feat, ratio=0.75):
+        """
+        Spatially-Standardized Variance Masking.
+        Eliminates the sky-masking division artifact and masks road participants.
+        """
         B, C, H, W = feat.shape
         f_fp32 = feat.float()
         
+        # 1. Spatial channel variance (high on vehicles/signs, zero in sky)
         var = torch.clamp(torch.var(f_fp32, dim=1, keepdim=True), min=0.0)
-        mean_sq = torch.clamp(torch.mean(f_fp32, dim=1, keepdim=True).pow(2), min=1e-3)
-        contrast = var / mean_sq
 
-        v4 = F.avg_pool2d(contrast, kernel_size=4, stride=4)
-        v8 = F.avg_pool2d(contrast, kernel_size=8, stride=8)
+        # 2. Multi-scale aggregation (fine 4x4 + coarse 8x8 parts)
+        v4 = F.avg_pool2d(var, kernel_size=4, stride=4)
+        v8 = F.avg_pool2d(var, kernel_size=8, stride=8)
         v_fusion = v4 + F.interpolate(v8, size=(H // 4, W // 4), mode='nearest')
         
+        # 3. Spatial standardization over (H, W) plane per image
         v_mean = v_fusion.mean(dim=[-2, -1], keepdim=True)
-        v_std_safe = torch.clamp(v_fusion.std(dim=[-2, -1], keepdim=True), min=1e-4)
-        
-        threshold = v_mean + 0.675 * v_std_safe
-        mask_fusion = (v_fusion >= threshold).to(feat.dtype)
-        
-        mask_ratio = mask_fusion.mean(dim=[-2, -1], keepdim=True)
-        if (mask_ratio > 0.75).any():
-            scores_flat = v_fusion.view(B, -1)
-            q75 = torch.quantile(scores_flat, 0.25, dim=-1, keepdim=True).view(B, 1, 1, 1)
-            mask_fusion = (v_fusion >= q75).to(feat.dtype)
+        v_std_safe = torch.clamp(v_fusion.std(dim=[-2, -1], keepdim=True), min=1e-5)
+        v_standardized = (v_fusion - v_mean) / v_std_safe
+
+        # 4. Top-25% highest variance regions (Quantile 0.75)
+        scores_flat = v_standardized.view(B, -1)
+        q_thresh = torch.quantile(scores_flat, ratio, dim=-1, keepdim=True).view(B, 1, 1, 1)
+        mask_fusion = (v_standardized >= q_thresh).to(feat.dtype)
         
         return F.interpolate(mask_fusion, size=(H, W), mode='nearest')
 
@@ -199,18 +225,17 @@ class TTTAdaptiveStage(nn.Module):
             updated_backbone_params = {**backbone_params, **backbone_buffers}
             for name, g in grads_backbone.items():
                 lr_key = name.replace('.', '_')
-                effective_lr = torch.clamp(F.softplus(self.ttt_lrs[lr_key]), min=1e-4, max=0.25)
+                effective_lr = torch.clamp(F.softplus(self.ttt_lrs[lr_key]), min=1e-4, max=0.08)
                 
                 if not self.training:
                     effective_lr = effective_lr.detach()
                     g = g.detach()
-                # ADD .detach() TO PREVENT NON-LEAF TRACKING DURING INFERENCE:
+                    
                 new_val = (backbone_params[name].float() - effective_lr * g).to(input_dtype)
+                # Strict Autograd Leaf Purity Guard
                 if not self.training:
                     new_val = new_val.detach()
                 updated_backbone_params[name] = new_val
-                    
-                updated_backbone_params[name] = (backbone_params[name].float() - effective_lr * g).to(input_dtype)
 
         if self.training:
             self.backbone_stage.train()

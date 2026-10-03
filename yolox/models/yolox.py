@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 # -*- encoding: utf-8 -*-
 # Copyright (c) Megvii Inc. All rights reserved.
-# Integrated for TDE-YOLOX v3.1: Master Multi-Task Loss Synthesis & Curriculum Gating
+# Integrated for TDE-YOLOX v3.3: Master Multi-Task Loss Synthesis & Harmonized Curriculum Gating
 
 import math
 import torch
@@ -15,11 +15,12 @@ from .yolo_pafpn import YOLOPAFPN
 
 class YOLOX(nn.Module):
     """
-    TDE-YOLOX v3.1 Master Architecture Host.
+    TDE-YOLOX v3.3 Master Architecture Host.
     Certified Innovations:
       - Master Multi-Task Synthesis: Balances 6 loss objectives across dynamic training curricula.
-      - Auxiliary Loss Curriculum Decay: Smoothly fades representation constraints to 10% (Epochs 40-65).
-      - Atomic Supervised Memory Loss Normalization: Normalized strictly by actual matched foreground anchors.
+      - Delayed Auxiliary Loss Curriculum Decay: Preserves representation anchors at 100% through Epoch 50.
+      - Supervised Memory Anchor Normalization: Strictly normalized in FP32 by matched foreground instances.
+      - Hyperspherical Prototype Repulsion: m_intra=0.20 and m_inter=0.05 on compact 144-mode manifold.
     """
     def __init__(self, backbone=None, head=None):
         super().__init__()
@@ -32,11 +33,11 @@ class YOLOX(nn.Module):
         self.head = head
         self.num_classes = head.num_classes
 
-        # Prototype Hyperspherical Repulsion Engine (m_intra=0.10, m_inter=0.05)
+        # Prototype Hyperspherical Repulsion Engine (16 modes per class = 144 prototypes on S^127)
         self.repulse_loss = PrototypeRepulsionLoss(
             num_classes=self.num_classes,
-            num_modes=64,
-            m_intra=0.10,
+            num_modes=16,
+            m_intra=0.20,
             m_inter=0.05
         )
 
@@ -45,8 +46,8 @@ class YOLOX(nn.Module):
 
         self.warmup_end = 10
         self.ramp_end = 50
-        self.prob_start = 0.1
-        self.prob_end = 0.30  # Capped to 0.30 to eliminate post-E25 gradient turbulence
+        self.prob_start = 0.10
+        self.prob_end = 0.30
 
     def set_meta_training_state(self, epoch, max_epochs):
         self.current_epoch = epoch
@@ -56,7 +57,7 @@ class YOLOX(nn.Module):
         if hasattr(head_ref, "current_epoch"):
             head_ref.current_epoch = epoch
 
-        # Cosine Gumbel-Softmax Temperature Annealing tau: 1.0 -> 0.50 (Maintains multi-block candidate stability)
+        # Cosine Gumbel-Softmax Temperature Annealing tau: 1.0 -> 0.50
         tau_min = 0.50
         tau_max = 1.00
         decay_horizon = max(1.0, float(max_epochs - 20))
@@ -83,17 +84,17 @@ class YOLOX(nn.Module):
         if self.current_epoch <= 20:
             return 0.10
         progress = (self.current_epoch - 20) / max(1.0, float(self.max_epochs - 20))
-        return max(0.01, 0.10 - 0.09 * progress)
+        return max(0.04, 0.10 - 0.06 * progress)
 
     def _get_aux_multiplier(self):
         """
-        Auxiliary Loss Decay Multiplier (Curriculum Gating).
-        Gradually fades out auxiliary representation constraints from Epoch 30 to 65
-        so the network focuses 100% of gradient bandwidth on sub-pixel detection precision.
+        Anti-Sag Auxiliary Representation Multiplier.
+        Preserves 100% supervisory strength through Epoch 50, then smoothly decays to 70%.
+        Prevents premature representation drift during the primary feature-learning phase.
         """
-        decay_start = 30
-        decay_end = 65
-        min_ratio = 0.10
+        decay_start = 50
+        decay_end = 70
+        min_ratio = 0.70
         
         if self.current_epoch < decay_start:
             return 1.0
@@ -106,7 +107,7 @@ class YOLOX(nn.Module):
     def forward(self, x, targets=None):
         current_ttt_prob = self._get_ttt_probability()
 
-        # 1. Forward through Backbone & BQSA Neck (Returns h_s optical entropy oracle)
+        # 1. Forward through Backbone & BQSA Neck
         neck_output, proj_loss, phase_loss, indexer_loss = self.backbone(
             x, targets=targets, ttt_prob=current_ttt_prob
         )
@@ -118,12 +119,12 @@ class YOLOX(nn.Module):
                 num_fg_ratio, aux_mem_logits, cls_targets_concat, fg_masks_concat
             ) = self.head(neck_output, targets, x)
 
-            # 3. Supervised Memory Anchor Loss normalized in FP32
+            # 3. Supervised Memory Anchor Loss strictly normalized in FP32
             memory_anchor_loss = self._calculate_supervised_memory_loss(
                 aux_mem_logits, cls_targets_concat, fg_masks_concat
             )
 
-            # 4. Prototype Margin Repulsion Loss
+            # 4. Prototype Margin Repulsion Loss on S^127 Manifold
             head_ref = self.head.module if hasattr(self.head, "module") else self.head
             if hasattr(head_ref, "memory_banks"):
                 repulse_losses = [
@@ -133,13 +134,13 @@ class YOLOX(nn.Module):
             else:
                 total_repulse_loss = torch.tensor(0.0, device=x.device)
 
-            # 5. Master Multi-Task Loss Synthesis with Auxiliary Decay
+            # 5. Master Multi-Task Loss Synthesis
             lambda_idx = self._get_indexer_loss_weight()
             aux_mult = self._get_aux_multiplier()
             
             lambda_mem = 0.05 * aux_mult
             lambda_proj = 0.10 * aux_mult
-            lambda_rep = 0.01 * aux_mult
+            lambda_rep = 0.05 * aux_mult  # Calibrated to 0.05 for active repulsion
             lambda_phase = 0.05 * min(1.0, float(self.current_epoch) / 5.0) * aux_mult
 
             total_loss = (

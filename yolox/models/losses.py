@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 # -*- encoding: utf-8 -*-
 # Copyright (c) Megvii Inc. All rights reserved.
-# Integrated for TDE-YOLOX v3.1: Certified Mathematical Loss Primitives
+# Integrated for TDE-YOLOX v3.3: Certified Mathematical Loss Primitives
 
 import torch
 import torch.nn as nn
@@ -11,7 +11,7 @@ import torch.nn.functional as F
 class IOUloss(nn.Module):
     """
     Generalized Intersection over Union (GIoU) Loss.
-    Certified for TDE-YOLOX v3.1:
+    Certified for TDE-YOLOX v3.3:
       - Defaults strictly to 'giou' for continuous non-overlapping gradients.
       - Executes all geometric area products strictly in FP32 to eliminate 
         the 65,504 half-precision area overflow on large vehicles (Buses/Trucks).
@@ -70,7 +70,7 @@ class IOUloss(nn.Module):
 class AdaptiveNWDloss(nn.Module):
     """
     Scale-Adaptive Normalized Gaussian Wasserstein Distance (NWD) Loss.
-    Certified for TDE-YOLOX v3.1:
+    Certified for TDE-YOLOX v3.3:
       - Models diffuse boundary-blur under atmospheric Mie scattering as 2D Gaussians.
       - Enforces c_adaptive_safe >= 8.0 px scale floor matching SimOTA matching engine.
       - Executes all distance calculations strictly in FP32 with non-zero distance floor.
@@ -96,13 +96,10 @@ class AdaptiveNWDloss(nn.Module):
         c_adaptive = torch.sqrt(g_w.pow(2) + g_h.pow(2) + 1e-7) + self.eps
         c_adaptive_safe = torch.clamp(c_adaptive, min=8.0)
 
-        # 3. Dimensionless Normalized Wasserstein Distance
-        # DFA-YOLO Scale-Sensitive Factor: Certified Friction-Free (Bounded in [1.0, 2.0])
-        # Amplifies Wasserstein supervision for small vulnerable road users (Bikes, Motors, Signs)
+        # 3. Dimensionless Normalized Wasserstein Distance with Scale Boost
         area_gt = torch.clamp(g_w * g_h, min=1.0)
         gamma_scale = torch.exp(-area_gt / 1000.0)
 
-        # Dimensionless Normalized Wasserstein Distance with Scale Boost
         nwd = torch.exp(-self.kappa * (torch.sqrt(w2_sq) / c_adaptive_safe))
         loss = (1.0 + gamma_scale) * (1.0 - nwd)
 
@@ -116,16 +113,14 @@ class AdaptiveNWDloss(nn.Module):
 
 class PrototypeRepulsionLoss(nn.Module):
     """
-    Closed-Form Hyperspherical Prototype Margin Repulsion Loss.
-    Certified for TDE-YOLOX v3.1:
-      - Pre-registers persistent GPU buffers (eye_mask, diff_class_mask) to eliminate
-        redundant runtime VRAM allocations.
-      - Normalizes intra- and inter-class penalties by active violating pairs rather
-        than static permutations, preventing gradient starvation.
-      - m_intra = 0.10 (~84.3 deg) permits sub-class variance; m_inter = 0.05 enforces
-        strict categorical orthogonality on S^127.
+    Closed-Form Hyperspherical Prototype Margin Repulsion Loss on S^127.
+    Certified for TDE-YOLOX v3.3:
+      - Sized for K=16 modes per class (144 total prototypes across 9 classes).
+      - m_intra = 0.20 (~78.5 deg) enforces distinct sub-class mode separation without collapse.
+      - m_inter = 0.05 (~87.1 deg) enforces near-orthogonal categorical separation.
+      - Normalizes intra- and inter-class penalties strictly by active violating pairs.
     """
-    def __init__(self, num_classes=9, num_modes=64, m_intra=0.10, m_inter=0.05, eps=1e-5):
+    def __init__(self, num_classes=9, num_modes=16, m_intra=0.20, m_inter=0.05, eps=1e-5):
         super(PrototypeRepulsionLoss, self).__init__()
         self.num_classes = num_classes
         self.num_modes = num_modes
@@ -133,7 +128,7 @@ class PrototypeRepulsionLoss(nn.Module):
         self.m_inter = m_inter
         self.eps = eps
 
-        # Pre-registered persistent GPU buffers: eliminates VRAM churn across 80 epochs
+        # Persistent boolean masks for 144-prototype manifold (9 classes x 16 modes)
         class_ids = torch.arange(num_classes).repeat_interleave(num_modes)
         diff_class_mask = class_ids.unsqueeze(0) != class_ids.unsqueeze(1)
         self.register_buffer("diff_class_mask", diff_class_mask, persistent=False)
@@ -150,7 +145,7 @@ class PrototypeRepulsionLoss(nn.Module):
         # Enforce unit hypersphere normalization strictly in single-precision FP32
         p_norm = F.normalize(prototypes.float(), p=2, dim=-1, eps=self.eps)
 
-        # 1. Intra-Class Sub-Class Dispersion (Cosine > 0.10 penalized)
+        # 1. Intra-Class Sub-Mode Dispersion (Cosine > m_intra penalized)
         intra_sim = torch.bmm(p_norm, p_norm.transpose(1, 2))
         intra_sim_non_diag = intra_sim.masked_fill(self.eye_mask, -1.0)
         
@@ -158,7 +153,7 @@ class PrototypeRepulsionLoss(nn.Module):
         num_intra_viol = max(1.0, float((intra_violations > 0).sum()))
         l_intra = intra_violations.pow(2).sum() / num_intra_viol
 
-        # 2. Inter-Class Categorical Orthogonality (Cosine > 0.05 penalized)
+        # 2. Inter-Class Categorical Orthogonality (Cosine > m_inter penalized)
         flat_p = p_norm.view(C * K, D)
         inter_sim = torch.matmul(flat_p, flat_p.t())
 

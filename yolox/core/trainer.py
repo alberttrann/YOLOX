@@ -148,10 +148,10 @@ class Trainer:
         step_successful = (scale_after >= scale_before)
         if self.use_model_ema and step_successful:
             self.ema_model.update(self.model)
-            # Post-EMA Riemannian Retraction onto unit hypersphere S^127
+            # Unconditional Riemannian Retraction onto unit hypersphere S^127
             with torch.no_grad():
                 for m in self.ema_model.ema.modules():
-                    if hasattr(m, "prototypes") and getattr(m.prototypes, "is_hypersphere", False):
+                    if hasattr(m, "prototypes"):
                         m.prototypes.data.copy_(F.normalize(m.prototypes.data, p=2, dim=-1, eps=1e-5))
 
         # Update learning rates while respecting per-group lr_factor

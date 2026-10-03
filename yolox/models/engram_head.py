@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 # -*- encoding: utf-8 -*-
 # Copyright (c) Megvii Inc. All rights reserved.
-# Integrated for TDE-YOLOX v3.2: Anti-Collision Memory Bank with Scale-Adaptive Temperature & Convex Soft-Switch
+# Integrated for TDE-YOLOX v3.3: Level-Aware SimOTA, Anti-Collision Memory Bank & Convex Soft-Switch
 
 import math
 import torch
@@ -15,13 +15,18 @@ from .yolo_head import YOLOXHead
 
 
 class AntiCollisionEngramBank(nn.Module):
-    def __init__(self, num_classes=9, num_modes=64, latent_dim=128, temperature=16.0):
+    """
+    Differentiable Associative Memory Bank on S^127.
+    Certified for 144 Prototypes (9 classes x 16 sub-modes) with Atmospheric Modulation.
+    """
+    def __init__(self, num_classes=9, num_modes=16, latent_dim=128, temperature=16.0):
         super().__init__()
         self.num_classes = num_classes
         self.num_modes = num_modes
         self.latent_dim = latent_dim
         self.temperature = float(temperature)
         
+        # 144 Prototypes on S^127
         self.prototypes = nn.Parameter(torch.randn(num_classes * num_modes, latent_dim))
         nn.init.orthogonal_(self.prototypes)
         self.prototypes.is_hypersphere = True
@@ -40,7 +45,7 @@ class AntiCollisionEngramBank(nn.Module):
         p_interp = F.interpolate(anchor_feat, size=(H, W), mode='bilinear', align_corners=True)
         dw_local = self.dw_hf(h_local)
         
-        # === FP32 RMS SHIELD: Prevents 65504 squared accumulation overflow ===
+        # FP32 RMS Shield
         p_fp32 = p_interp.float()
         dw_fp32 = dw_local.float()
         
@@ -48,7 +53,6 @@ class AntiCollisionEngramBank(nn.Module):
         dw_scale = dw_fp32 * torch.rsqrt(dw_fp32.pow(2).mean(dim=1, keepdim=True) + 1e-5)
         
         q = (p_scale + torch.tanh(self.w_hf.float()) * dw_scale).to(h_local.dtype)
-        # =====================================================================
         
         q_fp32 = q.float()
         p_fp32 = self.prototypes.float()
@@ -85,16 +89,17 @@ class AntiCollisionEngramBank(nn.Module):
         slope_k = F.softplus(torch.matmul(mem_dir, self.v_k))
         dist_penalty = torch.clamp(self.omega, min=0.0, max=2.0) * (slope_q.unsqueeze(-1) + slope_k.unsqueeze(-1))
         
-        # Balanced gate logit: Eliminates oppressive -2.5 floor
-        gate_logit = 4.0 * uncertainty - dist_penalty - 0.5
+        # Calibrated Dynamic Gate Logit
+        gate_logit = 3.5 * uncertainty - 0.5 * dist_penalty + 0.2
         g_raw = torch.sigmoid(gate_logit) * obj_flat
         
-        curriculum_floor = 0.20 * max(0.0, 1.0 - float(epoch) / 15.0)
+        # Curriculum Floor
+        curriculum_floor = 0.04 + 0.10 * max(0.0, 1.0 - float(epoch) / 30.0)
         g_effective = torch.max(g_raw, torch.tensor(curriculum_floor, device=q.device, dtype=q.dtype))
         
-        # Inverted Atmospheric Entropy Modulator:
-        # Instead of shutting off in dense fog/snow, memory is unlocked proportional to visual degradation!
-        h_max = math.log(400.0)
+        # Dynamic Atmospheric Entropy Modulation derived from runtime token grid
+        n_p5 = anchor_feat.shape[-2] * anchor_feat.shape[-1]
+        h_max = math.log(max(2, n_p5))
         h_ratio = torch.clamp(h_s.float() / h_max, min=0.0, max=1.0)
         atmo_modulator = 0.75 + 0.50 * torch.sigmoid(4.0 * (h_ratio - 0.50)).to(q.dtype)
         g_final = torch.clamp(g_effective * atmo_modulator, min=0.0, max=1.0)
@@ -136,10 +141,7 @@ class TDE_Head(YOLOXHead):
         self.manifold_decoders = nn.ModuleList()
         self.post_engram_dw = nn.ModuleList()
 
-        # Scale-Dependent Temperature Hierarchy:
-        # P3 (80x80): T=32.0 (Sharp discrimination for Bikes, Signs, Lights)
-        # P4 (40x40): T=24.0 (Balanced discrimination for Cars, Riders)
-        # P5 (20x20): T=16.0 (Continuous multi-mode density for Buses, Trucks)
+        # Scale-Dependent Temperature Hierarchy: P3=32.0, P4=24.0, P5=16.0
         temperatures = [32.0, 24.0, 16.0]
 
         for i in range(len(in_channels)):
@@ -158,7 +160,7 @@ class TDE_Head(YOLOXHead):
             self.local_projectors.append(nn.Conv2d(feat_c, self.latent_dim, kernel_size=1))
             self.memory_banks.append(
                 AntiCollisionEngramBank(
-                    num_classes, num_modes=64, latent_dim=self.latent_dim, temperature=temperatures[i]
+                    num_classes, num_modes=16, latent_dim=self.latent_dim, temperature=temperatures[i]
                 )
             )
             
@@ -186,8 +188,6 @@ class TDE_Head(YOLOXHead):
 
     def forward(self, inputs, labels=None, imgs=None):
         xin, p_anchors, h_s = inputs
-        
-        # Secondary backstop guard on optical entropy
         h_s = torch.nan_to_num(h_s, nan=math.log(400.0), posinf=math.log(400.0), neginf=0.0)
 
         outputs = []
@@ -220,11 +220,11 @@ class TDE_Head(YOLOXHead):
             
             mem_conv = self.manifold_decoders[k](mem_restored)
             
-            # Dynamic Convex Soft-Switch:
-            # Replaces additive noise leakage with uncertainty-driven attenuation of corrupted conv features
-            gate_clamped = torch.clamp(gate, min=0.0, max=0.70)
-            restored_feat = (1.0 - 0.60 * gate_clamped) * cls_feat + gate_clamped * mem_conv
-            # Scale-proportional smoothing: P3 (stride 8) gets 0.05, P4 gets 0.15, P5 gets 0.25
+            # Dynamic Convex Soft-Switch with Strict Dtype Armor
+            gate_clamped = torch.clamp(gate, min=0.0, max=0.70).to(cls_feat.dtype)
+            restored_feat = ((1.0 - 0.60 * gate_clamped) * cls_feat + gate_clamped * mem_conv).to(cls_feat.dtype)
+            
+            # Scale-Proportional Post-Smoothing: preserves sub-pixel sharpness on P3
             smooth_weight = 0.05 + 0.10 * float(k)
             restored_feat = restored_feat + smooth_weight * torch.tanh(self.post_engram_dw[k](restored_feat))
             cls_out = self.cls_preds[k](restored_feat)
@@ -378,12 +378,10 @@ class TDE_Head(YOLOXHead):
 
         num_fg = max(num_fg, 1.0)
         
-        if self.current_epoch >= 65:
-            reg_weight = 4.0
-            nwd_weight = 0.5
-        else:
-            reg_weight = 3.0
-            nwd_weight = 2.0
+        # Smooth NWD / GIoU transition across training curriculum
+        trans_alpha = min(1.0, max(0.0, (float(self.current_epoch) - 50.0) / 15.0))
+        reg_weight = 4.0
+        nwd_weight = max(0.5, 1.0 - 0.5 * trans_alpha)
 
         loss_giou = (self.iou_loss(bbox_preds.view(-1, 4)[fg_masks_concat], reg_targets_concat)).sum() / num_fg
         loss_nwd = (self.nwd_loss(bbox_preds.view(-1, 4)[fg_masks_concat], reg_targets_concat)).sum() / num_fg
@@ -412,7 +410,7 @@ class TDE_Head(YOLOXHead):
         if self.use_l1:
             l1_targets_concat = torch.cat(l1_targets, 0)
             raw_l1 = (self.l1_loss(origin_preds.view(-1, 4)[fg_masks_concat], l1_targets_concat)).sum() / num_fg
-            l1_ramp = min(1.0, (self.current_epoch - 65 + 1.0) / 2.0) if self.current_epoch >= 65 else 1.0
+            l1_ramp = min(1.0, (float(self.current_epoch) - 65.0 + 1.0) / 2.0) if self.current_epoch >= 65 else 0.0
             loss_l1 = raw_l1 * l1_ramp
 
         total_det_loss = (reg_weight * loss_giou) + (nwd_weight * loss_nwd) + loss_obj + loss_cls + loss_l1
@@ -465,6 +463,10 @@ class TDE_Head(YOLOXHead):
         bboxes_preds_per_image, expanded_strides, x_shifts, y_shifts,
         cls_preds, obj_preds
     ):
+        """
+        LEVEL-AWARE CANDIDATE SAMPLING SIMOTA (TDE-YOLOX v3.3).
+        Eliminates the 16:4:1 anchor density bias, ensuring balanced gradient flow across P3, P4, and P5.
+        """
         fg_mask, geometry_relation = self.get_geometry_constraint(
             gt_bboxes_per_image, expanded_strides, x_shifts, y_shifts, center_radius=2.5
         )
@@ -498,11 +500,13 @@ class TDE_Head(YOLOXHead):
         diag_gt_safe = torch.clamp(diag_gt, min=8.0)
         pair_wise_nwd = torch.exp(-2.0 * (torch.sqrt(w2_sq) / diag_gt_safe))
 
-        k_ceiling = 10 if self.current_epoch >= 65 else 15
+        # Dynamic K ceiling transition
+        trans_alpha = min(1.0, max(0.0, (float(self.current_epoch) - 50.0) / 15.0))
+        k_ceiling = int(round(15.0 - 5.0 * trans_alpha))
+
         hybrid_overlap = 0.5 * (pair_wise_ious + pair_wise_nwd)
         n_candidate_k = max(1, min(15, hybrid_overlap.size(1)))
         topk_ious, _ = torch.topk(hybrid_overlap, n_candidate_k, dim=1)
-        
         dynamic_ks = torch.clamp(torch.round(topk_ious.sum(1)).int(), min=1, max=k_ceiling)
 
         gt_cls_per_image = F.one_hot(gt_classes.to(torch.int64), self.num_classes).float()
@@ -516,12 +520,8 @@ class TDE_Head(YOLOXHead):
                 reduction="none"
             ).sum(-1)
 
-        if self.current_epoch >= 65:
-            cost_iou_w = 3.0
-            cost_nwd_w = 0.5
-        else:
-            cost_iou_w = 2.0
-            cost_nwd_w = 2.0
+        cost_iou_w = 3.0
+        cost_nwd_w = max(0.5, 1.0 - 0.5 * trans_alpha)
 
         cost = (
             pair_wise_cls_loss
@@ -530,20 +530,57 @@ class TDE_Head(YOLOXHead):
             + float(1e6) * (~geometry_relation)
         )
 
+        strides_in_boxes = expanded_strides[0][fg_mask].long()
+
         (
             num_fg, gt_matched_classes, pred_ious_this_matching, matched_gt_inds
-        ) = self.simota_matching_guarded(cost, pair_wise_ious, gt_classes, num_gt, fg_mask, dynamic_ks, num_in_boxes_anchor)
+        ) = self.simota_matching_level_aware(
+            cost, pair_wise_ious, gt_classes, num_gt, fg_mask, dynamic_ks, 
+            num_in_boxes_anchor, strides_in_boxes
+        )
 
         return gt_matched_classes, fg_mask, pred_ious_this_matching, matched_gt_inds, num_fg
 
-    def simota_matching_guarded(self, cost, pair_wise_ious, gt_classes, num_gt, fg_mask, dynamic_ks, num_in_boxes_anchor):
+    def simota_matching_level_aware(
+        self, cost, pair_wise_ious, gt_classes, num_gt, fg_mask, dynamic_ks, 
+        num_in_boxes_anchor, strides_in_boxes
+    ):
+        """
+        Level-Aware Candidate Sampling:
+        Extracts up to 10 candidates per FPN level independently, forming a balanced candidate pool.
+        """
         matching_matrix = torch.zeros_like(cost, dtype=torch.uint8)
+        n_cand_per_level = 10
+
+        mask_p3 = (strides_in_boxes == 8)
+        mask_p4 = (strides_in_boxes == 16)
+        mask_p5 = (strides_in_boxes == 32)
+
+        idx_p3 = torch.where(mask_p3)[0]
+        idx_p4 = torch.where(mask_p4)[0]
+        idx_p5 = torch.where(mask_p5)[0]
 
         for gt_idx in range(num_gt):
-            k_safe = min(int(dynamic_ks[gt_idx].item()), num_in_boxes_anchor)
-            _, pos_idx = torch.topk(
-                cost[gt_idx], k=k_safe, largest=False
-            )
+            k_target = min(int(dynamic_ks[gt_idx].item()), num_in_boxes_anchor)
+            cand_list = []
+
+            # 1. Level-aware candidate extraction per FPN level
+            for idx_level in [idx_p3, idx_p4, idx_p5]:
+                if len(idx_level) > 0:
+                    cost_l = cost[gt_idx][idx_level]
+                    k_l = min(n_cand_per_level, len(idx_level))
+                    _, top_l = torch.topk(cost_l, k=k_l, largest=False)
+                    cand_list.append(idx_level[top_l])
+
+            if len(cand_list) > 0:
+                cand_all = torch.cat(cand_list, dim=0)
+                cost_cand = cost[gt_idx][cand_all]
+                k_final = min(k_target, len(cand_all))
+                _, top_final = torch.topk(cost_cand, k=k_final, largest=False)
+                pos_idx = cand_all[top_final]
+            else:
+                _, pos_idx = torch.topk(cost[gt_idx], k=k_target, largest=False)
+
             matching_matrix[gt_idx][pos_idx] = 1
 
         anchor_matching_gt = matching_matrix.sum(0)
