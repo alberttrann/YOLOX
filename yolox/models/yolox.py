@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 # -*- encoding: utf-8 -*-
 # Copyright (c) Megvii Inc. All rights reserved.
-# Integrated for TDE-YOLOX v3.1: Master Multi-Task Loss Synthesis & Curriculum Gating
+# Integrated for TDE-YOLOX v3.3: Master Multi-Task Loss Synthesis & CMA Curriculum Gating
 
 import math
 import torch
@@ -15,11 +15,13 @@ from .yolo_pafpn import YOLOPAFPN
 
 class YOLOX(nn.Module):
     """
-    TDE-YOLOX v3.1 Master Architecture Host.
+    TDE-YOLOX v3.3 Master Architecture Host.
+    
     Certified Innovations:
       - Master Multi-Task Synthesis: Balances 6 loss objectives across dynamic training curricula.
-      - Auxiliary Loss Curriculum Decay: Smoothly fades representation constraints to 10% (Epochs 40-65).
-      - Atomic Supervised Memory Loss Normalization: Normalized strictly by actual matched foreground anchors.
+      - Auxiliary Loss Curriculum Decay: Smoothly fades representation constraints to 10% (Epochs 30-65).
+      - Atomic Supervised Memory Loss: Normalized strictly by actual matched foreground anchors.
+      - First-Principles CMA Channeling: Direct supervision of channel covariance whitening.
     """
     def __init__(self, backbone=None, head=None):
         super().__init__()
@@ -43,10 +45,11 @@ class YOLOX(nn.Module):
         self.current_epoch = 0
         self.max_epochs = 80
 
+        # Curriculum Saliency Schedule Parameters
         self.warmup_end = 10
         self.ramp_end = 50
-        self.prob_start = 0.1
-        self.prob_end = 0.30  # Capped to 0.30 to eliminate post-E25 gradient turbulence
+        self.prob_start = 0.10
+        self.prob_end = 0.40  # Stabilized ceiling: eliminates late-epoch gradient turbulence
 
     def set_meta_training_state(self, epoch, max_epochs):
         self.current_epoch = epoch
@@ -56,7 +59,7 @@ class YOLOX(nn.Module):
         if hasattr(head_ref, "current_epoch"):
             head_ref.current_epoch = epoch
 
-        # Cosine Gumbel-Softmax Temperature Annealing tau: 1.0 -> 0.50 (Maintains multi-block candidate stability)
+        # Cosine Gumbel-Softmax Temperature Annealing tau: 1.0 -> 0.50
         tau_min = 0.50
         tau_max = 1.00
         decay_horizon = max(1.0, float(max_epochs - 20))
@@ -76,7 +79,7 @@ class YOLOX(nn.Module):
         if self.current_epoch >= self.ramp_end:
             return self.prob_end
 
-        progress = (self.current_epoch - self.warmup_end) / (self.ramp_end - self.warmup_end)
+        progress = (self.current_epoch - self.warmup_end) / float(self.ramp_end - self.warmup_end)
         return self.prob_start + (self.prob_end - self.prob_start) * progress
 
     def _get_indexer_loss_weight(self):
@@ -88,7 +91,7 @@ class YOLOX(nn.Module):
     def _get_aux_multiplier(self):
         """
         Auxiliary Loss Decay Multiplier (Curriculum Gating).
-        Gradually fades out auxiliary representation constraints from Epoch 30 to 65
+        Gradually fades auxiliary representation constraints from Epoch 30 to 65
         so the network focuses 100% of gradient bandwidth on sub-pixel detection precision.
         """
         decay_start = 30
@@ -106,13 +109,15 @@ class YOLOX(nn.Module):
     def forward(self, x, targets=None):
         current_ttt_prob = self._get_ttt_probability()
 
-        # 1. Forward through Backbone & BQSA Neck (Returns h_s optical entropy oracle)
-        neck_output, proj_loss, phase_loss, indexer_loss = self.backbone(
-            x, targets=targets, ttt_prob=current_ttt_prob
+        # 1. Forward through Backbone & BQSA Neck
+        # Threads epoch and max_epochs down to Stage 1 TTT for cosine step decay
+        neck_output, cma_loss, phase_loss, indexer_loss = self.backbone(
+            x, targets=targets, ttt_prob=current_ttt_prob,
+            epoch=self.current_epoch, max_epochs=self.max_epochs
         )
 
         if self.training:
-            # 2. Forward through Decoupled Engram Head
+            # 2. Forward through Decoupled Engram Head with Unified Single Dispatch
             (
                 total_det_loss, loss_iou, loss_nwd, loss_obj, loss_cls, loss_l1,
                 num_fg_ratio, aux_mem_logits, cls_targets_concat, fg_masks_concat
@@ -123,7 +128,7 @@ class YOLOX(nn.Module):
                 aux_mem_logits, cls_targets_concat, fg_masks_concat
             )
 
-            # 4. Prototype Margin Repulsion Loss
+            # 4. Prototype Margin Repulsion Loss on S^127
             head_ref = self.head.module if hasattr(self.head, "module") else self.head
             if hasattr(head_ref, "memory_banks"):
                 repulse_losses = [
@@ -138,14 +143,14 @@ class YOLOX(nn.Module):
             aux_mult = self._get_aux_multiplier()
             
             lambda_mem = 0.05 * aux_mult
-            lambda_proj = 0.10 * aux_mult
+            lambda_cma = 0.10 * aux_mult
             lambda_rep = 0.01 * aux_mult
             lambda_phase = 0.05 * min(1.0, float(self.current_epoch) / 5.0) * aux_mult
 
             total_loss = (
                 total_det_loss
                 + (lambda_mem * memory_anchor_loss)
-                + (lambda_proj * proj_loss)
+                + (lambda_cma * cma_loss)
                 + (lambda_idx * indexer_loss)
                 + (lambda_phase * phase_loss)
                 + (lambda_rep * total_repulse_loss)
@@ -159,7 +164,8 @@ class YOLOX(nn.Module):
                 "conf_loss": loss_obj,
                 "cls_loss": loss_cls,
                 "mem_loss": memory_anchor_loss,
-                "proj_loss": proj_loss,
+                "cma_loss": cma_loss,
+                "proj_loss": cma_loss,  # Backward-compatible metric alias for trainer.py
                 "phase_loss": phase_loss,
                 "idx_loss": indexer_loss,
                 "rep_loss": total_repulse_loss,
@@ -170,6 +176,11 @@ class YOLOX(nn.Module):
             return self.head(neck_output)
 
     def _calculate_supervised_memory_loss(self, aux_mem_logits, cls_targets, fg_masks):
+        """
+        Supervised Identity Anchor Loss.
+        Directly supervises hyperspherical prototype cosine similarities with GT labels.
+        Normalized by both foreground anchors and class count.
+        """
         all_logits_per_image = torch.cat(aux_mem_logits, dim=1)
         flat_logits_fp32 = all_logits_per_image.view(-1, self.num_classes).float()
         flat_mask = fg_masks.view(-1)
@@ -182,10 +193,13 @@ class YOLOX(nn.Module):
             bce_sum = F.binary_cross_entropy_with_logits(
                 fg_logits[:min_len], cls_targets[:min_len].float(), reduction="sum"
             )
-            return bce_sum / num_fg_actual
+            # Divide by num_classes to normalize into standard [0.2, 2.5] range!
+            return bce_sum / (num_fg_actual * float(self.num_classes))
             
         return flat_logits_fp32.sum() * 0.0
 
     def visualize(self, x, targets, save_prefix="assign_vis_"):
-        neck_output, _, _, _ = self.backbone(x, targets=targets, ttt_prob=1.0)
+        neck_output, _, _, _ = self.backbone(
+            x, targets=targets, ttt_prob=1.0, epoch=self.max_epochs, max_epochs=self.max_epochs
+        )
         self.head.visualize_assign_result(neck_output[0], targets, x, save_prefix)

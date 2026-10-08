@@ -1,8 +1,9 @@
 #!/usr/bin/env python
 # -*- encoding: utf-8 -*-
 # Copyright (c) Megvii Inc. All rights reserved.
-# Integrated for TDE-YOLOX v3.1: Certified Fourier Phase Invariance & Atomic Adaptive Backbone
+# Integrated for TDE-YOLOX v3.3: Asymmetric Fourier Invariance & CMA Meta-Adaptive Backbone
 
+import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -66,12 +67,13 @@ class Darknet(nn.Module):
 
 class CSPDarknet(nn.Module):
     """
-    TDE-YOLOX v3.1 Master CSPDarknet Backbone.
-    Certified Innovations:
-      - Stage 0: Focus layer with BaseConvGN (instance centering cancels additive DC haze A).
-      - Stage 1: Functional TTT-Dark2 (TTTAdaptiveStage) with GroupNorm and FP32 autograd guard.
-      - Fourier Phase-Amplitude Consistency: Asymmetric clean reference anchor eliminates stem gradient cancellation.
-      - Deep Stages (Dark3-Dark5): Preserved for COCO pretrained weights with exact channel alignment.
+    TDE-YOLOX v3.3 Master CSPDarknet Backbone.
+    
+    Architectural Foundations:
+      - Stage 0: Focus stem with BaseConvGN (cancels Koschmieder additive DC haze offset A).
+      - Stage 1: Functional TTT-Dark2 (TTTAdaptiveStage) with GroupNorm and CMA covariance whitening.
+      - Deep Stages (Dark3-Dark5): Exact channel alignment with pretrained YOLOX weights.
+      - Fourier Phase-Amplitude Regularization: Asymmetric anchor eliminates destructive stem cancellation.
     """
     def __init__(
         self,
@@ -81,7 +83,7 @@ class CSPDarknet(nn.Module):
         depthwise=False,
         act="silu",
         ttt_lr=0.05,
-        ttt_noise_std=0.08
+        ttt_noise_std=0.08  # Maintained as optional parameter for configuration compatibility
     ):
         super().__init__()
         self.out_features = out_features
@@ -92,7 +94,7 @@ class CSPDarknet(nn.Module):
         base_depth = max(round(dep_mul * 3), 1)  # 1 for depth=0.33
 
         # 0. THE GROUPNORM STEM
-        # Instance centering directly on raw pixels eliminates the atmospheric DC offset A
+        # Instance-level centering on raw pixels cancels uniform airlight shifts
         self.stem = Focus(3, base_channels, ksize=3, act=act)
 
         # 1. THE ADAPTIVE STAGE 1 (DARK2)
@@ -112,8 +114,7 @@ class CSPDarknet(nn.Module):
         self.dark2 = TTTAdaptiveStage(
             dark2_base,
             in_channels=base_channels * 2,
-            init_ttt_lr=ttt_lr,
-            noise_std=ttt_noise_std
+            init_ttt_lr=ttt_lr
         )
 
         # 2. DARK3 (DEEP STAGE - Stride 8)
@@ -142,7 +143,7 @@ class CSPDarknet(nn.Module):
         Enforces physical [0.0, 255.0] radiance bounds to eliminate Gibbs oscillation spikes.
         """
         B, C, H, W = x.shape
-        # Compute 2D real fast Fourier transform strictly in FP32
+        # Real 2D Fast Fourier Transform in FP32
         fft_x = torch.fft.rfft2(x.float(), norm="backward")
         amp = torch.abs(fft_x)
         phase = torch.angle(fft_x)
@@ -155,31 +156,27 @@ class CSPDarknet(nn.Module):
         W_half = fft_x.shape[-1]
         v = torch.arange(W_half, device=x.device)
         
-        # Normalized frequency coordinates
         u_norm = torch.min(u, H - u).float() / H
         v_norm = v.float() / (W_half * 2.0)
         dist_sq = u_norm.unsqueeze(1).pow(2) + v_norm.unsqueeze(0).pow(2)
         
-        # sigma_freq = 0.05 targets lowest 5% frequencies
+        # Gaussian apodization window targeting lowest 5% frequencies
         mask_gauss = torch.exp(-dist_sq / (2.0 * (0.05 ** 2))).unsqueeze(0).unsqueeze(0)
         
-        # Perturb low frequencies, preserve high-frequency amplitude and original geometric phase
         alpha = 0.5
         amp_jittered = ((1.0 - alpha) * amp + alpha * amp_perm) * mask_gauss + amp * (1.0 - mask_gauss)
         
-        # Invert back to pixel space
         perturbed_fft = torch.polar(amp_jittered, phase)
         x_perturbed = torch.fft.irfft2(perturbed_fft, s=(H, W), norm="backward")
         
-        # Enforce physical [0.0, 255.0] radiance bounds
+        # Enforce physical radiance bounds
         x_perturbed = torch.clamp(x_perturbed, min=0.0, max=255.0)
         return x_perturbed.to(x.dtype)
 
-    def forward(self, x, ttt_prob=None):
+    def forward(self, x, ttt_prob=None, epoch=0, max_epochs=80):
         outputs = {}
         
         # 1. ATOMIC SINGLE FOCUS STEM FORWARD
-        # Execute Focus ONCE on clean pixels and reuse for both phase loss and detection
         x_clean_stem = self.stem(x)
         outputs["stem"] = x_clean_stem
         
@@ -190,17 +187,16 @@ class CSPDarknet(nn.Module):
             
             stem_pert = self.stem(x_perturbed)
             
-            # Detached clean anchor ensures phase loss strictly aligns the perturbed branch
-            # without introducing destructive gradient cancellation into the clean detection path
-            z_clean, _ = self.dark2(x_clean_stem.detach(), run_ttt=False)
-            z_pert, _ = self.dark2(stem_pert, run_ttt=False)
+            # Detached clean anchor prevents destructive gradient cancellation on the clean detection path
+            z_clean, _ = self.dark2(x_clean_stem.detach(), run_ttt=False, epoch=epoch, max_epochs=max_epochs)
+            z_pert, _ = self.dark2(stem_pert, run_ttt=False, epoch=epoch, max_epochs=max_epochs)
             
             sim = F.cosine_similarity(z_clean.flatten(1), z_pert.flatten(1), dim=-1)
             phase_loss = (1.0 - sim).mean()
         else:
             phase_loss = torch.tensor(0.0, device=x.device)
 
-        # 3. ADAPTIVE STAGE 1 (DARK2)
+        # 3. ADAPTIVE STAGE 1 (DARK2) VIA COVARIATE MOMENT ALIGNMENT
         run_ttt = False
         if not self.training:
             if ttt_prob is None or ttt_prob > 0.0:
@@ -210,8 +206,8 @@ class CSPDarknet(nn.Module):
             if prob > 0.0 and torch.rand(1).item() < prob:
                 run_ttt = True
 
-        # Forward clean stem features into Dark2 with higher-order functional adaptation
-        x, proj_loss = self.dark2(x_clean_stem, run_ttt=run_ttt)
+        # Forward clean stem features into Dark2 with CMA functional adaptation
+        x, cma_loss = self.dark2(x_clean_stem, run_ttt=run_ttt, epoch=epoch, max_epochs=max_epochs)
         outputs["dark2"] = x
         
         # 4. DEEP CONVOLUTIONAL HIGHWAYS (Dark3-Dark5)
@@ -223,4 +219,4 @@ class CSPDarknet(nn.Module):
         outputs["dark5"] = x
         
         selected_outs = {k: v for k, v in outputs.items() if k in self.out_features}
-        return selected_outs, proj_loss, phase_loss
+        return selected_outs, cma_loss, phase_loss

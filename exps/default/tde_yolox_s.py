@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding:utf-8 -*-
 # Copyright (c) Megvii Inc. All rights reserved.
-# Integrated for TDE-YOLOX v3.1: Unified MuSGD Optimizer & Strict ZSDA Protocol
+# Integrated for TDE-YOLOX v3.3: Certified Rule-of-64 Multiscale & Curriculum Augmentation
 
 import os
+import random
 import torch
+import torch.distributed as dist
 import torch.nn as nn
 from yolox.exp import Exp as MyExp
 from yolox.optimizers.muon import MuSGD
@@ -19,17 +21,30 @@ class Exp(MyExp):
         self.exp_name = os.path.split(os.path.realpath(__file__))[1].split(".")[0]
         self.act = "silu"
 
-        # --- RESEARCH HYPERPARAMETERS (TDE-YOLOX v3.1) ---
+        # --- RESEARCH HYPERPARAMETERS (TDE-YOLOX v3.3) ---
         self.num_classes = 9         # BDD100K 9 detection categories
-        self.init_ttt_lr = 0.05      # Stage 1 GroupNorm adaptation rate
-        self.ttt_noise_std = 0.08    # Contrastive Gaussian denoising intensity
+        self.init_ttt_lr = 0.05      # Stage 1 GroupNorm Covariate Moment Alignment rate
+        self.ttt_noise_std = 0.08    # Preserved configuration parameter
 
-        # --- DATASET & RESOLUTION LOCKING ---
+        # --- DATASET & RULE-OF-64 RESOLUTION CONFIGURATION ---
         self.input_size = (640, 640)
         self.test_size = (640, 640)
-        self.multiscale_range = 0    # Strictly lock canvas to 640x640 (preserves 10x10 block grid)
-        self.mosaic_prob = 0.0       # Disabled from Epoch 1 (prevents seam variance corruption)
-        self.enable_mixup = False    # Disabled from Epoch 1
+        
+        # Enables Rule-of-64 dynamic multiscale training (Samples from [576, 640, 704])
+        self.multiscale_range = 1    
+        
+        # Dynamic Mosaic Curriculum:
+        # Active at 50% probability during feature representation learning (Epochs 1 -> 50)
+        self.mosaic_prob = 0.50
+        self.mosaic_scale = (0.5, 1.5)
+        
+        # Mixup strictly disabled to prevent transparent ghost artifacts in Engram memory
+        self.enable_mixup = False
+        self.mixup_prob = 0.0
+
+        # Photometric jitter simulates varied illumination cleanly
+        self.hsv_prob = 1.0
+        self.flip_prob = 0.5
 
         # --- STRICT ZSDA PROTOCOL PATHS ---
         self.data_dir = "D:/YOLOX-3RD/bdd100k/bdd100k/bdd100k/images"
@@ -40,7 +55,8 @@ class Exp(MyExp):
         # --- TRAINING SCHEDULE ---
         self.max_epoch = 80
         self.warmup_epochs = 10
-        self.no_aug_epochs = 15      # Activates L1 box offset regression loss
+        # Disables Mosaic strictly during the final 30 epochs for high-precision fine-tuning!
+        self.no_aug_epochs = 30      
         self.min_lr_ratio = 0.05
         self.basic_lr_per_img = 0.01 / 64.0
         self.weight_decay = 0.0005
@@ -52,8 +68,32 @@ class Exp(MyExp):
         self.data_num_workers = 0
         self.batch_size = 16
 
-        self.test_conf = 0.001
+        self.test_conf = 0.01
         self.nmsthre = 0.65
+
+    def random_resize(self, data_loader, epoch, rank, is_distributed):
+        """
+        Certified Rule-of-64 Multiscale Quantization.
+        Enforces that all sampled canvas resolutions are exact integer multiples of 64 pixels,
+        guaranteeing zero remainder tokens across P4 (4x4) and P3 (8x8) BQSA blocks.
+        """
+        tensor = torch.LongTensor(2).cuda()
+        if rank == 0:
+            if self.multiscale_range > 0:
+                scale_choices = [512, 576, 640, 704]
+                size = random.choice(scale_choices)
+                tensor[0] = size
+                tensor[1] = size
+            else:
+                tensor[0] = self.input_size[0]
+                tensor[1] = self.input_size[1]
+
+        if is_distributed:
+            dist.barrier()
+            dist.broadcast(tensor, 0)
+
+        input_size = (tensor[0].item(), tensor[1].item())
+        return input_size
 
     def get_model(self):
         from yolox.models import YOLOX, YOLOPAFPN
@@ -71,7 +111,7 @@ class Exp(MyExp):
         if getattr(self, "model", None) is None:
             in_channels = [256, 512, 1024]
 
-            # 1. Adaptive Backbone with GroupNorm Focus & Functional TTT-Dark2
+            # 1. Adaptive Backbone with GroupNorm Focus & CMA TTT-Dark2
             backbone = CSPDarknet(
                 self.depth,
                 self.width,
@@ -81,16 +121,18 @@ class Exp(MyExp):
                 ttt_noise_std=self.ttt_noise_std
             )
 
-            # 2. Tribrid BQSA Neck + Scale-AttnRes Highway
+            # 2. Invariant BQSA Neck + Scale-AttnRes Highway
             neck = YOLOPAFPN(
                 self.depth,
                 self.width,
                 in_channels=in_channels,
                 act=self.act,
+                ttt_lr=self.init_ttt_lr,
+                ttt_noise_std=self.ttt_noise_std
             )
             neck.backbone = backbone
 
-            # 3. Decoupled Anti-Collision Engram Head
+            # 3. Decoupled Single-Dispatch Engram Head
             head = TDE_Head(
                 self.num_classes,
                 self.width,
@@ -110,9 +152,9 @@ class Exp(MyExp):
     def get_optimizer(self, batch_size):
         """
         NATIVE MuSGD OPTIMIZER PARTITION:
-          - Group 0 (Muon): STRICTLY Prototypes [576, 128] (lr=0.02, lr_factor=8.0, WD=0.0)
+          - Group 0 (Muon): STRICTLY Prototypes [576, 128] on S^127 (lr=0.02, lr_factor=8.0, WD=0.0)
           - Group 1 (SGD): All Convolutions & Projections (lr=base_lr, lr_factor=1.0, WD=5e-4)
-          - Group 2 (SGD): Biases, Normalizations, and Scalers (lr=base_lr, lr_factor=1.0, WD=0.0)
+          - Group 2 (SGD): Biases, Normalizations, and 1D Scalers (lr=base_lr, lr_factor=1.0, WD=0.0)
           - Group 3 (Meta-SGD): Stage 1 TTT learning rates (lr=base_lr*0.05, lr_factor=0.05, WD=0.0)
         """
         if "optimizer" in self.__dict__:
@@ -120,7 +162,6 @@ class Exp(MyExp):
 
         base_lr = self.basic_lr_per_img * batch_size
         
-        # Explicitly collect all active trainable parameters
         all_trainable_params = {p for p in self.model.parameters() if p.requires_grad}
         registered_params = set()
 
@@ -129,12 +170,11 @@ class Exp(MyExp):
         pg_sgd_decay = []
         pg_sgd_no_decay = []
 
-        # Partition parameters strictly and safely:
         for name, p in self.model.named_parameters():
             if not p.requires_grad:
                 continue
 
-            # 1. ONLY the 576 Prototypes on S^127 go to Muon (Pure Manifold Optimization)
+            # 1. ONLY the Prototypes on S^127 go to Muon (Riemannian Manifold Optimization)
             if "prototypes" in name:
                 pg_muon.append(p)
                 registered_params.add(p)
@@ -146,19 +186,21 @@ class Exp(MyExp):
                 registered_params.add(p)
                 continue
 
-            # 3. 1D Biases, Normalizations, and Scalar Gates -> SGD No-Decay (lr = base_lr)
+            # 3. 1D Biases, Normalizations, and Scalar Gates -> SGD No-Decay
             if "bias" in name:
                 pg_sgd_no_decay.append(p)
                 registered_params.add(p)
             elif (any(k in name for k in ["gn.", "bn.", "norm.", "bn1.", "net.1."])) and "weight" in name:
                 pg_sgd_no_decay.append(p)
                 registered_params.add(p)
-            elif any(k in name for k in ["attnres", ".w", "mask_token", "gr_gate", "w_r1", "w_r2", "gamma", "beta", "v_q", "v_k", "omega", "w_hf"]):
+            elif any(k in name for k in [
+                "attnres", ".w", "mask_token", "gr_gate", "w_r1", "w_r2", "gamma", "beta", 
+                "v_q", "v_k", "omega", "w_hf", "lambda_fog", "k_sigma", "pool_alpha"
+            ]):
                 pg_sgd_no_decay.append(p)
                 registered_params.add(p)
             else:
-                # 4. ALL Convolutions (including 1x1 QKV, Projections & Decoders) -> SGD with Weight Decay!
-                # Weight decay (5e-4) strictly prevents activation magnitude explosion!
+                # 4. ALL Convolutions & Linear Projections -> SGD with Weight Decay (5e-4)
                 pg_sgd_decay.append(p)
                 registered_params.add(p)
 
@@ -166,11 +208,11 @@ class Exp(MyExp):
         assert len(unassigned) == 0, f"Unassigned parameters detected: {unassigned}"
 
         param_groups = [
-            # Group 0: Muon (STRICTLY for Prototypes: lr=0.02, lr_factor=8.0x, WD=0.0)
+            # Group 0: Muon (Prototypes: lr=0.02, lr_factor=8.0x, WD=0.0)
             {"params": pg_muon, "use_muon": True, "lr": 0.02, "lr_factor": 0.02 / base_lr, "momentum": 0.95, "weight_decay": 0.0, "nesterov": True},
-            # Group 1: All Convolutions & Projections (Bounded by weight decay 5e-4)
+            # Group 1: Convolutions & Projections (Bounded by weight decay 5e-4)
             {"params": pg_sgd_decay, "use_muon": False, "lr": base_lr, "lr_factor": 1.0, "momentum": 0.9, "weight_decay": self.weight_decay, "nesterov": True},
-            # Group 2: Biases, Normalizations, and Scalers
+            # Group 2: Biases, Normalizations, and Scalar Gates (WD=0.0)
             {"params": pg_sgd_no_decay, "use_muon": False, "lr": base_lr, "lr_factor": 1.0, "momentum": 0.9, "weight_decay": 0.0, "nesterov": True},
             # Group 3: Meta-SGD Step Sizes
             {"params": pg_meta, "use_muon": False, "lr": base_lr * 0.05, "lr_factor": 0.05, "momentum": 0.9, "weight_decay": 0.0, "nesterov": True},
@@ -187,7 +229,7 @@ class Exp(MyExp):
             name="",
             img_size=self.input_size,
             preproc=TrainTransform(
-                max_labels=120,  # Restores full capacity for dense traffic scenes
+                max_labels=120,
                 flip_prob=self.flip_prob,
                 hsv_prob=self.hsv_prob
             ),

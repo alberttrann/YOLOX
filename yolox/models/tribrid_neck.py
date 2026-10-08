@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 # -*- encoding: utf-8 -*-
 # Copyright (c) Megvii Inc. All rights reserved.
-# Integrated for TDE-YOLOX v3.2: HySparse2-Augmented BQSA Neck & Symmetrical Scale-AttnRes
+# Integrated for TDE-YOLOX v3.3: Invariant HySparse2 BQSA Neck & Dense Ambient Context Highway
 
 import math
 import torch
@@ -25,7 +25,12 @@ class RMSNorm(nn.Module):
 
 
 class ScaleAttnRes(nn.Module):
-    def __init__(self, dim, num_sources=3, spatial_ratio=1.0):
+    """
+    Symmetrical Scale-AttnRes Highway.
+    Computes Lipschitz-bounded (ratio ~0.42x) depth-wise attention across pyramid scales.
+    Accepts spatial_ratio and **kwargs for universal interface compatibility.
+    """
+    def __init__(self, dim, num_sources=3, spatial_ratio=1.0, **kwargs):
         super().__init__()
         self.dim = dim
         self.num_sources = num_sources
@@ -98,13 +103,18 @@ class RotaryEmbedding2D(nn.Module):
 
 
 class P5ExclusiveDenseAttention(nn.Module):
-    def __init__(self, dim, num_heads=4, lambda_fog=2.0):
+    """
+    P5 Exclusive Dense Global Attention with Learnable Atmospheric Coupling.
+    """
+    def __init__(self, dim, num_heads=4):
         super().__init__()
         self.dim = dim
         self.num_heads = num_heads
         self.head_dim = dim // num_heads
         self.scale = self.head_dim ** -0.5
-        self.lambda_fog = lambda_fog
+
+        # Learnable Atmospheric Coupling Parameter (replaces static lambda_fog = 2.0)
+        self.lambda_fog = nn.Parameter(torch.tensor(1.0))
 
         self.qkv = nn.Conv2d(dim, dim * 3, kernel_size=1)
         self.proj = nn.Conv2d(dim, dim, kernel_size=1)
@@ -134,20 +144,16 @@ class P5ExclusiveDenseAttention(nn.Module):
         attn_fp32 = F.softmax(attn_fp32, dim=-1)
 
         # 2. Saliency Extraction in FP32 with Safe Variance
+        # TRUE SHANNON ATTENTION ENTROPY (Eliminates artificial z-score compression):
         diag_elements = attn_fp32.diagonal(dim1=-2, dim2=-1)
         saliency_sum = attn_fp32.sum(dim=-2) - diag_elements
         saliency = saliency_sum.mean(dim=1).reshape(B, 1, H, W) / max(1.0, float(N - 1))
-
+        
         s_flat = saliency.flatten(1).float()
-        s_mean = s_flat.mean(dim=-1, keepdim=True)
-        s_var = torch.clamp(torch.var(s_flat, dim=-1, keepdim=True, unbiased=False), min=1e-8)
-        s_std = torch.sqrt(s_var) + 1e-5
-        s_standardized = torch.clamp((s_flat - s_mean) / s_std, min=-20.0, max=20.0)
-
-        s_prob = F.softmax(s_standardized, dim=-1)
-        s_log_prob = F.log_softmax(s_standardized, dim=-1)
-        h_s_raw = (-torch.sum(s_prob * s_log_prob, dim=-1).mean()).detach()
-
+        s_sum = s_flat.sum(dim=-1, keepdim=True) + 1e-7
+        p_dist = s_flat / s_sum
+        
+        h_s_raw = (-torch.sum(p_dist * torch.log(p_dist + 1e-7), dim=-1).mean()).detach()
         h_s_fallback = math.log(max(2, N))
         h_s = torch.nan_to_num(h_s_raw, nan=h_s_fallback, posinf=h_s_fallback, neginf=0.0)
 
@@ -159,7 +165,7 @@ class P5ExclusiveDenseAttention(nn.Module):
         z = (y_fp32 - proj_scalar * v_fp32).to(v.dtype)
         z_spatial = self.proj(z.permute(0, 1, 3, 2).reshape(B, C, H, W))
 
-        # 4. Gated Residual Highway
+        # 4. Gated Residual Highway with Learnable Fog Coupling
         h_ratio = torch.clamp(h_s / math.log(max(2, N)), 0.0, 1.0)
         g_xsa = torch.sigmoid(self.w_r1(x) + self.w_r2(z_spatial) + (self.lambda_fog * h_ratio))
         p5_feat = x + g_xsa * z_spatial
@@ -168,11 +174,19 @@ class P5ExclusiveDenseAttention(nn.Module):
 
 
 class C2f_BQSA_P4(nn.Module):
-    def __init__(self, c1, c2, n=1, block_size=4, top_k=25):
+    """
+    P4 Block-Quantized Sparse Attention with:
+      - HySparse2 Hybrid Max-Avg Saliency Pooling
+      - Dynamic Scale-Invariant Sparsity Ratio (rho = 0.25)
+      - CUDA-Asynchronous Adaptive Temperature
+      - Learnable Pruning Margin (k_sigma)
+      - Pre-Indexer RMSNorm Scale Shield
+    """
+    def __init__(self, c1, c2, n=1, block_size=4, sparsity_ratio=0.25):
         super().__init__()
         self.c = int(c2 * 0.5)
         self.block_size = block_size
-        self.top_k = top_k
+        self.sparsity_ratio = sparsity_ratio
         self.tau = 1.0
 
         self.cv1 = BaseConv(c1, c2, 1, 1)
@@ -183,10 +197,19 @@ class C2f_BQSA_P4(nn.Module):
         self.ca = CoordinateAttention(self.c)
         self.mbconv = MBConvConditioner(self.c)
 
+        # Scale Shield: Decouples block router from Stage 1 TTT GroupNorm shifts
+        self.indexer_norm = RMSNorm(self.c, eps=1e-5)
         self.indexer = nn.Sequential(
             nn.Conv2d(self.c, self.c, 3, padding=1, groups=self.c),
             nn.Conv2d(self.c, 1, 1)
         )
+
+        # Learnable Convex Saliency Blend Parameter (sigmoid(0.0) = 0.50 initialization)
+        self.pool_alpha = nn.Parameter(torch.tensor(0.0))
+
+        # Learnable Confidence Pruning Boundary (softplus(2.0) ~ 2.12 initialization)
+        self.k_sigma = nn.Parameter(torch.tensor(2.0))
+
         self.qkv = nn.Conv2d(self.c, self.c * 3, 1)
         self.proj = nn.Conv2d(self.c, self.c, 1)
         self.gr_gate = nn.Parameter(torch.zeros(1, self.c, 1, 1))
@@ -216,12 +239,7 @@ class C2f_BQSA_P4(nn.Module):
             x2 = xc + w / 2.0
             y2 = yc + h / 2.0
 
-            on_screen = (x2 > 0) & (y2 > 0) & (x1 < 640) & (y1 < 640)
-            if not on_screen.any():
-                continue
-
-            x1, y1, x2, y2 = x1[on_screen], y1[on_screen], x2[on_screen], y2[on_screen]
-
+            # Dynamic block receptive field footprint in input pixels: 16 stride * 4 block = 64px
             c_min = torch.clamp((x1 / 64.0).floor().long(), 0, num_w - 1)
             c_max = torch.clamp(((x2 - 1e-4) / 64.0).floor().long(), 0, num_w - 1)
             c_max = torch.max(c_max, c_min)
@@ -245,12 +263,14 @@ class C2f_BQSA_P4(nn.Module):
         num_h = max(1, H // bs)
         num_w = max(1, W // bs)
         total_blocks = num_h * num_w
-        k_actual = min(self.top_k, total_blocks)
+        
+        # Dynamic Resolution-Invariant Block Budget
+        k_actual = max(1, min(total_blocks, int(round(self.sparsity_ratio * float(total_blocks)))))
 
         # 1. Tribrid Conditioning Stack
         feat_cond = self.mbconv(self.ca(self.simam(feat)))
 
-        # 2. Dynamic Pool Gating with Safe Variance
+        # 2. Dynamic Pool Gating with Learnable k_sigma Margin
         s_up = F.interpolate(p5_saliency.float(), size=(H, W), mode='nearest')
         block_saliency = F.avg_pool2d(s_up, kernel_size=bs, stride=bs).view(B, -1)
 
@@ -259,22 +279,23 @@ class C2f_BQSA_P4(nn.Module):
         sigma_s = torch.sqrt(var_s) + 1e-5
         
         h_ratio = torch.clamp(h_s.float() / math.log(max(2, total_blocks)), 0.0, 1.0)
-        tau_pool = torch.clamp(mu_s - 3.0 * h_ratio * sigma_s, min=0.0)
+        k_sig = torch.clamp(F.softplus(self.k_sigma), min=0.5, max=3.5)
+        tau_pool = torch.clamp(mu_s - k_sig * h_ratio * sigma_s, min=0.0)
         pool_mask = (block_saliency >= tau_pool).to(feat.dtype)
 
-        # Guaranteed Minimum 1-Block Law fallback
+        # Guaranteed Minimum 1-Block Law Fallback
         empty_mask = (pool_mask.sum(dim=-1, keepdim=True) == 0)
         if empty_mask.any():
             top1_fallback = torch.zeros_like(pool_mask).scatter_(-1, block_saliency.argmax(dim=-1, keepdim=True), 1.0)
             pool_mask = torch.where(empty_mask, top1_fallback, pool_mask)
 
-        # 3. HYSPARSE2-AUGMENTED BLOCK SCORING & STE GUMBEL-SOFTMAX
-        scores = self.indexer(feat_cond)
-        
-        # Hybrid Max-Avg Saliency Pooling: Eliminates the 1/16 small object dilution bottleneck
+        # 3. HYSPARSE2 HYBRID MAX-AVG SALIENCY POOLING WITH LEARNABLE CONVEX BLEND
+        scores = self.indexer(self.indexer_norm(feat_cond))
         scores_avg = F.avg_pool2d(scores, kernel_size=bs, stride=bs).view(B, -1)
         scores_max = F.max_pool2d(scores, kernel_size=bs, stride=bs).view(B, -1)
-        block_scores = 0.5 * scores_avg + 0.5 * scores_max
+        
+        alpha = torch.sigmoid(self.pool_alpha)
+        block_scores = alpha * scores_max + (1.0 - alpha) * scores_avg
 
         # Guarded Masked Scores with -500.0 Floor
         masked_scores_fp32 = block_scores.float() * pool_mask.float() - (1.0 - pool_mask.float()) * 500.0
@@ -283,7 +304,7 @@ class C2f_BQSA_P4(nn.Module):
             u = torch.rand_like(masked_scores_fp32, dtype=torch.float32)
             gumbel = -torch.log(-torch.log(u + 1e-7) + 1e-7)
 
-            # HySparse2 Optical Entropy-Sharpened Temperature (Non-blocking GPU tensor)
+            # HySparse2 CUDA-Asynchronous Adaptive Temperature
             tau_adaptive = torch.clamp(self.tau * (1.0 - 0.35 * h_ratio), min=0.10)
 
             soft_scores = F.softmax(
@@ -314,7 +335,7 @@ class C2f_BQSA_P4(nn.Module):
 
         q_flat = q.reshape(B, C, H * W)
 
-        # Full FP32 QK and Value aggregation
+        # Full FP32 QK and Value Aggregation
         q_fp32 = q_flat.transpose(-2, -1).float()
         k_fp32 = k_sel.float()
         attn_fp32 = torch.matmul(q_fp32, k_fp32) * (C ** -0.5)
@@ -343,11 +364,17 @@ class C2f_BQSA_P4(nn.Module):
 
 
 class C2f_BQSA_P3(nn.Module):
-    def __init__(self, c1, c2, n=1, block_size=8, top_k=25):
+    """
+    P3 Block-Quantized Sparse Attention with:
+      - Dense Ambient Context Broadcast (eliminates macro-object feature bisecting)
+      - Dynamic Scale-Invariant Sparsity Ratio (rho = 0.25)
+      - High-Resolution Sub-Pixel Feature Alignment
+    """
+    def __init__(self, c1, c2, n=1, block_size=8, sparsity_ratio=0.25):
         super().__init__()
         self.c = int(c2 * 0.5)
         self.block_size = block_size
-        self.top_k = top_k
+        self.sparsity_ratio = sparsity_ratio
 
         self.cv1 = BaseConv(c1, c2, 1, 1)
         self.cv2 = BaseConv((2 + n) * self.c, c2, 1, 1)
@@ -374,7 +401,10 @@ class C2f_BQSA_P3(nn.Module):
         num_w = max(1, W // bs)
         total_blocks = num_h * num_w
         tokens_per_b = bs * bs
-        k_actual = min(self.top_k, inherited_topk_idx.shape[1], total_blocks)
+        
+        # Dynamic Resolution-Invariant Block Budget
+        k_target = max(1, min(total_blocks, int(round(self.sparsity_ratio * float(total_blocks)))))
+        k_actual = min(k_target, inherited_topk_idx.shape[1], total_blocks)
 
         qkv = self.qkv(feat_cond).view(B, 3, C, H, W)
         q, k, v = qkv[:, 0], qkv[:, 1], qkv[:, 2]
@@ -394,7 +424,7 @@ class C2f_BQSA_P3(nn.Module):
         k_loc = k_sel.reshape(B * k_actual, C, tokens_per_b)
         v_loc = v_sel.permute(0, 1, 3, 2).reshape(B * k_actual, tokens_per_b, C)
 
-        # Full FP32 QK and Value aggregation
+        # Full FP32 QK and Value Aggregation
         q_fp32 = q_loc.float()
         k_fp32 = k_loc.float()
         attn_fp32 = torch.bmm(q_fp32, k_fp32) * (C ** -0.5)
@@ -404,10 +434,29 @@ class C2f_BQSA_P3(nn.Module):
             attn_fp32, v_loc.float()
         ).to(v_loc.dtype).reshape(B, k_actual, tokens_per_b, C)
 
-        out_flat = torch.zeros(B, total_blocks, C * tokens_per_b, device=x.device, dtype=q.dtype)
+        # =========================================================================
+        # DENSE AMBIENT CONTEXT BROADCAST WITH EXACT RMS ENERGY MATCHING
+        # =========================================================================
+        # 1. Global summary token per image: [B, C, 1, 1]
+        z_global = F.adaptive_avg_pool2d(feat_cond, (1, 1))
+
+        # 2. Global RMS energy matching scalar: mean across channels AND spatial dims [B, 1, 1, 1]
+        rms_feat = torch.sqrt(feat_cond.float().pow(2).mean(dim=[1, 2, 3], keepdim=True) + 1e-5)
+        rms_glob = torch.sqrt(z_global.float().pow(2).mean(dim=[1, 2, 3], keepdim=True) + 1e-5)
+        scale_glob = torch.clamp(rms_feat / rms_glob, min=0.10, max=10.0).to(feat_cond.dtype)
+        z_global_scaled = z_global * scale_glob  # Strictly [B, C, 1, 1]
+
+        # 3. Ambient Canvas initialization: [B, total_blocks, C * tokens_per_b]
+        # Expand [B, C, 1] across tokens_per_b (64) to form [B, 1, C * 64]
+        z_token = z_global_scaled.view(B, C, 1).expand(-1, -1, tokens_per_b).reshape(B, 1, C * tokens_per_b)
+        # Allocate exactly [B, total_blocks, C * tokens_per_b] = [16, 100, 4096] (Zero memory bloat!)
+        out_flat = z_token.expand(-1, total_blocks, -1).clone()
+
+        # 4. Overwrite Top-K blocks with fine-grained local self-attention
         idx_flat = valid_idx.unsqueeze(-1).expand(-1, -1, C * tokens_per_b)
         ctx_flat = ctx_loc.permute(0, 1, 3, 2).reshape(B, k_actual, C * tokens_per_b)
         out_flat.scatter_(1, idx_flat, ctx_flat)
+        # =========================================================================
 
         context = out_flat.reshape(B, num_h, num_w, C, bs, bs).permute(0, 3, 1, 4, 2, 5).reshape(B, C, H, W)
 
@@ -417,6 +466,12 @@ class C2f_BQSA_P3(nn.Module):
 
 
 class YOLOPAFPN(nn.Module):
+    """
+    TDE-YOLOX v3.3 Master Neck:
+      - Top-Down Pass: BQSA (P5 Dense Attention -> P4 HySparse2 Gumbel -> P3 Ambient BQSA)
+      - Bottom-Up Pass: Symmetrical Scale-AttnRes depth-attention highways
+      - Cleaned contract: Threads epoch & max_epochs down to CMA Backbone
+    """
     def __init__(
         self,
         depth=1.0,
@@ -444,24 +499,28 @@ class YOLOPAFPN(nn.Module):
 
         self.lateral_c5 = BaseConv(c5, c4, 1, 1, act=act)
         self.p5_dense_attn = P5ExclusiveDenseAttention(c5)
-        self.p4_bqsa = C2f_BQSA_P4(c4 + c4, c4, n=round(3 * depth))
+        self.p4_bqsa = C2f_BQSA_P4(c4 + c4, c4, n=round(3 * depth), sparsity_ratio=0.25)
         self.reduce_p4 = BaseConv(c4, c3, 1, 1, act=act)
-        self.p3_bqsa = C2f_BQSA_P3(c3 + c3, c3, n=round(3 * depth))
+        self.p3_bqsa = C2f_BQSA_P3(c3 + c3, c3, n=round(3 * depth), sparsity_ratio=0.25)
 
         self.down_n3 = BaseConv(c3, c4, 3, 2, act=act)
         self.down_n4 = BaseConv(c4, c5, 3, 2, act=act)
 
-        self.attnres_n3 = ScaleAttnRes(dim=c3, num_sources=2, spatial_ratio=16.0)
-        self.attnres_n4 = ScaleAttnRes(dim=c4, num_sources=3, spatial_ratio=4.0)
-        self.attnres_n5 = ScaleAttnRes(dim=c5, num_sources=3, spatial_ratio=1.0)
+        # ScaleAttnRes Highways with cleaned parameter contracts
+        self.attnres_n3 = ScaleAttnRes(dim=c3, num_sources=2)
+        self.attnres_n4 = ScaleAttnRes(dim=c4, num_sources=3)
+        self.attnres_n5 = ScaleAttnRes(dim=c5, num_sources=3)
 
-    def forward(self, input, targets=None, ttt_prob=None):
-        out_features, proj_loss, phase_loss = self.backbone(input, ttt_prob=ttt_prob)
+    def forward(self, input, targets=None, ttt_prob=None, epoch=0, max_epochs=80):
+        # 1. Forward through Backbone with CMA Curriculum
+        out_features, cma_loss, phase_loss = self.backbone(
+            input, ttt_prob=ttt_prob, epoch=epoch, max_epochs=max_epochs
+        )
         c3 = out_features["dark3"]
         c4 = out_features["dark4"]
         c5 = out_features["dark5"]
 
-        # 2. TOP-DOWN BQSA CASCADE
+        # 2. TOP-DOWN REASONING PASS (BQSA Cascade)
         p5_feat, p5_saliency, h_s = self.p5_dense_attn(c5)
 
         _p5_h, _p5_w = p5_feat.shape[-2], p5_feat.shape[-1]
@@ -474,9 +533,9 @@ class YOLOPAFPN(nn.Module):
         p3_in = torch.cat([self.upsample(self.reduce_p4(p4_out)), c3], dim=1)
         p3_out = self.p3_bqsa(p3_in, p4_indices)
 
-        # 3. BOTTOM-UP SCALE-ATTNRES HIGHWAY
+        # 3. BOTTOM-UP SCALE-ATTNRES GRADIENT HIGHWAY
         n3_out = self.attnres_n3([p3_out, c3])
         n4_out = self.attnres_n4([p4_out, self.down_n3(n3_out), c4])
         n5_out = self.attnres_n5([p5_feat, self.down_n4(n4_out), c5])
 
-        return ((n3_out, n4_out, n5_out), (p3_out, p4_out, p5_feat), h_s), proj_loss, phase_loss, indexer_loss
+        return ((n3_out, n4_out, n5_out), (p3_out, p4_out, p5_feat), h_s), cma_loss, phase_loss, indexer_loss

@@ -180,6 +180,14 @@ class COCOEvaluator:
                 if is_time_record:
                     nms_end = time_synchronized()
                     nms_time += nms_end - infer_end
+                if outputs is not None:
+                    for idx in range(len(outputs)):
+                        if outputs[idx] is not None and outputs[idx].shape[0] > 100:
+                            # Compute combined confidence: score = obj_conf * cls_conf
+                            conf_scores = outputs[idx][:, 4] * outputs[idx][:, 5]
+                            # Explicit descending sort guarantees the 100 highest-quality boxes are kept
+                            _, sort_indices = torch.sort(conf_scores, descending=True)
+                            outputs[idx] = outputs[idx][sort_indices[:100]]
 
             data_list_elem, image_wise_data = self.convert_to_coco_format(
                 outputs, info_imgs, ids, return_outputs=True)
