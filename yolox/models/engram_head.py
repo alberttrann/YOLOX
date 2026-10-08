@@ -182,12 +182,35 @@ class TDE_Head(YOLOXHead):
                 nn.init.zeros_(dw_smooth.bias)
             self.post_engram_dw.append(dw_smooth)
             
-            self.cls_preds.append(nn.Conv2d(feat_c, num_classes, kernel_size=1, stride=1, padding=0))
+            # cls_preds remains bias=False to prevent independent class bias drift
+            self.cls_preds.append(nn.Conv2d(feat_c, num_classes, kernel_size=1, stride=1, padding=0, bias=False))
             self.reg_preds.append(nn.Conv2d(feat_c, 4, kernel_size=1, stride=1, padding=0))
             self.obj_preds.append(nn.Conv2d(feat_c, 1, kernel_size=1, stride=1, padding=0))
 
+        # =========================================================================
+        # TDE-YOLOX v3.4: Certified Shared Scalar Prior Bias (One per scale level)
+        # Guarantees b_person - b_rider === 0 while providing the initial -4.595
+        # background suppression prior needed to stop the 13.4 loss explosion!
+        # =========================================================================
+        self.cls_biases = nn.ParameterList([
+            nn.Parameter(torch.tensor([-4.595])) for _ in range(len(in_channels))
+        ])
+
     def initialize_biases(self, prior_prob):
-        super().initialize_biases(prior_prob)
+        # 1. Initialize objectness prior bias on obj_preds (-log((1 - p) / p))
+        for conv in self.obj_preds:
+            if conv.bias is not None:
+                b = conv.bias.view(1, -1)
+                b.data.fill_(-math.log((1 - prior_prob) / prior_prob))
+                conv.bias = torch.nn.Parameter(b.view(-1), requires_grad=True)
+
+        # 2. Initialize the shared scalar bias for classification (-4.595)
+        # Applies equally to all 9 classes, guaranteeing ZERO relative bias drift!
+        prior_b = -math.log((1 - prior_prob) / prior_prob)
+        for b_param in self.cls_biases:
+            b_param.data.fill_(prior_b)
+
+        # 3. Zero-initialize regression coordinate offsets
         for conv in self.reg_preds:
             if conv.bias is not None:
                 nn.init.zeros_(conv.bias)
@@ -249,13 +272,24 @@ class TDE_Head(YOLOXHead):
             # Single Classification Dispatch: Evaluated strictly once per scale!
             # Direct Hyperspherical Prototype Logit Extraction
             B, _, H, W = cls_feat.shape
-            raw_scores_spatial = raw_scores.permute(0, 2, 1).reshape(B, self.num_classes, H, W).to(cls_feat.dtype)
+            # =========================================================================
+            # TDE-YOLOX v3.4: Bias-Equivariant Classification Dispatch
+            # =========================================================================
+            w_conv = self.cls_preds[k].weight
+            w_norm = F.normalize(w_conv.float(), p=2, dim=[1, 2, 3], eps=1e-5).to(cls_feat.dtype)
             
-            # Gated Prototype Logit Residual (Bypasses Linear Frequency Bias):
-            # When uncertainty is high in adverse weather (gate -> 0.70),
-            # the prototype score on S^127 injects directly into the logit,
-            # counteracting the learned linear bias advantage of majority classes!
-            cls_out = self.cls_preds[k](restored_feat) + 0.50 * gate * raw_scores_spatial
+            # 1. Normalized dot-product + Shared Scalar Prior Bias
+            # Shape of cls_biases[k] is [1]; broadcasts cleanly across [B, num_classes, H, W]
+            z_conv = F.conv2d(restored_feat, w_norm, bias=None, stride=1, padding=0) + self.cls_biases[k].view(1, 1, 1, 1).to(cls_feat.dtype)
+            
+            # 2. Zero-Mean Centered Prototype Logit Injection
+            raw_scores_spatial = raw_scores.permute(0, 2, 1).reshape(B, self.num_classes, H, W).to(cls_feat.dtype)
+            proto_mean = raw_scores_spatial.mean(dim=1, keepdim=True)
+            s_proto_centered = raw_scores_spatial - proto_mean
+            
+            # 3. Direct Decision-Boundary Fusion
+            cls_out = z_conv + gate * s_proto_centered
+            # =========================================================================
 
             if self.training:
                 output = torch.cat([reg_out, obj_out, cls_out], 1)
@@ -406,12 +440,23 @@ class TDE_Head(YOLOXHead):
 
         num_fg = max(num_fg, 1.0)
         
-        if self.current_epoch >= 65:
-            reg_weight = 4.0
-            nwd_weight = 0.5
+        # =========================================================================
+        # SYNCHRONIZED REGRESSION HANDOFF:
+        # At Epoch 65 (80 - 15 = 65), when Mosaic turns off and L1 activates:
+        #   - reg_weight (GIoU) scales to 5.0
+        #   - nwd_weight fades from 2.0 -> 0.25 (stops curvature conflict with L1!)
+        #   - loss_l1_weight activates at 1.0
+        # =========================================================================
+        max_epochs = getattr(self, "max_epochs", 80)
+        if self.current_epoch >= (max_epochs - 15):
+            reg_weight = 5.0
+            nwd_weight = 0.25  # Faded down to prevent curvature conflict with L1
+            loss_l1_weight = 1.0
         else:
             reg_weight = 3.0
-            nwd_weight = 2.0
+            nwd_weight = 2.0   # Active during representation phase for micro road users
+            loss_l1_weight = 0.0
+        # =========================================================================
 
         loss_giou = (self.iou_loss(bbox_preds.view(-1, 4)[fg_masks_concat], reg_targets_concat)).sum() / num_fg
         loss_nwd = (self.nwd_loss(bbox_preds.view(-1, 4)[fg_masks_concat], reg_targets_concat)).sum() / num_fg
@@ -420,7 +465,7 @@ class TDE_Head(YOLOXHead):
         loss_obj = F.binary_cross_entropy_with_logits(obj_preds_fp32, obj_targets_concat.float(), reduction="sum") / num_fg
 
         # =========================================================================
-        # TDE-YOLOX v3.3: Pure Isotropic Adaptive Focal Loss (No Static Weights)
+        # TDE-YOLOX v3.4: Certified Positive-Balanced Focal Classification Loss
         # =========================================================================
         fg_cls_preds = cls_preds.view(-1, self.num_classes)[fg_masks_concat].float()
         p_cls = torch.sigmoid(fg_cls_preds)
@@ -431,15 +476,33 @@ class TDE_Head(YOLOXHead):
         focal_factor = (1.0 - p_t_safe).pow(gamma_adapt).detach()
 
         raw_bce = F.binary_cross_entropy_with_logits(fg_cls_preds, cls_targets_concat.float(), reduction="none")
-        loss_cls = (focal_factor * raw_bce).sum() / num_fg
+        weighted_bce = focal_factor * raw_bce
+
+        pos_mask = (cls_targets_concat > 0.0).float()
+        neg_mask = 1.0 - pos_mask
+
+        # 1. Negative loss normalized globally across all num_fg
+        loss_cls_neg = (weighted_bce * neg_mask).sum() / num_fg
+
+        # 2. Positive loss balanced dynamically per active class
+        pos_bce_per_class = (weighted_bce * pos_mask).sum(dim=0)
+        class_fg_counts = cls_targets_concat.sum(dim=0)
+        active_class_mask = class_fg_counts > 0.0
+
+        if active_class_mask.any():
+            loss_cls_pos = (pos_bce_per_class[active_class_mask] / torch.clamp(class_fg_counts[active_class_mask], min=1.0)).mean()
+        else:
+            loss_cls_pos = 0.0
+
+        loss_cls = loss_cls_pos + loss_cls_neg
         # =========================================================================
-        
+
+        # Replace the old 'l1_ramp' logic with the clean loss_l1_weight multiplier:
         loss_l1 = 0.0
         if self.use_l1:
             l1_targets_concat = torch.cat(l1_targets, 0)
             raw_l1 = (self.l1_loss(origin_preds.view(-1, 4)[fg_masks_concat], l1_targets_concat)).sum() / num_fg
-            l1_ramp = min(1.0, (self.current_epoch - 65 + 1.0) / 2.0) if self.current_epoch >= 65 else 1.0
-            loss_l1 = raw_l1 * l1_ramp
+            loss_l1 = raw_l1 * loss_l1_weight
 
         total_det_loss = (reg_weight * loss_giou) + (nwd_weight * loss_nwd) + loss_obj + loss_cls + loss_l1
         

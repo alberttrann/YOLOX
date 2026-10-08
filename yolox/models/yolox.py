@@ -71,16 +71,9 @@ class YOLOX(nn.Module):
             neck_ref.p4_bqsa.set_tau(current_tau)
 
     def _get_ttt_probability(self):
-        if not self.training:
-            return 1.0
-
-        if self.current_epoch < self.warmup_end:
-            return self.prob_start
-        if self.current_epoch >= self.ramp_end:
-            return self.prob_end
-
-        progress = (self.current_epoch - self.warmup_end) / float(self.ramp_end - self.warmup_end)
-        return self.prob_start + (self.prob_end - self.prob_start) * progress
+        # 100% consistent feature distribution during both training and inference!
+        # Eliminates the bimodal feature shift between adapted and unadapted batches.
+        return 1.0
 
     def _get_indexer_loss_weight(self):
         if self.current_epoch <= 20:

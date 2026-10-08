@@ -55,9 +55,8 @@ class Exp(MyExp):
         # --- TRAINING SCHEDULE ---
         self.max_epoch = 80
         self.warmup_epochs = 10
-        # Disables Mosaic strictly during the final 30 epochs for high-precision fine-tuning!
-        self.no_aug_epochs = 30      
-        self.min_lr_ratio = 0.05
+        self.no_aug_epochs = 15    
+        self.min_lr_ratio = 0.00
         self.basic_lr_per_img = 0.01 / 64.0
         self.weight_decay = 0.0005
         self.momentum = 0.9
