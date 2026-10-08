@@ -172,7 +172,7 @@ class Trainer:
         # Track all 10 active loss components
         active_metrics = [
             "total_loss", "iou_loss", "nwd_loss", "l1_loss", "conf_loss", 
-            "cls_loss", "mem_loss", "proj_loss", "phase_loss", "idx_loss", 
+            "cls_loss", "mem_loss", "sem_loss", "proj_loss", "phase_loss", "idx_loss", 
             "rep_loss", "ttt_prob"
         ]
         for k, v in outputs.items():

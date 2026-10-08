@@ -14,6 +14,7 @@ from .tribrid_neck import (
     C2f_BQSA_P3,
     ScaleAttnRes,
 )
+from .aux_semantic_head import WeakSemanticAffordanceHead
 
 
 class YOLOPAFPN(nn.Module):
@@ -37,7 +38,10 @@ class YOLOPAFPN(nn.Module):
         super().__init__()
         self.in_features = in_features
         self.in_channels = in_channels
-
+        # Instantiate Training-Only Semantic Affordance Decoder
+        self.aux_sem_head = WeakSemanticAffordanceHead(
+            in_channels_n3=c3, in_channels_n4=c4, num_classes=9, hidden_dim=c3
+        )
         self.backbone = CSPDarknet(
             depth, width, out_features=in_features,
             depthwise=depthwise, act=act,
@@ -90,4 +94,10 @@ class YOLOPAFPN(nn.Module):
         n4_out = self.attnres_n4([p4_out, self.down_n3(n3_out), c4])
         n5_out = self.attnres_n5([p5_feat, self.down_n4(n4_out), c5])
 
-        return ((n3_out, n4_out, n5_out), (p3_out, p4_out, p5_feat), h_s), cma_loss, phase_loss, indexer_loss
+        # 4. TRAINING-ONLY WEAK SEMANTIC AFFORDANCE DECODER (Zero test-time overhead)
+        if self.training:
+            sem_pred = self.aux_sem_head(n3_out, n4_out)
+        else:
+            sem_pred = None
+
+        return ((n3_out, n4_out, n5_out), (p3_out, p4_out, p5_feat), h_s), cma_loss, phase_loss, indexer_loss, sem_pred

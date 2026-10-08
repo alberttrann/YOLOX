@@ -68,17 +68,24 @@ def fuse_tde_model(model):
     from yolox.models.network_blocks import BaseConv, BaseConvGN
 
     def recursive_fuse(module):
+        # 1. Protect Stage 1 TTT GroupNorm layers from fusion
         if isinstance(module, TTTAdaptiveStage):
             logger.info("  -> Protected: TTTAdaptiveStage (Dark2 remains unfused)")
             return module
 
+        # 2. Fold RepDW multi-branch kernels into single 3x3 depthwise convolutions
+        if hasattr(module, "switch_to_deploy") and callable(module.switch_to_deploy):
+            module.switch_to_deploy()
+            logger.info(f"  -> Folded RepDW: {type(module).__name__} converted to single 3x3 DWConv")
+
+        # 3. Standard YOLOX Conv-BN fusion for all other layers
         for name, child in module.named_children():
             if isinstance(child, BaseConv):
                 if isinstance(child.bn, nn.BatchNorm2d):
                     fused_conv = fuse_conv_bn(child.conv, child.bn)
                     child.conv = fused_conv
                     child.bn = nn.Identity()
-                    child.forward = child.fuseforward  # Direct C++ execution!
+                    child.forward = child.fuseforward
             elif isinstance(child, BaseConvGN):
                 continue
             else:

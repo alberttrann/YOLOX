@@ -12,6 +12,7 @@ from .losses import PrototypeRepulsionLoss
 from .yolo_head import YOLOXHead
 from .yolo_pafpn import YOLOPAFPN
 
+from .aux_semantic_head import GaussianOccupancyTargetGenerator, GaussianFocalLoss
 
 class YOLOX(nn.Module):
     """
@@ -41,6 +42,8 @@ class YOLOX(nn.Module):
             m_intra=0.10,
             m_inter=0.05
         )
+
+        self.sem_loss_fn = GaussianFocalLoss(alpha=2.0, beta=4.0)
 
         self.current_epoch = 0
         self.max_epochs = 80
@@ -103,8 +106,7 @@ class YOLOX(nn.Module):
         current_ttt_prob = self._get_ttt_probability()
 
         # 1. Forward through Backbone & BQSA Neck
-        # Threads epoch and max_epochs down to Stage 1 TTT for cosine step decay
-        neck_output, cma_loss, phase_loss, indexer_loss = self.backbone(
+        neck_output, cma_loss, phase_loss, indexer_loss, sem_pred = self.backbone(
             x, targets=targets, ttt_prob=current_ttt_prob,
             epoch=self.current_epoch, max_epochs=self.max_epochs
         )
@@ -131,7 +133,17 @@ class YOLOX(nn.Module):
             else:
                 total_repulse_loss = torch.tensor(0.0, device=x.device)
 
-            # 5. Master Multi-Task Loss Synthesis with Auxiliary Decay
+            # 5. Evaluate Weak Semantic Affordance Loss
+            if sem_pred is not None and targets is not None:
+                feat_size = (sem_pred.shape[-2], sem_pred.shape[-1])
+                target_heatmaps = GaussianOccupancyTargetGenerator.generate(
+                    targets, num_classes=self.num_classes, feat_size=feat_size, stride=8.0
+                )
+                raw_sem_loss = self.sem_loss_fn(sem_pred, target_heatmaps)
+            else:
+                raw_sem_loss = torch.tensor(0.0, device=x.device)
+
+            # Master Multi-Task Loss Synthesis with Auxiliary Curriculum Decay
             lambda_idx = self._get_indexer_loss_weight()
             aux_mult = self._get_aux_multiplier()
             
@@ -139,6 +151,7 @@ class YOLOX(nn.Module):
             lambda_cma = 0.10 * aux_mult
             lambda_rep = 0.01 * aux_mult
             lambda_phase = 0.05 * min(1.0, float(self.current_epoch) / 5.0) * aux_mult
+            lambda_sem = 0.10 * aux_mult  # Smoothly fades out between E30 and E65!
 
             total_loss = (
                 total_det_loss
@@ -147,6 +160,7 @@ class YOLOX(nn.Module):
                 + (lambda_idx * indexer_loss)
                 + (lambda_phase * phase_loss)
                 + (lambda_rep * total_repulse_loss)
+                + (lambda_sem * raw_sem_loss)
             )
 
             return {
@@ -158,10 +172,11 @@ class YOLOX(nn.Module):
                 "cls_loss": loss_cls,
                 "mem_loss": memory_anchor_loss,
                 "cma_loss": cma_loss,
-                "proj_loss": cma_loss,  # Backward-compatible metric alias for trainer.py
+                "proj_loss": cma_loss,
                 "phase_loss": phase_loss,
                 "idx_loss": indexer_loss,
                 "rep_loss": total_repulse_loss,
+                "sem_loss": raw_sem_loss,
                 "num_fg": num_fg_ratio,
                 "ttt_prob": current_ttt_prob
             }

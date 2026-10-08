@@ -9,6 +9,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from .network_blocks import BaseConv, Bottleneck
 from .ttt_modules import SimAM, CoordinateAttention, MBConvConditioner
+from .ttt_modules import UnifiedRCA, UnifiedRMBConv
 
 
 class RMSNorm(nn.Module):
@@ -193,9 +194,14 @@ class C2f_BQSA_P4(nn.Module):
         self.cv2 = BaseConv((2 + n) * self.c, c2, 1, 1)
         self.m = nn.ModuleList(Bottleneck(self.c, self.c, False, 1.0) for _ in range(n))
 
-        self.simam = SimAM()
-        self.ca = CoordinateAttention(self.c)
-        self.mbconv = MBConvConditioner(self.c)
+        # REPLACED OLD TRIAD:
+        # self.simam = SimAM()
+        # self.ca = CoordinateAttention(self.c)
+        # self.mbconv = MBConvConditioner(self.c)
+
+        # WITH UNIFIED MASTER ENGINE:
+        self.rca = UnifiedRCA(self.c)
+        self.rmbconv = UnifiedRMBConv(self.c)
 
         # Scale Shield: Decouples block router from Stage 1 TTT GroupNorm shifts
         self.indexer_norm = RMSNorm(self.c, eps=1e-5)
@@ -267,8 +273,8 @@ class C2f_BQSA_P4(nn.Module):
         # Dynamic Resolution-Invariant Block Budget
         k_actual = max(1, min(total_blocks, int(round(self.sparsity_ratio * float(total_blocks)))))
 
-        # 1. Tribrid Conditioning Stack
-        feat_cond = self.mbconv(self.ca(self.simam(feat)))
+        # 1. Unified Master Conditioning Stack
+        feat_cond = self.rmbconv(self.rca(feat))
 
         # 2. Dynamic Pool Gating with Learnable k_sigma Margin
         s_up = F.interpolate(p5_saliency.float(), size=(H, W), mode='nearest')
@@ -380,9 +386,14 @@ class C2f_BQSA_P3(nn.Module):
         self.cv2 = BaseConv((2 + n) * self.c, c2, 1, 1)
         self.m = nn.ModuleList(Bottleneck(self.c, self.c, False, 1.0) for _ in range(n))
 
-        self.simam = SimAM()
-        self.ca = CoordinateAttention(self.c)
-        self.mbconv = MBConvConditioner(self.c)
+        # REPLACED OLD TRIAD:
+        # self.simam = SimAM()
+        # self.ca = CoordinateAttention(self.c)
+        # self.mbconv = MBConvConditioner(self.c)
+
+        # WITH UNIFIED MASTER ENGINE:
+        self.rca = UnifiedRCA(self.c)
+        self.rmbconv = UnifiedRMBConv(self.c)
 
         self.qkv = nn.Conv2d(self.c, self.c * 3, 1)
         self.proj = nn.Conv2d(self.c, self.c, 1)
@@ -394,7 +405,7 @@ class C2f_BQSA_P3(nn.Module):
         feat = y[-1]
         B, C, H, W = feat.shape
 
-        feat_cond = self.mbconv(self.ca(self.simam(feat)))
+        feat_cond = self.rmbconv(self.rca(feat))
 
         bs = min(self.block_size, H, W)
         num_h = max(1, H // bs)
