@@ -182,7 +182,7 @@ import torch.nn.functional as F
 
 class ContrastAwareSE(nn.Module):
     """
-    Squeeze-and-Excitation using both Mean AND Standard Deviation in FP32.
+    Squeeze-and-Excitation using both Mean AND Standard Deviation.
     Detects contrast energy through dense fog/snow where spatial mean is washed out.
     """
     def __init__(self, dim, reduction=4):
@@ -199,22 +199,21 @@ class ContrastAwareSE(nn.Module):
         B, C, H, W = x.shape
         x_fp32 = x.float()
         
-        # Spatial Mean + Spatial Standard Deviation strictly in FP32
         mean = x_fp32.mean(dim=[-2, -1])
         var = torch.clamp(x_fp32.var(dim=[-2, -1], unbiased=False), min=1e-6)
         std = torch.sqrt(var)
         
-        stat = torch.cat([mean, std], dim=1)
+        # FRICTION FIX: Cast stat to x.dtype to prevent Half/Float collisions under AMP
+        stat = torch.cat([mean, std], dim=1).to(x.dtype)
         weight = self.fc(stat).view(B, C, 1, 1).to(x.dtype)
         return x * weight
 
 
 class RepDWConv(nn.Module):
     """
-    Device-Safe Structural Re-Parameterization Depthwise Convolution:
-      - Training: Multi-branch (3x3 DW + 1x1 DW + Identity) rich gradient highways.
-      - Inference: Folds into a single standalone 3x3 DWConv via switch_to_deploy().
-      - Zero extra latency at test time (0.0 ms).
+    Device-Safe Structural Re-Parameterization Depthwise Convolution.
+    Training: Multi-branch (3x3 DW + 1x1 DW + Identity).
+    Inference: Folds into a single 3x3 DWConv via switch_to_deploy() (0.0 ms overhead).
     """
     def __init__(self, channels, kernel_size=3, dilation=1):
         super().__init__()
@@ -248,9 +247,7 @@ class RepDWConv(nn.Module):
         b_1x1 = self.dw_1x1.bias.data
 
         w_fused = w_3x3.clone()
-        # Spatial center of the [C, 1, 3, 3] tensor is index [1, 1]
         w_fused[:, 0, 1, 1] += w_1x1[:, 0, 0, 0]
-        # Fuse Identity (Kronecker delta at center = 1.0)
         w_fused[:, 0, 1, 1] += 1.0
 
         b_fused = b_3x3 + b_1x1
@@ -261,7 +258,6 @@ class RepDWConv(nn.Module):
             return
         w_fused, b_fused = self.get_equivalent_kernel_bias()
 
-        # Device & Dtype Safe Initialization (Prevents CPU/CUDA runtime collision!)
         self.fused_conv = nn.Conv2d(
             self.channels, self.channels, kernel_size=3,
             padding=self.padding, dilation=self.dilation,
@@ -279,78 +275,59 @@ class RepDWConv(nn.Module):
 class UnifiedRMBConv(nn.Module):
     """
     TDE-YOLOX Master Conditioner Block:
-      - Split-Dilation Droplet Bypass: 50% d=1 (3px) + 50% d=2 (5px, samples outside droplets)
+      - Split-Dilation Droplet Bypass: 50% d=1 + 50% d=2 (samples outside droplet streaks)
       - Fused at test time into two standalone depthwise convs (0.0 ms overhead)
-      - GroupNorm + SiLU Non-Linear Cascade (kills rain/snow noise impulses)
-      - Contrast-Aware SE (Mean + Std pooling to perceive contrast through fog)
-      - LayerScale + Stochastic Depth (DropPath)
+      - Contrast-Aware SE (Mean + Std pooling)
+      - LayerScale init gamma = 0.10
     """
-    def __init__(self, dim, drop_path=0.05):
+    def __init__(self, dim):
         super().__init__()
         self.dim = dim
         self.half_dim = dim // 2
-        self.drop_path = drop_path
 
-        # 1. RepDW Split-Dilation Depthwise Convolutions
         self.rep_dw_local = RepDWConv(self.half_dim, kernel_size=3, dilation=1)
         self.rep_dw_dilated = RepDWConv(dim - self.half_dim, kernel_size=3, dilation=2)
 
         self.gn_dw = nn.GroupNorm(8 if dim % 8 == 0 else math.gcd(dim, 8), dim, eps=1e-5)
         self.act1 = nn.SiLU()
 
-        # 2. Pointwise Channel Mixer
         self.pw = nn.Conv2d(dim, dim, kernel_size=1, bias=False)
         self.gn_pw = nn.GroupNorm(8 if dim % 8 == 0 else math.gcd(dim, 8), dim, eps=1e-5)
         self.act2 = nn.SiLU()
 
-        # 3. Contrast-Aware Squeeze-and-Excitation
         self.se = ContrastAwareSE(dim, reduction=4)
-
-        # 4. LayerScale Initialization
-        self.gamma = nn.Parameter(torch.ones(1, dim, 1, 1) * 0.20)
+        self.gamma = nn.Parameter(torch.ones(1, dim, 1, 1) * 0.10)
 
     def forward(self, x):
         residual = x
 
-        # Split channels: 50% local (d=1), 50% dilated droplet-bypass (d=2)
         x1, x2 = torch.split(x, [self.half_dim, self.dim - self.half_dim], dim=1)
         dw1 = self.rep_dw_local(x1)
         dw2 = self.rep_dw_dilated(x2)
         dw_out = torch.cat([dw1, dw2], dim=1)
 
-        # Normalized non-linear filtering
         feat = self.act1(self.gn_dw(dw_out))
         feat = self.act2(self.gn_pw(self.pw(feat)))
         feat = self.se(feat)
 
-        # Stochastic Depth during training
-        if self.training and self.drop_path > 0.0:
-            keep_prob = 1.0 - self.drop_path
-            random_tensor = keep_prob + torch.rand((x.shape[0], 1, 1, 1), dtype=x.dtype, device=x.device)
-            binary_mask = torch.floor(random_tensor)
-            feat = (feat / keep_prob) * binary_mask
-
         return residual + self.gamma * feat
 
     def switch_to_deploy(self):
-        """Recursively folds RepDW branches into single 3x3 depthwise kernels."""
         self.rep_dw_local.switch_to_deploy()
         self.rep_dw_dilated.switch_to_deploy()
 
 
 class UnifiedRCA(nn.Module):
     """
-    TDE-YOLOX Master Unified Coordinate Attention:
-      - Channel SNR Booster (SIAM virtue): Attenuates uncorrelated sensor/weather noise by sqrt(C)
-      - Channel-Max Guard: Preserves single-channel small objects (e.g. traffic light bulbs)
-      - 1-D Cartesian Coordinate Localization: H-axis & W-axis directional encoding
-      - Bounded Output: Clamped strictly in [0.0, 2.0] (Zero FP16 activation overflow)
+    TDE-YOLOX Master Coordinate Attention:
+      - Channel SNR Booster + Channel-Max Guard
+      - Explicit (h, 1) and (1, w) adaptive pooling shapes
+      - Bounded, Identity-Preserving Output: 4.0 * (att_h * att_w)
     """
     def __init__(self, in_channels, reduction=32):
         super().__init__()
         mip = max(8, in_channels // reduction)
         
-        # Input channels: in_channels + 1 (concatenated channel-SNR anchor Z)
         self.conv1 = nn.Conv2d(in_channels + 1, mip, kernel_size=1)
         self.gn1 = nn.GroupNorm(8 if mip % 8 == 0 else math.gcd(mip, 8), mip, eps=1e-5)
         self.act = nn.SiLU()
@@ -361,37 +338,34 @@ class UnifiedRCA(nn.Module):
     def forward(self, x):
         identity = x
         b, c, h, w = x.shape
-        x_fp32 = x.float()
 
-        # 1. Channel-Averaged SNR Booster + Max Channel Saliency Guard
-        z_mean = torch.mean(x_fp32, dim=1, keepdim=True)
-        z_max, _ = torch.max(x_fp32, dim=1, keepdim=True)
-        z = 0.5 * z_mean + 0.5 * z_max  # [B, 1, H, W]
+        z_mean = torch.mean(x.float(), dim=1, keepdim=True).to(x.dtype)
+        z_max, _ = torch.max(x, dim=1, keepdim=True)
+        z = (0.5 * z_mean + 0.5 * z_max).to(x.dtype)
 
-        x_augmented = torch.cat([x_fp32, z], dim=1)  # [B, C+1, H, W]
+        x_augmented = torch.cat([x, z], dim=1)
 
-        # 2. HySparse2 Hybrid Max-Avg 1D Axial Pooling (Explicitly sized tuples prevent NoneType errors)
         h_avg = F.adaptive_avg_pool2d(x_augmented, (h, 1))
         h_max = F.adaptive_max_pool2d(x_augmented, (h, 1))
-        x_h = 0.5 * h_avg + 0.5 * h_max  # [B, C+1, H, 1]
+        x_h = 0.5 * h_avg + 0.5 * h_max
 
         w_avg = F.adaptive_avg_pool2d(x_augmented, (1, w)).permute(0, 1, 3, 2)
         w_max = F.adaptive_max_pool2d(x_augmented, (1, w)).permute(0, 1, 3, 2)
-        x_w = 0.5 * w_avg + 0.5 * w_max  # [B, C+1, W, 1]
+        x_w = 0.5 * w_avg + 0.5 * w_max
 
-        # 3. Non-Linear Cartesian Coordinate Compression
-        y = torch.cat([x_h, x_w], dim=2)  # [B, C+1, H+W, 1]
+        y = torch.cat([x_h, x_w], dim=2)
         y = self.act(self.gn1(self.conv1(y)))
 
-        # 4. Directional Separation & Bounded Output [0.0, 2.0]
         x_h, x_w = torch.split(y, [h, w], dim=2)
         x_w = x_w.permute(0, 1, 3, 2)
 
         att_h = torch.sigmoid(self.conv_h(x_h))
         att_w = torch.sigmoid(self.conv_w(x_w))
-        attn_gate = 2.0 * (att_h * att_w)  # Strictly bounded in [0.0, 2.0]
+        
+        # FRICTION FIX: 4.0 * (att_h * att_w) ensures exact 1.0 identity transmission at init!
+        attn_gate = 4.0 * (att_h * att_w)
 
-        return (x_fp32 * attn_gate).to(x.dtype)
+        return identity * attn_gate
     
 class SimAM(nn.Module):
     """Parameter-free Energy-based Attention. Suppresses low-contrast background noise."""

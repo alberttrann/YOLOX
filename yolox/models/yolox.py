@@ -151,7 +151,7 @@ class YOLOX(nn.Module):
             lambda_cma = 0.10 * aux_mult
             lambda_rep = 0.01 * aux_mult
             lambda_phase = 0.05 * min(1.0, float(self.current_epoch) / 5.0) * aux_mult
-            lambda_sem = 0.10 * aux_mult  # Smoothly fades out between E30 and E65!
+            lambda_sem = 0.05 * aux_mult  # Calibrated to 0.05 for balanced multi-task gradients
 
             total_loss = (
                 total_det_loss
@@ -207,7 +207,8 @@ class YOLOX(nn.Module):
         return flat_logits_fp32.sum() * 0.0
 
     def visualize(self, x, targets, save_prefix="assign_vis_"):
-        neck_output, _, _, _ = self.backbone(
+        # FRICTION FIX: Unpack safely using *_ to prevent unpack errors
+        neck_output, *_ = self.backbone(
             x, targets=targets, ttt_prob=1.0, epoch=self.max_epochs, max_epochs=self.max_epochs
         )
         self.head.visualize_assign_result(neck_output[0], targets, x, save_prefix)

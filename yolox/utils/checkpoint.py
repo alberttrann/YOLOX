@@ -37,7 +37,7 @@ def load_ckpt(model, ckpt):
     custom_layers = [
         "memory_banks", "anchor_projectors", "local_projectors", "manifold_decoders", 
         "post_engram_dw", "p5_dense_attn", "p4_bqsa", "p3_bqsa", "projector", "ttt_lrs",
-        "down_n3", "down_n4"  # Scale-AttnRes channel-doubling downsamplers
+        "down_n3", "down_n4", "aux_sem_head", "cls_biases"  # Scale-AttnRes channel-doubling downsamplers
     ]
 
     # Only lateral_c5 and reduce_p4 share identical tensor dimensions with standard YOLOX
