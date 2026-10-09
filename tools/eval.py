@@ -139,7 +139,13 @@ def main(exp, args, num_gpu):
 
     exp.test_conf = args.conf
     exp.nmsthre = args.nms
-    exp.test_size = (args.tsize, args.tsize)
+
+    # FIX: Preserve native rectangular test_size (e.g. (576, 1024))
+    # Only force a square if the user explicitly provided an override via --tsize
+    if args.tsize != 640 or isinstance(exp.test_size, int):
+        exp.test_size = (args.tsize, args.tsize)
+        
+    logger.info(f"TDE-YOLOX Evaluation Resolution: {exp.test_size} (H, W)")
 
     model = exp.get_model()
 

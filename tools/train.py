@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding:utf-8 -*-
 # Copyright (c) Megvii, Inc. and its affiliates.
-
+import cv2
+cv2.setNumThreads(0)
+cv2.ocl.setUseOpenCL(False)
 import argparse
 import random
 import warnings
