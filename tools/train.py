@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding:utf-8 -*-
 # Copyright (c) Megvii, Inc. and its affiliates.
-
+import cv2
+# CRITICAL FOR WINDOWS: Prevents 0xC0000005 Access Violation
+cv2.setNumThreads(0)
+cv2.ocl.setUseOpenCL(False)
 import argparse
 import random
 import warnings

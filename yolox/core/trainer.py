@@ -186,9 +186,17 @@ class Trainer:
 
     def after_iter(self):
         if (self.iter + 1) % self.exp.print_interval == 0:
-            curr_lr = self.optimizer.param_groups[0]['lr']
+            if len(self.optimizer.param_groups) > 1:
+                curr_lr = self.optimizer.param_groups[1]['lr']
+            else:
+                curr_lr = self.optimizer.param_groups[0]['lr']
+                
             left_iters = self.max_iter - self.iter - 1
             avg_time = self.meter["iter_time"].global_avg if "iter_time" in self.meter else 0
+            
+            # Extract data prefetch time
+            avg_data_time = self.meter["data_time"].avg if "data_time" in self.meter else 0
+            
             eta_seconds = avg_time * left_iters
             eta_str = "ETA: {}".format(datetime.timedelta(seconds=int(eta_seconds)))
 
@@ -199,9 +207,10 @@ class Trainer:
             loss_meter = self.meter.get_filtered_meter("loss")
             loss_str = ", ".join(["{}: {:.3f}".format(k, v.avg) for k, v in loss_meter.items()])
 
+            # Print data_time directly to verify zero starvation
             logger.info(
-                "{}, mem: {:.0f}Mb, {}, {}, lr: {:.3e}".format(
-                    progress_str, gpu_mem_usage(), eta_str, loss_str, curr_lr
+                "{}, mem: {:.0f}Mb, {}, data_time: {:.3f}s, {}, lr: {:.3e}".format(
+                    progress_str, gpu_mem_usage(), eta_str, avg_data_time, loss_str, curr_lr
                 )
             )
 
@@ -303,9 +312,11 @@ class Trainer:
         logger.info("---> start train epoch{}".format(self.epoch + 1))
 
         if self.epoch + 1 == self.max_epoch - self.exp.no_aug_epochs or self.no_aug:
-            logger.info("--->No mosaic aug now!")
+            logger.info("---> No mosaic aug now!")
             self.train_loader.close_mosaic()
-            logger.info("--->Add additional L1 loss now!")
+            logger.info("---> Locking resolution to native input_size and enabling L1 loss!")
+            # Reset resolution cleanly to native (576, 1024) for the pure refinement phase
+            self.input_size = self.exp.input_size
             if self.is_distributed:
                 self.model.module.head.use_l1 = True
             else:
@@ -327,7 +338,15 @@ class Trainer:
         synchronize()
 
     def before_iter(self):
-        pass
+        # FIX: Activate dynamic Rule-of-64 multiscale resizing every 10 iterations
+        if (
+            not self.no_aug
+            and getattr(self.exp, "multiscale_range", 0) > 0
+            and (self.progress_in_iter + 1) % 10 == 0
+        ):
+            self.input_size = self.exp.random_resize(
+                self.train_loader, self.epoch, self.rank, self.is_distributed
+            )
 
     @property
     def progress_in_iter(self):
@@ -397,19 +416,31 @@ class Trainer:
         return model
 
     def evaluate_and_save_model(self):
+        import gc
+        # Force garbage collection to free training loop memory before evaluating
+        gc.collect()
+        torch.cuda.empty_cache()
+
         if self.use_model_ema:
             evalmodel = self.ema_model.ema
         else:
             evalmodel = self.model
 
-        # Universal parallel model unwrapping for both live models and EMA models
         if is_parallel(evalmodel):
             evalmodel = evalmodel.module
 
+        # FIX: Only return the massive 400,000-box dictionary if actively using wandb
+        need_outputs = (getattr(self.args, "logger", None) == "wandb")
+
         with adjust_status(evalmodel, training=False):
-            (ap50_95, ap50, summary), predictions = self.exp.eval(
-                evalmodel, self.evaluator, self.is_distributed, return_outputs=True
+            eval_res = self.exp.eval(
+                evalmodel, self.evaluator, self.is_distributed, return_outputs=need_outputs
             )
+            if need_outputs:
+                (ap50_95, ap50, summary), predictions = eval_res
+            else:
+                ap50_95, ap50, summary = eval_res
+                predictions = None
 
         update_best_ckpt = ap50_95 > self.best_ap
         self.best_ap = max(self.best_ap, ap50_95)
@@ -419,7 +450,7 @@ class Trainer:
             if self.args.logger == "tensorboard":
                 self.tblogger.add_scalar("val/COCOAP50", ap50, self.epoch + 1)
                 self.tblogger.add_scalar("val/COCOAP50_95", ap50_95, self.epoch + 1)
-            if self.args.logger == "wandb":
+            if self.args.logger == "wandb" and predictions is not None:
                 self.wandb_logger.log_metrics({
                     "val/COCOAP50": ap50,
                     "val/COCOAP50_95": ap50_95,
@@ -432,6 +463,10 @@ class Trainer:
         self.save_ckpt("last_epoch", update_best_ckpt, ap=ap50_95)
         if self.save_history_ckpt:
             self.save_ckpt(f"epoch_{self.epoch + 1}", ap=ap50_95)
+
+        # Free evaluation objects from RAM immediately
+        gc.collect()
+        torch.cuda.empty_cache()
 
     def save_ckpt(self, ckpt_name, update_best_ckpt=False, ap=None):
         if self.rank == 0:
