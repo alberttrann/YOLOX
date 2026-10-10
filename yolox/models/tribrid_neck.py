@@ -176,12 +176,10 @@ class P5ExclusiveDenseAttention(nn.Module):
 
 class C2f_BQSA_P4(nn.Module):
     """
-    P4 Block-Quantized Sparse Attention with:
-      - HySparse2 Hybrid Max-Avg Saliency Pooling
-      - Dynamic Scale-Invariant Sparsity Ratio (rho = 0.25)
-      - CUDA-Asynchronous Adaptive Temperature
-      - Learnable Pruning Margin (k_sigma)
-      - Pre-Indexer RMSNorm Scale Shield
+    TDE-YOLOX v3.5 Master BQSA P4:
+      - Dynamic Scene-Adaptive Sparsity rho(h_s) driven by P5 Shannon Attention Entropy
+      - Quad-Ambient Key/Value Tokens (2x2 grid) with RMS Energy Alignment
+      - Zero blind spots: eliminates the 25% information blackout cliff
     """
     def __init__(self, c1, c2, n=1, block_size=4, sparsity_ratio=0.25):
         super().__init__()
@@ -194,26 +192,17 @@ class C2f_BQSA_P4(nn.Module):
         self.cv2 = BaseConv((2 + n) * self.c, c2, 1, 1)
         self.m = nn.ModuleList(Bottleneck(self.c, self.c, False, 1.0) for _ in range(n))
 
-        # REPLACED OLD TRIAD:
-        # self.simam = SimAM()
-        # self.ca = CoordinateAttention(self.c)
-        # self.mbconv = MBConvConditioner(self.c)
-
-        # WITH UNIFIED MASTER ENGINE:
+        # Unified v3.4 Conditioning Engine
         self.rca = UnifiedRCA(self.c)
         self.rmbconv = UnifiedRMBConv(self.c)
 
-        # Scale Shield: Decouples block router from Stage 1 TTT GroupNorm shifts
         self.indexer_norm = RMSNorm(self.c, eps=1e-5)
         self.indexer = nn.Sequential(
             nn.Conv2d(self.c, self.c, 3, padding=1, groups=self.c),
             nn.Conv2d(self.c, 1, 1)
         )
 
-        # Learnable Convex Saliency Blend Parameter (sigmoid(0.0) = 0.50 initialization)
         self.pool_alpha = nn.Parameter(torch.tensor(0.0))
-
-        # Learnable Confidence Pruning Boundary (softplus(2.0) ~ 2.12 initialization)
         self.k_sigma = nn.Parameter(torch.tensor(2.0))
 
         self.qkv = nn.Conv2d(self.c, self.c * 3, 1)
@@ -235,17 +224,12 @@ class C2f_BQSA_P4(nn.Module):
                 continue
 
             valid_boxes = img_labels[valid_mask]
-            xc = valid_boxes[:, 1]
-            yc = valid_boxes[:, 2]
-            w  = valid_boxes[:, 3]
-            h  = valid_boxes[:, 4]
+            xc, yc = valid_boxes[:, 1], valid_boxes[:, 2]
+            w, h   = valid_boxes[:, 3], valid_boxes[:, 4]
 
-            x1 = xc - w / 2.0
-            y1 = yc - h / 2.0
-            x2 = xc + w / 2.0
-            y2 = yc + h / 2.0
+            x1, y1 = xc - w / 2.0, yc - h / 2.0
+            x2, y2 = xc + w / 2.0, yc + h / 2.0
 
-            # Dynamic block receptive field footprint in input pixels: 16 stride * 4 block = 64px
             c_min = torch.clamp((x1 / 64.0).floor().long(), 0, num_w - 1)
             c_max = torch.clamp(((x2 - 1e-4) / 64.0).floor().long(), 0, num_w - 1)
             c_max = torch.max(c_max, c_min)
@@ -269,14 +253,19 @@ class C2f_BQSA_P4(nn.Module):
         num_h = max(1, H // bs)
         num_w = max(1, W // bs)
         total_blocks = num_h * num_w
-        
-        # Dynamic Resolution-Invariant Block Budget
-        k_actual = max(1, min(total_blocks, int(round(self.sparsity_ratio * float(total_blocks)))))
+        tokens_per_b = bs * bs
 
-        # 1. Unified Master Conditioning Stack
+        # 1. DYNAMIC SCENE-ADAPTIVE SPARSITY BUDGET rho(h_s)
+        # Bounded in [0.18, 0.35] around the baseline 0.25
+        h_max = math.log(max(2, total_blocks))
+        h_ratio = torch.clamp(h_s.float() / h_max, 0.0, 1.0)
+        rho_dynamic = torch.clamp(0.18 + 0.17 * h_ratio, min=0.18, max=0.35).item()
+        k_actual = max(1, min(total_blocks, int(round(rho_dynamic * float(total_blocks)))))
+
+        # 2. Master Feature Conditioning
         feat_cond = self.rmbconv(self.rca(feat))
 
-        # 2. Dynamic Pool Gating with Learnable k_sigma Margin
+        # 3. Dynamic Saliency Pool Gating
         s_up = F.interpolate(p5_saliency.float(), size=(H, W), mode='nearest')
         block_saliency = F.avg_pool2d(s_up, kernel_size=bs, stride=bs).view(B, -1)
 
@@ -284,41 +273,31 @@ class C2f_BQSA_P4(nn.Module):
         var_s = torch.clamp(torch.var(block_saliency, dim=-1, keepdim=True, unbiased=False), min=1e-8)
         sigma_s = torch.sqrt(var_s) + 1e-5
         
-        h_ratio = torch.clamp(h_s.float() / math.log(max(2, total_blocks)), 0.0, 1.0)
         k_sig = torch.clamp(F.softplus(self.k_sigma), min=0.5, max=3.5)
         tau_pool = torch.clamp(mu_s - k_sig * h_ratio * sigma_s, min=0.0)
         pool_mask = (block_saliency >= tau_pool).to(feat.dtype)
 
-        # Guaranteed Minimum 1-Block Law Fallback
         empty_mask = (pool_mask.sum(dim=-1, keepdim=True) == 0)
         if empty_mask.any():
             top1_fallback = torch.zeros_like(pool_mask).scatter_(-1, block_saliency.argmax(dim=-1, keepdim=True), 1.0)
             pool_mask = torch.where(empty_mask, top1_fallback, pool_mask)
 
-        # 3. HYSPARSE2 HYBRID MAX-AVG SALIENCY POOLING WITH LEARNABLE CONVEX BLEND
+        # 4. Hybrid Saliency Scoring & Gumbel Selection
         scores = self.indexer(self.indexer_norm(feat_cond))
         scores_avg = F.avg_pool2d(scores, kernel_size=bs, stride=bs).view(B, -1)
         scores_max = F.max_pool2d(scores, kernel_size=bs, stride=bs).view(B, -1)
         
         alpha = torch.sigmoid(self.pool_alpha)
         block_scores = alpha * scores_max + (1.0 - alpha) * scores_avg
-
-        # Guarded Masked Scores with -500.0 Floor
         masked_scores_fp32 = block_scores.float() * pool_mask.float() - (1.0 - pool_mask.float()) * 500.0
 
         if self.training:
             u = torch.rand_like(masked_scores_fp32, dtype=torch.float32)
             gumbel = -torch.log(-torch.log(u + 1e-7) + 1e-7)
-
-            # HySparse2 CUDA-Asynchronous Adaptive Temperature
             tau_adaptive = torch.clamp(self.tau * (1.0 - 0.35 * h_ratio), min=0.10)
-
-            soft_scores = F.softmax(
-                (masked_scores_fp32 + gumbel) / tau_adaptive, dim=-1
-            ).to(feat.dtype)
+            soft_scores = F.softmax((masked_scores_fp32 + gumbel) / tau_adaptive, dim=-1).to(feat.dtype)
 
             _, topk_idx = torch.topk(soft_scores, k_actual, dim=-1)
-
             hard_mask = torch.zeros_like(soft_scores).scatter_(-1, topk_idx, 1.0)
             ste_mask = (hard_mask - soft_scores).detach() + soft_scores
             ste_weights = torch.gather(ste_mask, -1, topk_idx).unsqueeze(-1).unsqueeze(-1)
@@ -326,11 +305,10 @@ class C2f_BQSA_P4(nn.Module):
             _, topk_idx = torch.topk(masked_scores_fp32, k_actual, dim=-1)
             ste_weights = 1.0
 
-        # 4. Sparse Cross-Attention strictly in FP32
+        # 5. Extract Q, K, V
         qkv = self.qkv(feat_cond).view(B, 3, C, H, W)
         q, k, v = qkv[:, 0], qkv[:, 1], qkv[:, 2]
 
-        tokens_per_b = bs * bs
         k_b = k.view(B, C, num_h, bs, num_w, bs).permute(0, 2, 4, 1, 3, 5).reshape(B, total_blocks, C, tokens_per_b)
         v_b = v.view(B, C, num_h, bs, num_w, bs).permute(0, 2, 4, 1, 3, 5).reshape(B, total_blocks, C, tokens_per_b)
 
@@ -339,23 +317,40 @@ class C2f_BQSA_P4(nn.Module):
         v_sel = torch.gather(v_b, 1, idx_exp) * ste_weights
         v_sel = v_sel.permute(0, 2, 1, 3).reshape(B, C, k_actual * tokens_per_b)
 
-        q_flat = q.reshape(B, C, H * W)
+        # 6. QUAD-AMBIENT KEY/VALUE INJECTION (2x2 Grid with RMS Energy Matching)
+        # Extracts 4 spatial quadrant tokens: Top-Left, Top-Right, Bottom-Left, Bottom-Right
+        k_quad = F.adaptive_avg_pool2d(k, (2, 2)).view(B, C, 4)
+        v_quad = F.adaptive_avg_pool2d(v, (2, 2)).view(B, C, 4)
 
-        # Full FP32 QK and Value Aggregation
+        # RMS Energy Alignment prevents variance collapse in ambient tokens
+        rms_k_loc = torch.sqrt(k_sel.float().pow(2).mean(dim=[1, 2], keepdim=True) + 1e-5)
+        rms_k_amb = torch.sqrt(k_quad.float().pow(2).mean(dim=[1, 2], keepdim=True) + 1e-5)
+        k_quad_scaled = (k_quad.float() * torch.clamp(rms_k_loc / rms_k_amb, 0.1, 10.0)).to(k.dtype)
+
+        rms_v_loc = torch.sqrt(v_sel.float().pow(2).mean(dim=[1, 2], keepdim=True) + 1e-5)
+        rms_v_amb = torch.sqrt(v_quad.float().pow(2).mean(dim=[1, 2], keepdim=True) + 1e-5)
+        v_quad_scaled = (v_quad.float() * torch.clamp(rms_v_loc / rms_v_amb, 0.1, 10.0)).to(v.dtype)
+
+        # Append Quad-Ambient tokens to sparse Keys and Values
+        k_all = torch.cat([k_sel, k_quad_scaled], dim=-1)  # [B, C, (k_actual * tokens_per_b) + 4]
+        v_all = torch.cat([v_sel, v_quad_scaled], dim=-1)
+
+        # 7. Dense Queries Attend to [Sparse + Quad-Ambient] Keys/Values
+        q_flat = q.reshape(B, C, H * W)
         q_fp32 = q_flat.transpose(-2, -1).float()
-        k_fp32 = k_sel.float()
+        k_fp32 = k_all.float()
         attn_fp32 = torch.matmul(q_fp32, k_fp32) * (C ** -0.5)
         attn_fp32 = F.softmax(attn_fp32, dim=-1)
 
         context = torch.matmul(
-            v_sel.float(), attn_fp32.transpose(-2, -1)
-        ).to(v_sel.dtype).reshape(B, C, H, W)
+            v_all.float(), attn_fp32.transpose(-2, -1)
+        ).to(v_all.dtype).reshape(B, C, H, W)
 
         gate = torch.sigmoid(self.gr_gate)
         y[-1] = y[-1] + gate * self.proj(context)
         p4_out = self.cv2(torch.cat(y, 1))
 
-        # 5. Auxiliary Focal Loss evaluated in FP32
+        # 8. Auxiliary Focal Loss
         indexer_loss = torch.tensor(0.0, device=x.device)
         if self.training and targets is not None:
             f_target = self._rasterize_gt_blocks(targets, B, num_h, num_w, x.device)
@@ -412,10 +407,8 @@ class C2f_BQSA_P3(nn.Module):
         num_w = max(1, W // bs)
         total_blocks = num_h * num_w
         tokens_per_b = bs * bs
-        
-        # Dynamic Resolution-Invariant Block Budget
-        k_target = max(1, min(total_blocks, int(round(self.sparsity_ratio * float(total_blocks)))))
-        k_actual = min(k_target, inherited_topk_idx.shape[1], total_blocks)
+
+        k_actual = min(inherited_topk_idx.shape[1], total_blocks)
 
         qkv = self.qkv(feat_cond).view(B, 3, C, H, W)
         q, k, v = qkv[:, 0], qkv[:, 1], qkv[:, 2]
