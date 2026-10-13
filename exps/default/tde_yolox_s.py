@@ -64,8 +64,8 @@ class Exp(MyExp):
         self.warmup_epochs = 10
         self.no_aug_epochs = 15    
         
-        # FIX: Restore 5% learning rate floor (prevents freezing at LR=0.0 during Epochs 66-80)
-        self.min_lr_ratio = 0.05
+        # FIX: Keep learning rate floor at 10% (retains ~0.00025 step size during Epochs 65-80)
+        self.min_lr_ratio = 0.10  # Raised from 0.05
         
         self.basic_lr_per_img = 0.01 / 64.0
         self.weight_decay = 0.0005

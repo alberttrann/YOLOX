@@ -21,8 +21,8 @@ class Exp(MyExp):
         self.data_dir = r"D:\ACDC\rgb_anon" 
         self.val_ann = r"D:\YOLOX-3rd\acdc_labels\acdc_snow_bdd.json"
         self.test_ann = r"D:\YOLOX-3rd\acdc_labels\acdc_snow_bdd.json"
-        self.test_size = (640, 640) # STRICT CONSISTENCY
-        self.input_size = (640, 640)
+        self.input_size = (576, 1024)   # (Height, Width)
+        self.test_size = (576, 1024)
         
         # --- e1->e72 ---
         """

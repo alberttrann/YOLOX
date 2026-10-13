@@ -21,8 +21,8 @@ class Exp(MyExp):
         self.data_dir = r"D:\Self Driving Car.v3-fixed-small.coco\export"
         self.val_ann = r"D:\YOLOX-3RD\udacity_small_bdd_compatible.json"
         self.test_ann = r"D:\YOLOX-3RD\udacity_small_bdd_compatible.json"
-        self.test_size = (640, 640) # STRICT CONSISTENCY
-        self.input_size = (640, 640)
+        self.input_size = (576, 1024)   # (Height, Width)
+        self.test_size = (576, 1024)
         
         # --- e1->e72 ---
         """

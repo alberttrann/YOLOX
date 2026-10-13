@@ -86,13 +86,12 @@ class YOLOX(nn.Module):
 
     def _get_aux_multiplier(self):
         """
-        Auxiliary Loss Decay Multiplier (Curriculum Gating).
-        Gradually fades auxiliary representation constraints from Epoch 30 to 65
-        so the network focuses 100% of gradient bandwidth on sub-pixel detection precision.
+        Extends auxiliary regularization to maintain prototype separation into Epoch 55-70.
+        Prevents premature feature freeze before Mosaic is disabled.
         """
-        decay_start = 30
-        decay_end = 65
-        min_ratio = 0.10
+        decay_start = 50   # Shifted from 30
+        decay_end = 70     # Shifted from 65
+        min_ratio = 0.15   # Raised from 0.10 to prevent prototype collapse
         
         if self.current_epoch < decay_start:
             return 1.0

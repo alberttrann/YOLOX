@@ -177,9 +177,10 @@ class P5ExclusiveDenseAttention(nn.Module):
 class C2f_BQSA_P4(nn.Module):
     """
     TDE-YOLOX v3.5 Master BQSA P4:
-      - Dynamic Scene-Adaptive Sparsity rho(h_s) driven by P5 Shannon Attention Entropy
+      - Unified RCA + RMBConv Conditioning Engine
+      - Fixed K in Training (zero gradient jitter, zero DDP sync overhead)
+      - Elastic Scene-Adaptive Sparsity rho(h_s) in Inference
       - Quad-Ambient Key/Value Tokens (2x2 grid) with RMS Energy Alignment
-      - Zero blind spots: eliminates the 25% information blackout cliff
     """
     def __init__(self, c1, c2, n=1, block_size=4, sparsity_ratio=0.25):
         super().__init__()
@@ -192,7 +193,7 @@ class C2f_BQSA_P4(nn.Module):
         self.cv2 = BaseConv((2 + n) * self.c, c2, 1, 1)
         self.m = nn.ModuleList(Bottleneck(self.c, self.c, False, 1.0) for _ in range(n))
 
-        # Unified v3.4 Conditioning Engine
+        # v3.4 Master Conditioning Engine
         self.rca = UnifiedRCA(self.c)
         self.rmbconv = UnifiedRMBConv(self.c)
 
@@ -255,14 +256,16 @@ class C2f_BQSA_P4(nn.Module):
         total_blocks = num_h * num_w
         tokens_per_b = bs * bs
 
-        # 1. DYNAMIC SCENE-ADAPTIVE SPARSITY BUDGET rho(h_s)
-        # Bounded in [0.18, 0.35] around the baseline 0.25
-        h_max = math.log(max(2, total_blocks))
-        h_ratio = torch.clamp(h_s.float() / h_max, 0.0, 1.0)
-        rho_dynamic = torch.clamp(0.18 + 0.17 * h_ratio, min=0.18, max=0.35).item()
-        k_actual = max(1, min(total_blocks, int(round(rho_dynamic * float(total_blocks)))))
+        # 1. FIXED K IN TRAINING VS ELASTIC IN INFERENCE
+        if self.training:
+            k_actual = max(1, min(total_blocks, int(round(self.sparsity_ratio * float(total_blocks)))))
+        else:
+            h_max = math.log(max(2, total_blocks))
+            h_ratio = torch.clamp(h_s.float() / h_max, 0.0, 1.0)
+            rho_dynamic = torch.clamp(0.18 + 0.17 * h_ratio, min=0.18, max=0.35).item()
+            k_actual = max(1, min(total_blocks, int(round(rho_dynamic * float(total_blocks)))))
 
-        # 2. Master Feature Conditioning
+        # 2. Master Feature Conditioning (Unified v3.4 Engine)
         feat_cond = self.rmbconv(self.rca(feat))
 
         # 3. Dynamic Saliency Pool Gating
@@ -273,8 +276,9 @@ class C2f_BQSA_P4(nn.Module):
         var_s = torch.clamp(torch.var(block_saliency, dim=-1, keepdim=True, unbiased=False), min=1e-8)
         sigma_s = torch.sqrt(var_s) + 1e-5
         
+        h_ratio_stat = torch.clamp(h_s.float() / math.log(max(2, total_blocks)), 0.0, 1.0)
         k_sig = torch.clamp(F.softplus(self.k_sigma), min=0.5, max=3.5)
-        tau_pool = torch.clamp(mu_s - k_sig * h_ratio * sigma_s, min=0.0)
+        tau_pool = torch.clamp(mu_s - k_sig * h_ratio_stat * sigma_s, min=0.0)
         pool_mask = (block_saliency >= tau_pool).to(feat.dtype)
 
         empty_mask = (pool_mask.sum(dim=-1, keepdim=True) == 0)
@@ -294,7 +298,7 @@ class C2f_BQSA_P4(nn.Module):
         if self.training:
             u = torch.rand_like(masked_scores_fp32, dtype=torch.float32)
             gumbel = -torch.log(-torch.log(u + 1e-7) + 1e-7)
-            tau_adaptive = torch.clamp(self.tau * (1.0 - 0.35 * h_ratio), min=0.10)
+            tau_adaptive = torch.clamp(self.tau * (1.0 - 0.35 * h_ratio_stat), min=0.10)
             soft_scores = F.softmax((masked_scores_fp32 + gumbel) / tau_adaptive, dim=-1).to(feat.dtype)
 
             _, topk_idx = torch.topk(soft_scores, k_actual, dim=-1)
@@ -317,12 +321,10 @@ class C2f_BQSA_P4(nn.Module):
         v_sel = torch.gather(v_b, 1, idx_exp) * ste_weights
         v_sel = v_sel.permute(0, 2, 1, 3).reshape(B, C, k_actual * tokens_per_b)
 
-        # 6. QUAD-AMBIENT KEY/VALUE INJECTION (2x2 Grid with RMS Energy Matching)
-        # Extracts 4 spatial quadrant tokens: Top-Left, Top-Right, Bottom-Left, Bottom-Right
+        # 6. Quad-Ambient Key/Value Tokens (2x2 Grid with RMS Energy Matching)
         k_quad = F.adaptive_avg_pool2d(k, (2, 2)).view(B, C, 4)
         v_quad = F.adaptive_avg_pool2d(v, (2, 2)).view(B, C, 4)
 
-        # RMS Energy Alignment prevents variance collapse in ambient tokens
         rms_k_loc = torch.sqrt(k_sel.float().pow(2).mean(dim=[1, 2], keepdim=True) + 1e-5)
         rms_k_amb = torch.sqrt(k_quad.float().pow(2).mean(dim=[1, 2], keepdim=True) + 1e-5)
         k_quad_scaled = (k_quad.float() * torch.clamp(rms_k_loc / rms_k_amb, 0.1, 10.0)).to(k.dtype)
@@ -331,8 +333,7 @@ class C2f_BQSA_P4(nn.Module):
         rms_v_amb = torch.sqrt(v_quad.float().pow(2).mean(dim=[1, 2], keepdim=True) + 1e-5)
         v_quad_scaled = (v_quad.float() * torch.clamp(rms_v_loc / rms_v_amb, 0.1, 10.0)).to(v.dtype)
 
-        # Append Quad-Ambient tokens to sparse Keys and Values
-        k_all = torch.cat([k_sel, k_quad_scaled], dim=-1)  # [B, C, (k_actual * tokens_per_b) + 4]
+        k_all = torch.cat([k_sel, k_quad_scaled], dim=-1)
         v_all = torch.cat([v_sel, v_quad_scaled], dim=-1)
 
         # 7. Dense Queries Attend to [Sparse + Quad-Ambient] Keys/Values
@@ -366,10 +367,10 @@ class C2f_BQSA_P4(nn.Module):
 
 class C2f_BQSA_P3(nn.Module):
     """
-    P3 Block-Quantized Sparse Attention with:
-      - Dense Ambient Context Broadcast (eliminates macro-object feature bisecting)
-      - Dynamic Scale-Invariant Sparsity Ratio (rho = 0.25)
-      - High-Resolution Sub-Pixel Feature Alignment
+    TDE-YOLOX v3.5 Master BQSA P3:
+      - Synchronized Dynamic Budget Inheritance (Zero Truncation Cap)
+      - Unified RCA + RMBConv Conditioning Engine
+      - Dense Ambient Context Canvas Broadcast
     """
     def __init__(self, c1, c2, n=1, block_size=8, sparsity_ratio=0.25):
         super().__init__()
@@ -381,12 +382,7 @@ class C2f_BQSA_P3(nn.Module):
         self.cv2 = BaseConv((2 + n) * self.c, c2, 1, 1)
         self.m = nn.ModuleList(Bottleneck(self.c, self.c, False, 1.0) for _ in range(n))
 
-        # REPLACED OLD TRIAD:
-        # self.simam = SimAM()
-        # self.ca = CoordinateAttention(self.c)
-        # self.mbconv = MBConvConditioner(self.c)
-
-        # WITH UNIFIED MASTER ENGINE:
+        # v3.4 Master Conditioning Engine
         self.rca = UnifiedRCA(self.c)
         self.rmbconv = UnifiedRMBConv(self.c)
 
@@ -408,6 +404,8 @@ class C2f_BQSA_P3(nn.Module):
         total_blocks = num_h * num_w
         tokens_per_b = bs * bs
 
+        # SYNCHRONIZED BUDGET INHERITANCE:
+        # P3 honors P4's exact dynamic block count without the 0.25 truncation cap!
         k_actual = min(inherited_topk_idx.shape[1], total_blocks)
 
         qkv = self.qkv(feat_cond).view(B, 3, C, H, W)
@@ -428,7 +426,6 @@ class C2f_BQSA_P3(nn.Module):
         k_loc = k_sel.reshape(B * k_actual, C, tokens_per_b)
         v_loc = v_sel.permute(0, 1, 3, 2).reshape(B * k_actual, tokens_per_b, C)
 
-        # Full FP32 QK and Value Aggregation
         q_fp32 = q_loc.float()
         k_fp32 = k_loc.float()
         attn_fp32 = torch.bmm(q_fp32, k_fp32) * (C ** -0.5)
@@ -438,29 +435,18 @@ class C2f_BQSA_P3(nn.Module):
             attn_fp32, v_loc.float()
         ).to(v_loc.dtype).reshape(B, k_actual, tokens_per_b, C)
 
-        # =========================================================================
-        # DENSE AMBIENT CONTEXT BROADCAST WITH EXACT RMS ENERGY MATCHING
-        # =========================================================================
-        # 1. Global summary token per image: [B, C, 1, 1]
         z_global = F.adaptive_avg_pool2d(feat_cond, (1, 1))
-
-        # 2. Global RMS energy matching scalar: mean across channels AND spatial dims [B, 1, 1, 1]
         rms_feat = torch.sqrt(feat_cond.float().pow(2).mean(dim=[1, 2, 3], keepdim=True) + 1e-5)
         rms_glob = torch.sqrt(z_global.float().pow(2).mean(dim=[1, 2, 3], keepdim=True) + 1e-5)
         scale_glob = torch.clamp(rms_feat / rms_glob, min=0.10, max=10.0).to(feat_cond.dtype)
-        z_global_scaled = z_global * scale_glob  # Strictly [B, C, 1, 1]
+        z_global_scaled = z_global * scale_glob
 
-        # 3. Ambient Canvas initialization: [B, total_blocks, C * tokens_per_b]
-        # Expand [B, C, 1] across tokens_per_b (64) to form [B, 1, C * 64]
         z_token = z_global_scaled.view(B, C, 1).expand(-1, -1, tokens_per_b).reshape(B, 1, C * tokens_per_b)
-        # Allocate exactly [B, total_blocks, C * tokens_per_b] = [16, 100, 4096] (Zero memory bloat!)
         out_flat = z_token.expand(-1, total_blocks, -1).clone()
 
-        # 4. Overwrite Top-K blocks with fine-grained local self-attention
         idx_flat = valid_idx.unsqueeze(-1).expand(-1, -1, C * tokens_per_b)
         ctx_flat = ctx_loc.permute(0, 1, 3, 2).reshape(B, k_actual, C * tokens_per_b)
         out_flat.scatter_(1, idx_flat, ctx_flat)
-        # =========================================================================
 
         context = out_flat.reshape(B, num_h, num_w, C, bs, bs).permute(0, 3, 1, 4, 2, 5).reshape(B, C, H, W)
 

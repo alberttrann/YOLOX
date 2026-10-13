@@ -182,8 +182,11 @@ class TDE_Head(YOLOXHead):
                 nn.init.zeros_(dw_smooth.bias)
             self.post_engram_dw.append(dw_smooth)
             
-            # cls_preds remains bias=False to prevent independent class bias drift
-            self.cls_preds.append(nn.Conv2d(feat_c, num_classes, kernel_size=1, stride=1, padding=0, bias=False))
+            # 1. In TDE_Head.__init__:
+            # Standard unconstrained linear classification heads with independent biases
+            self.cls_preds.append(
+                nn.Conv2d(feat_c, num_classes, kernel_size=1, stride=1, padding=0, bias=True)
+            )
             self.reg_preds.append(nn.Conv2d(feat_c, 4, kernel_size=1, stride=1, padding=0))
             self.obj_preds.append(nn.Conv2d(feat_c, 1, kernel_size=1, stride=1, padding=0))
 
@@ -196,21 +199,25 @@ class TDE_Head(YOLOXHead):
             nn.Parameter(torch.tensor([-4.595])) for _ in range(len(in_channels))
         ])
 
+    # 2. In TDE_Head.initialize_biases:
     def initialize_biases(self, prior_prob):
-        # 1. Initialize objectness prior bias on obj_preds (-log((1 - p) / p))
+        # Initialize objectness prior bias
         for conv in self.obj_preds:
             if conv.bias is not None:
                 b = conv.bias.view(1, -1)
                 b.data.fill_(-math.log((1 - prior_prob) / prior_prob))
                 conv.bias = torch.nn.Parameter(b.view(-1), requires_grad=True)
 
-        # 2. Initialize the shared scalar bias for classification (-4.595)
-        # Applies equally to all 9 classes, guaranteeing ZERO relative bias drift!
+        # Initialize classification head with independent prior biases (-4.595)
+        # All 9 classes start safely at prior 0.01, but adapt independently during training!
         prior_b = -math.log((1 - prior_prob) / prior_prob)
-        for b_param in self.cls_biases:
-            b_param.data.fill_(prior_b)
+        for conv in self.cls_preds:
+            if conv.bias is not None:
+                b = conv.bias.view(1, -1)
+                b.data.fill_(prior_b)
+                conv.bias = torch.nn.Parameter(b.view(-1), requires_grad=True)
 
-        # 3. Zero-initialize regression coordinate offsets
+        # Zero-initialize regression offsets
         for conv in self.reg_preds:
             if conv.bias is not None:
                 nn.init.zeros_(conv.bias)
@@ -272,24 +279,21 @@ class TDE_Head(YOLOXHead):
             # Single Classification Dispatch: Evaluated strictly once per scale!
             # Direct Hyperspherical Prototype Logit Extraction
             B, _, H, W = cls_feat.shape
-            # =========================================================================
-            # TDE-YOLOX v3.4: Bias-Equivariant Classification Dispatch
-            # =========================================================================
+
             w_conv = self.cls_preds[k].weight
             w_norm = F.normalize(w_conv.float(), p=2, dim=[1, 2, 3], eps=1e-5).to(cls_feat.dtype)
             
             # 1. Normalized dot-product + Shared Scalar Prior Bias
-            # Shape of cls_biases[k] is [1]; broadcasts cleanly across [B, num_classes, H, W]
-            z_conv = F.conv2d(restored_feat, w_norm, bias=None, stride=1, padding=0) + self.cls_biases[k].view(1, 1, 1, 1).to(cls_feat.dtype)
+            # Unconstrained Convolutional Highway (Carries full clean-domain capacity)
+            z_conv = self.cls_preds[k](restored_feat)
             
-            # 2. Zero-Mean Centered Prototype Logit Injection
+            # Zero-Mean Centered Prototype Logit Injection (Residual memory assist)
             raw_scores_spatial = raw_scores.permute(0, 2, 1).reshape(B, self.num_classes, H, W).to(cls_feat.dtype)
             proto_mean = raw_scores_spatial.mean(dim=1, keepdim=True)
             s_proto_centered = raw_scores_spatial - proto_mean
             
-            # 3. Direct Decision-Boundary Fusion
+            # Additive Decision Boundary
             cls_out = z_conv + gate * s_proto_centered
-            # =========================================================================
 
             if self.training:
                 output = torch.cat([reg_out, obj_out, cls_out], 1)
@@ -564,7 +568,6 @@ class TDE_Head(YOLOXHead):
                 0.0
             )
 
-        # 1. Level-Aware Boundary Slicing: P3 (Stride 8), P4 (Stride 16), P5 (Stride 32)
         strides_1d = expanded_strides[0]
         mask_p3 = (strides_1d == 8)
         mask_p4 = (strides_1d == 16)
@@ -576,13 +579,26 @@ class TDE_Head(YOLOXHead):
         gt_cy = gt_bboxes_per_image[:, 1:2]
         gt_w = gt_bboxes_per_image[:, 2:3]
         gt_h = gt_bboxes_per_image[:, 3:4]
-        gt_scale = torch.sqrt(gt_w * gt_h + 1e-5)  # [num_gt, 1]
+        gt_scale = torch.sqrt(gt_w * gt_h + 1e-5)
 
         anchor_cx = (x_shifts[0] + 0.5) * strides_1d
         anchor_cy = (y_shifts[0] + 0.5) * strides_1d
 
-        # 2. Level-Aware Candidate Selection: Top-9 per level per GT (27 total candidates)
-        k_cand_per_level = 9
+        # 1. PHYSICAL BODY ANCHOR SAMPLING WINDOW
+        delta_x = torch.max(strides_1d.unsqueeze(0) * 2.5, gt_w * 0.50)
+        delta_y = torch.max(strides_1d.unsqueeze(0) * 2.5, gt_h * 0.50)
+
+        x_centers = anchor_cx.unsqueeze(0)
+        y_centers = anchor_cy.unsqueeze(0)
+
+        c_l = x_centers - (gt_cx - delta_x)
+        c_r = (gt_cx + delta_x) - x_centers
+        c_t = y_centers - (gt_cy - delta_y)
+        c_b = (gt_cy + delta_y) - y_centers
+        is_in_centers = torch.stack([c_l, c_r, c_t, c_b], 2).min(dim=-1).values > 0.0
+
+        # 2. ANISOTROPIC MAHALANOBIS CANDIDATE SELECTION
+        k_cand_per_level = 16
         candidate_indices_list = []
 
         for l_mask, s_l in zip(level_masks, level_strides):
@@ -590,43 +606,31 @@ class TDE_Head(YOLOXHead):
             l_cx = anchor_cx[l_mask]
             l_cy = anchor_cy[l_mask]
 
-            dist_sq = ((gt_cx - l_cx.unsqueeze(0)) / s_l).pow(2) + ((gt_cy - l_cy.unsqueeze(0)) / s_l).pow(2)
-            _, topk_local_idx = torch.topk(dist_sq, min(k_cand_per_level, l_cx.shape[0]), dim=-1, largest=False)
+            norm_dx = (gt_cx - l_cx.unsqueeze(0)) / torch.clamp(gt_w * 0.50, min=s_l)
+            norm_dy = (gt_cy - l_cy.unsqueeze(0)) / torch.clamp(gt_h * 0.50, min=s_l)
+            dist_mahalanobis = norm_dx.pow(2) + norm_dy.pow(2)
+
+            _, topk_local_idx = torch.topk(
+                dist_mahalanobis, min(k_cand_per_level, l_cx.shape[0]), dim=-1, largest=False
+            )
             candidate_indices_list.append(l_indices[topk_local_idx])
 
-        candidate_indices = torch.cat(candidate_indices_list, dim=-1)  # [num_gt, 27]
+        candidate_indices = torch.cat(candidate_indices_list, dim=-1)
 
-        # Geometry Constraints: Candidate must lie within 2.5 * stride
         is_in_candidates = torch.zeros(num_gt, total_anchors, device=gt_classes.device, dtype=torch.bool)
         is_in_candidates.scatter_(1, candidate_indices, True)
-
-        _, geometry_relation_all = self.get_geometry_constraint(
-            gt_bboxes_per_image, expanded_strides, x_shifts, y_shifts, center_radius=2.5
-        )
-        
-        # Center-in-box geometric relationship
-        x_centers_per_image = ((x_shifts[0] + 0.5) * strides_1d).unsqueeze(0)
-        y_centers_per_image = ((y_shifts[0] + 0.5) * strides_1d).unsqueeze(0)
-        center_dist = strides_1d.unsqueeze(0) * 2.5
-        c_l = x_centers_per_image - (gt_bboxes_per_image[:, 0:1] - center_dist)
-        c_r = (gt_bboxes_per_image[:, 0:1] + center_dist) - x_centers_per_image
-        c_t = y_centers_per_image - (gt_bboxes_per_image[:, 1:2] - center_dist)
-        c_b = (gt_bboxes_per_image[:, 1:2] + center_dist) - y_centers_per_image
-        is_in_centers = torch.stack([c_l, c_t, c_r, c_b], 2).min(dim=-1).values > 0.0
 
         is_active = is_in_centers & is_in_candidates
         fg_mask = is_active.sum(dim=0) > 0
         num_in_boxes_anchor = int(fg_mask.sum().item())
 
         if num_in_boxes_anchor == 0:
-            # Safe Fallback to closest anchor across levels
             fg_mask[candidate_indices[:, 0]] = True
             is_active = is_in_candidates & fg_mask.unsqueeze(0)
             num_in_boxes_anchor = int(fg_mask.sum().item())
 
         geometry_relation = is_active[:, fg_mask]
 
-        # 3. Compact Level-Aware Cost Matrix Evaluation
         bboxes_preds = bboxes_preds_per_image[fg_mask]
         cls_preds_ = cls_preds[batch_idx][fg_mask]
         obj_preds_ = obj_preds[batch_idx][fg_mask]
@@ -634,12 +638,15 @@ class TDE_Head(YOLOXHead):
 
         pair_wise_ious = bboxes_iou(gt_bboxes_per_image, bboxes_preds, False)
 
-        # Scale-Faceted Prior Cost: Stride 8 -> 32px, Stride 16 -> 64px, Stride 32 -> 128px
+        # 3. Asymmetric Scale-Prior Barrier
         canonical_scale = cand_strides * 4.0
         scale_ratio = gt_scale / (canonical_scale + 1e-5)
-        c_scale_prior = torch.log(scale_ratio + 1e-5).pow(2) * 0.15
+        c_scale_prior = torch.where(
+            scale_ratio < 1.0,
+            torch.log(scale_ratio + 1e-5).pow(2) * 0.15,
+            torch.clamp(torch.log(scale_ratio + 1e-5).pow(2) * 0.02, max=0.05)
+        )
 
-        # 2D Gaussian Wasserstein Distance
         p_c = bboxes_preds[:, :2]
         g_c = gt_bboxes_per_image[:, :2]
         c_dist_sq = (p_c.unsqueeze(0) - g_c.unsqueeze(1)).pow(2).sum(-1)
@@ -650,17 +657,27 @@ class TDE_Head(YOLOXHead):
         diag_gt_safe = torch.clamp(torch.sqrt(g_s.pow(2).sum(-1) + 1e-7).unsqueeze(1) + 1e-5, min=8.0)
         pair_wise_nwd = torch.exp(-2.0 * (torch.sqrt(w2_sq) / diag_gt_safe))
 
-        # Dynamic-K Calculation with Macro Object Guaranteed Representation (Area >= 96^2 => K >= 3)
-        k_ceiling = 10 if self.current_epoch >= 65 else 15
+        # 4. Scale-Adaptive Dynamic-K Budget in SimOTA (100% Vectorized GPU Implementation)
+        # FIX: Define hybrid_overlap before using it
         hybrid_overlap = 0.5 * (pair_wise_ious + pair_wise_nwd)
-        n_candidate_k = max(1, min(12, hybrid_overlap.size(1)))
-        topk_ious, _ = torch.topk(hybrid_overlap, n_candidate_k, dim=1)
-        dynamic_ks = torch.clamp(torch.round(topk_ious.sum(1)).int(), min=1, max=k_ceiling)
 
-        is_large_object = (gt_scale.squeeze(-1) >= 96.0)
-        dynamic_ks[is_large_object] = torch.clamp(dynamic_ks[is_large_object], min=3)
+        is_macro = (gt_scale.view(-1, 1) >= 96.0)
+        n_cand = min(16, hybrid_overlap.size(1))
+        
+        topk_overlap, _ = torch.topk(hybrid_overlap, n_cand, dim=1)  # [num_gt, n_cand]
 
-        # Pairwise Classification Cost with NaN Sanitization
+        cand_mask = torch.ones_like(topk_overlap)
+        if n_cand > 10:
+            cand_mask[:, 10:] = is_macro.float()
+
+        dynamic_ks = (topk_overlap * cand_mask).sum(dim=1).round().int()
+
+        min_k = torch.where(is_macro.squeeze(-1), 3, 1)
+        max_k = torch.where(is_macro.squeeze(-1), 16, 10)
+        
+        dynamic_ks = torch.clamp(dynamic_ks, min=min_k, max=max_k)
+        # Note: The slow Python 'for g in range(num_gt):' loop is deleted.
+
         gt_cls_per_image = F.one_hot(gt_classes.to(torch.int64), self.num_classes).float()
         with torch.cuda.amp.autocast(enabled=False):
             cls_prob = (cls_preds_.float().sigmoid_() * obj_preds_.float().sigmoid_()).sqrt()
@@ -676,8 +693,19 @@ class TDE_Head(YOLOXHead):
                 reduction="none"
             ).sum(-1)
 
-        cost_iou_w = 3.0 if self.current_epoch >= 65 else 2.0
-        cost_nwd_w = 0.5 if self.current_epoch >= 65 else 2.0
+        # 5. Continuous Loss-Aligned SimOTA Cost Weights
+        max_epochs = getattr(self, "max_epochs", 80)
+        no_aug_start = max_epochs - 15
+        if self.current_epoch < no_aug_start:
+            cost_iou_w = 2.0
+            cost_nwd_w = 2.0
+        elif self.current_epoch >= (no_aug_start + 3):
+            cost_iou_w = 3.0
+            cost_nwd_w = 0.50
+        else:
+            t = float(self.current_epoch - no_aug_start + 1) / 4.0
+            cost_iou_w = 2.0 + 1.0 * t
+            cost_nwd_w = 2.0 - 1.50 * t
 
         cost = (
             pair_wise_cls_loss

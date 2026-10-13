@@ -18,11 +18,13 @@ class Exp(MyExp):
         self.ttt_noise_std = 0.05  
         
         # --- DATASET OVERRIDES ---
-        self.data_dir = r"D:\DAWN\images"
-        self.val_ann = r"D:\YOLOX-3RD\dawn_bdd_compatible.json"
-        self.test_ann = r"D:\YOLOX-3RD\dawn_bdd_compatible.json"
-        self.test_size = (640, 640) # STRICT CONSISTENCY
-        self.input_size = (640, 640)
+        self.exp_name = "test_dawn"
+        # Points to the root DAWN folder because JSON paths are relative (e.g. 'Fog/Fog/001.jpg')
+        self.data_dir = r"D:\DAWN"
+        self.val_ann = r"D:\DAWN\dawn_adverse_coco.json"
+        self.test_ann = r"D:\DAWN\dawn_adverse_coco.json"
+        self.input_size = (576, 1024)   # (Height, Width)
+        self.test_size = (576, 1024)
         
         # --- e1->e72 ---
         """
