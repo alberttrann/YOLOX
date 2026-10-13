@@ -38,17 +38,21 @@ class YOLOPAFPN(nn.Module):
         super().__init__()
         self.in_features = in_features
         self.in_channels = in_channels
+
+        # FIX: Compute c3, c4, c5 FIRST before referencing them!
+        c3, c4, c5 = [int(x * width) for x in in_channels]
+
         # Instantiate Training-Only Semantic Affordance Decoder
         self.aux_sem_head = WeakSemanticAffordanceHead(
             in_channels_n3=c3, in_channels_n4=c4, num_classes=9, hidden_dim=c3
         )
+
         self.backbone = CSPDarknet(
             depth, width, out_features=in_features,
             depthwise=depthwise, act=act,
             ttt_lr=ttt_lr, ttt_noise_std=ttt_noise_std
         )
 
-        c3, c4, c5 = [int(x * width) for x in in_channels]
         self.upsample = nn.Upsample(scale_factor=2, mode="nearest")
 
         # Top-Down BQSA Components

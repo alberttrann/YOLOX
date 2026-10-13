@@ -182,7 +182,6 @@ class TDE_Head(YOLOXHead):
                 nn.init.zeros_(dw_smooth.bias)
             self.post_engram_dw.append(dw_smooth)
             
-            # 1. In TDE_Head.__init__:
             # Standard unconstrained linear classification heads with independent biases
             self.cls_preds.append(
                 nn.Conv2d(feat_c, num_classes, kernel_size=1, stride=1, padding=0, bias=True)
@@ -190,26 +189,15 @@ class TDE_Head(YOLOXHead):
             self.reg_preds.append(nn.Conv2d(feat_c, 4, kernel_size=1, stride=1, padding=0))
             self.obj_preds.append(nn.Conv2d(feat_c, 1, kernel_size=1, stride=1, padding=0))
 
-        # =========================================================================
-        # TDE-YOLOX v3.4: Certified Shared Scalar Prior Bias (One per scale level)
-        # Guarantees b_person - b_rider === 0 while providing the initial -4.595
-        # background suppression prior needed to stop the 13.4 loss explosion!
-        # =========================================================================
-        self.cls_biases = nn.ParameterList([
-            nn.Parameter(torch.tensor([-4.595])) for _ in range(len(in_channels))
-        ])
-
-    # 2. In TDE_Head.initialize_biases:
     def initialize_biases(self, prior_prob):
-        # Initialize objectness prior bias
+        # 1. Initialize objectness prior bias
         for conv in self.obj_preds:
             if conv.bias is not None:
                 b = conv.bias.view(1, -1)
                 b.data.fill_(-math.log((1 - prior_prob) / prior_prob))
                 conv.bias = torch.nn.Parameter(b.view(-1), requires_grad=True)
 
-        # Initialize classification head with independent prior biases (-4.595)
-        # All 9 classes start safely at prior 0.01, but adapt independently during training!
+        # 2. Initialize independent classification head prior biases (-4.595)
         prior_b = -math.log((1 - prior_prob) / prior_prob)
         for conv in self.cls_preds:
             if conv.bias is not None:
@@ -217,7 +205,7 @@ class TDE_Head(YOLOXHead):
                 b.data.fill_(prior_b)
                 conv.bias = torch.nn.Parameter(b.view(-1), requires_grad=True)
 
-        # Zero-initialize regression offsets
+        # 3. Zero-initialize regression offsets
         for conv in self.reg_preds:
             if conv.bias is not None:
                 nn.init.zeros_(conv.bias)
