@@ -21,8 +21,8 @@ class Exp(MyExp):
         self.data_dir = r"D:\DAWN\images"
         self.val_ann = r"D:\YOLOX-3RD\dawn_bdd_compatible.json"
         self.test_ann = r"D:\YOLOX-3RD\dawn_bdd_compatible.json"
-        self.test_size = (640, 640) # STRICT CONSISTENCY
-        self.input_size = (640, 640)
+        self.input_size = (576, 1024)
+        self.test_size = (576, 1024)
         
         # --- e1->e72 ---
         """
