@@ -180,15 +180,15 @@ class CSPDarknet(nn.Module):
         x_clean_stem = self.stem(x)
         outputs["stem"] = x_clean_stem
         
-        # 2. EVALUATE FOURIER PHASE CONSISTENCY LOSS ON ASYMMETRIC REFERENCE ANCHOR
+        # 2. EVALUATE FOURIER PHASE CONSISTENCY WITH STATIONARY ANCHOR
         if self.training:
             with torch.no_grad():
                 x_perturbed = self._fourier_amplitude_perturb(x)
+                stem_pert = self.stem(x_perturbed)
+                # FIX: z_clean is a detached, stationary target (zero gradient fighting on dark2!)
+                z_clean, _ = self.dark2(x_clean_stem.detach(), run_ttt=False, epoch=epoch, max_epochs=max_epochs)
             
-            stem_pert = self.stem(x_perturbed)
-            
-            # Detached clean anchor prevents destructive gradient cancellation on the clean detection path
-            z_clean, _ = self.dark2(x_clean_stem.detach(), run_ttt=False, epoch=epoch, max_epochs=max_epochs)
+            # Only the perturbed branch updates parameters to match the stationary clean anchor
             z_pert, _ = self.dark2(stem_pert, run_ttt=False, epoch=epoch, max_epochs=max_epochs)
             
             sim = F.cosine_similarity(z_clean.flatten(1), z_pert.flatten(1), dim=-1)

@@ -29,54 +29,45 @@ class GRN(nn.Module):
 
 class CovariateMomentAligner(nn.Module):
     """
-    TDE-YOLOX v3.3 First-Principles Covariate Moment Alignment (CMA) Engine.
-    
-    Evaluates closed-form channel de-correlation (whitening) to cancel additive
-    common-mode Koschmieder atmospheric haze offsets, and variance conservation
-    to restore compressed dynamic range under adverse weather.
-    Zero spatial masking. Zero receptive field paradox.
+    Elastic Margin-Bounded Covariate Moment Alignment (CMA) Engine:
+      - Decorrelation Margin (tau=0.10): Allows natural semantic filter co-firing.
+        Penalizes only excessive common-mode atmospheric airlight covariance.
+      - Elastic Energy Band [0.5, 2.0]: Protects sparse channels from noise amplification
+        while preventing variance collapse under fog/darkness.
     """
     def __init__(self, eps=1e-5):
         super().__init__()
         self.eps = eps
 
     def forward(self, feat):
-        # feat: [B, C, H, W]
         B, C, H, W = feat.shape
         N = float(H * W)
         
-        # 1. Spatial Channel Centering strictly in FP32
         f_fp32 = feat.float()
-        mu = f_fp32.mean(dim=[-2, -1], keepdim=True)  # [B, C, 1, 1]
-        f_centered = f_fp32 - mu                       # [B, C, H, W]
-        
-        # 2. Reshape to [B, C, HW] for batched matrix multiplication
+        mu = f_fp32.mean(dim=[-2, -1], keepdim=True)
+        f_centered = f_fp32 - mu
         f_flat = f_centered.view(B, C, -1)
         
-        # 3. Spatial Channel Covariance Matrix \Sigma [B, C, C]
-        # Evaluated strictly in FP32 to eliminate half-precision accumulator overflow
         sigma = torch.bmm(f_flat, f_flat.transpose(1, 2)) / max(1.0, N - 1.0)
-        
-        # 4. Safeguard covariance matrix AFTER assignment (Guarantees no UnboundLocalError!)
         sigma = torch.nan_to_num(sigma, nan=0.0, posinf=1.0, neginf=-1.0)
         
-        # 5. Extract Diagonal Variance & Compute Standard Deviation per Channel
-        var_diag = torch.diagonal(sigma, dim1=-2, dim2=-1)  # [B, C]
-        std_diag = torch.sqrt(torch.clamp(var_diag, min=self.eps, max=100.0))  # [B, C]
+        var_diag = torch.diagonal(sigma, dim1=-2, dim2=-1)
+        std_diag = torch.sqrt(torch.clamp(var_diag, min=self.eps, max=100.0))
         
-        # 6. Correlation Matrix R [B, C, C]
         std_outer = torch.bmm(std_diag.unsqueeze(-1), std_diag.unsqueeze(1)) + self.eps
         corr = torch.clamp(sigma / std_outer, min=-1.0, max=1.0)
         
-        # 7. Loss 1: Off-Diagonal De-Correlation (Whitening / Koschmieder Airlight Removal)
+        # 1. ELASTIC DECORRELATION: Margin tau=0.10 preserves natural semantic co-activation
         eye = torch.eye(C, device=feat.device, dtype=torch.float32).unsqueeze(0)
-        off_diag_corr = corr * (1.0 - eye)
-        l_decorr = off_diag_corr.pow(2).sum(dim=[-2, -1]) / float(C * (C - 1))
+        off_diag_corr = torch.abs(corr * (1.0 - eye))
+        excess_corr = torch.clamp(off_diag_corr - 0.10, min=0.0)
+        l_decorr = excess_corr.pow(2).sum(dim=[-2, -1]) / float(C * (C - 1))
         
-        # 8. Loss 2: Energy / Variance Conservation (Anti-Collapse)
-        l_energy = (std_diag - 1.0).pow(2).mean(dim=-1)
+        # 2. ELASTIC ENERGY BAND: Bounded within [0.5, 2.0]
+        collapse_penalty = torch.clamp(0.50 - std_diag, min=0.0).pow(2)
+        saturation_penalty = torch.clamp(std_diag - 2.00, min=0.0).pow(2)
+        l_energy = (collapse_penalty + saturation_penalty).mean(dim=-1)
         
-        # Master CMA Loss with NaN backstop
         loss_cma = (l_decorr + 0.5 * l_energy).mean()
         return torch.nan_to_num(loss_cma, nan=0.0)
 

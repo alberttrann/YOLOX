@@ -41,43 +41,39 @@ class AntiCollisionEngramBank(nn.Module):
         B, C, H, W = h_local.shape
         D = self.latent_dim
         
-        # REFINEMENT 4: Exact Sub-Pixel Bilinear Centering (Eliminates 0.5-pixel pyramid drift)
+        # 1. Exact Sub-Pixel Bilinear Centering (Eliminates 0.5-pixel pyramid drift)
         p_interp = F.interpolate(anchor_feat, size=(H, W), mode='bilinear', align_corners=False)
         dw_local = self.dw_hf(h_local)
         
-        # FP32 RMS Shield to prevent half-precision overflow
+        # FP32 RMS Shield prevents half-precision overflow
         p_fp32 = p_interp.float()
         dw_fp32 = dw_local.float()
-        
         p_scale = p_fp32 * torch.rsqrt(p_fp32.pow(2).mean(dim=1, keepdim=True) + 1e-5)
         dw_scale = dw_fp32 * torch.rsqrt(dw_fp32.pow(2).mean(dim=1, keepdim=True) + 1e-5)
-        
         q = (p_scale + torch.tanh(self.w_hf.float()) * dw_scale).to(h_local.dtype)
         
-        # Orthonormal Hyperspherical Query and Prototype Alignment
+        # Orthonormal Hyperspherical Query & Prototype Alignment on S^127
         q_norm = F.normalize(q.float().permute(0, 2, 3, 1).reshape(B, H * W, D), p=2, dim=-1, eps=1e-5)
         p_norm = F.normalize(self.prototypes.float(), p=2, dim=-1, eps=1e-5)
         
-        # Scale-Adaptive Temperature Lookup for Attention Softmax
+        # Memory Retrieval Attention at Unified T=16.0
         scores_fp32 = torch.matmul(q_norm, p_norm.t()) * self.temperature
         attn_weights = F.softmax(scores_fp32, dim=-1)
         retrieved_memory = torch.matmul(attn_weights, p_norm).to(q.dtype)
         
-        # REFINEMENT 1 (Part A): Scale-Normalized Logit Extraction (Equalizes P3 vs P5 gradient pull)
+        # 2. Scale-Normalized Logit Extraction (Equalizes P3 vs P5 gradient pull)
         scores_by_class = scores_fp32.view(B, H * W, self.num_classes, self.num_modes)
         log_k = math.log(float(self.num_modes))
         raw_lse = torch.logsumexp(scores_by_class, dim=-1) - log_k
-        raw_class_scores = (raw_lse / self.temperature) * 16.0  # Normalized to uniform T=16.0 scale
+        raw_class_scores = (raw_lse / self.temperature) * 16.0  # Standardized T=16 scale
         
-        # Orthonormal Margin Uncertainty Calculation
+        # 3. Categorical Margin Ambiguity (Decoupled from raw objectness!)
         p_mem = torch.sigmoid(raw_class_scores.detach())
         top2_p, _ = torch.topk(p_mem, k=2, dim=-1)
         margin = torch.clamp(top2_p[..., 0:1] - top2_p[..., 1:2], min=0.0, max=1.0)
+        uncertainty = (1.0 - margin)
         
-        obj_flat = objectness_mask.permute(0, 2, 3, 1).reshape(B, H * W, 1)
-        uncertainty = (1.0 - margin) * obj_flat.detach()
-        
-        # Geodesic Distance Penalty & Atmospheric Modulation
+        # Geodesic Distance Penalty
         h_flat = h_local.permute(0, 2, 3, 1).reshape(B, H * W, C)
         h_dir = F.normalize(h_flat, p=2, dim=-1, eps=1e-5)
         mem_dir = F.normalize(retrieved_memory, p=2, dim=-1, eps=1e-5)
@@ -86,20 +82,30 @@ class AntiCollisionEngramBank(nn.Module):
         slope_k = F.softplus(torch.matmul(mem_dir, self.v_k))
         dist_penalty = torch.clamp(self.omega, min=0.0, max=2.0) * (slope_q.unsqueeze(-1) + slope_k.unsqueeze(-1))
         
-        gate_logit = 4.0 * uncertainty - dist_penalty - 0.5
-        g_raw = torch.sigmoid(gate_logit) * obj_flat
+        gate_logit = 3.0 * uncertainty - dist_penalty - 0.5
         
-        # REFINEMENT 2: Objectness-Gated Curriculum Floor (Zero empty background/sky pollution)
+        # 4. CERTIFIED CATCH-22 CURE: Soft Objectness Envelope with .detach()
+        # Allows faint objects (obj >= 0.10) to access memory while blocking background (< 0.02)
+        obj_flat = objectness_mask.permute(0, 2, 3, 1).reshape(B, H * W, 1)
+        tau_obj = 0.10
+        obj_envelope = torch.clamp(obj_flat.detach() / tau_obj, min=0.0, max=1.0)
+        
+        g_raw = torch.sigmoid(gate_logit) * obj_envelope
         curriculum_floor = 0.20 * max(0.0, 1.0 - float(epoch) / 15.0)
-        g_effective = torch.max(g_raw, curriculum_floor * obj_flat)
+        g_effective = torch.max(g_raw, curriculum_floor * obj_envelope)
         
-        # Inverted Atmospheric Entropy Modulator:
-        # Opens memory support under visual degradation rather than shutting off!
-        h_max = math.log(400.0)
-        h_ratio = torch.clamp(h_s.float() / h_max, min=0.0, max=1.0)
+        # 5. SOURCE-NORMALIZED ATMOSPHERIC ENTROPY MODULATOR (Multiscale & Scale-Invariant)
+        # Defensive guard: handles both source-normalized [0.0, 1.0] and raw entropy without crashing
+        h_val = h_s.float() if torch.is_tensor(h_s) else torch.tensor(h_s, device=q.device, dtype=torch.float32)
+        if h_val <= 1.0:
+            h_ratio = torch.clamp(h_val, min=0.0, max=1.0)
+        else:
+            h_ratio = torch.clamp(h_val / math.log(576.0), min=0.0, max=1.0)
+
         atmo_modulator = 0.75 + 0.50 * torch.sigmoid(4.0 * (h_ratio - 0.50)).to(q.dtype)
         g_final = torch.clamp(g_effective * atmo_modulator, min=0.0, max=0.70)
         
+        # Spatial Reshaping
         mem_spatial = retrieved_memory.reshape(B, H, W, D).permute(0, 3, 1, 2).to(h_local.dtype)
         gate_spatial = g_final.reshape(B, H, W, 1).permute(0, 3, 1, 2).to(h_local.dtype)
         
@@ -143,11 +149,7 @@ class TDE_Head(YOLOXHead):
         self.manifold_decoders = nn.ModuleList()
         self.post_engram_dw = nn.ModuleList()
 
-        # Scale-Dependent Temperature Hierarchy
-        # P3 (Stride 8): T=32.0 (Sharp discrimination for Bikes, Signs, Lights)
-        # P4 (Stride 16): T=24.0 (Balanced discrimination for Cars, Riders)
-        # P5 (Stride 32): T=16.0 (Continuous multi-mode density for Buses, Trucks)
-        temperatures = [32.0, 24.0, 16.0]
+        temperatures = [16.0, 16.0, 16.0]  # Unified temperature across P3, P4, P5
 
         for i in range(len(in_channels)):
             in_c = int(in_channels[i] * width)

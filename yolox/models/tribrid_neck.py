@@ -156,8 +156,10 @@ class P5ExclusiveDenseAttention(nn.Module):
         
         h_s_raw = (-torch.sum(p_dist * torch.log(p_dist + 1e-7), dim=-1).mean()).detach()
         h_s_fallback = math.log(max(2, N))
-        h_s = torch.nan_to_num(h_s_raw, nan=h_s_fallback, posinf=h_s_fallback, neginf=0.0)
-
+        h_s_clean = torch.nan_to_num(h_s_raw, nan=h_s_fallback, posinf=h_s_fallback, neginf=0.0)
+        # SOURCE-NORMALIZATION: Returns a scale-invariant ratio strictly in [0.0, 1.0]!
+        h_max = math.log(max(2, N))
+        h_ratio = torch.clamp(h_s_clean / h_max, min=0.0, max=1.0)
         # 3. Value Aggregation strictly in FP32
         y_fp32 = torch.matmul(attn_fp32, v.float())
         v_fp32 = v.float()
@@ -167,11 +169,11 @@ class P5ExclusiveDenseAttention(nn.Module):
         z_spatial = self.proj(z.permute(0, 1, 3, 2).reshape(B, C, H, W))
 
         # 4. Gated Residual Highway with Learnable Fog Coupling
-        h_ratio = torch.clamp(h_s / math.log(max(2, N)), 0.0, 1.0)
         g_xsa = torch.sigmoid(self.w_r1(x) + self.w_r2(z_spatial) + (self.lambda_fog * h_ratio))
         p5_feat = x + g_xsa * z_spatial
 
-        return p5_feat, saliency, h_s
+        # Return h_ratio as the 3rd element!
+        return p5_feat, saliency, h_ratio
 
 
 class C2f_BQSA_P4(nn.Module):
