@@ -301,7 +301,7 @@ class UnifiedRMBConv(nn.Module):
         feat = self.act2(self.gn_pw(self.pw(feat)))
         feat = self.se(feat)
 
-        return residual + self.gamma * feat
+        return (residual + self.gamma * feat).to(x.dtype)
 
     def switch_to_deploy(self):
         self.rep_dw_local.switch_to_deploy()
@@ -352,11 +352,10 @@ class UnifiedRCA(nn.Module):
 
         att_h = torch.sigmoid(self.conv_h(x_h))
         att_w = torch.sigmoid(self.conv_w(x_w))
-        
-        # FRICTION FIX: 4.0 * (att_h * att_w) ensures exact 1.0 identity transmission at init!
         attn_gate = 4.0 * (att_h * att_w)
 
-        return identity * attn_gate
+        # FIX: Explicitly preserve input tensor dtype
+        return (identity * attn_gate).to(x.dtype)
     
 class SimAM(nn.Module):
     """Parameter-free Energy-based Attention. Suppresses low-contrast background noise."""

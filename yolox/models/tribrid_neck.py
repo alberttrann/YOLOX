@@ -445,10 +445,12 @@ class C2f_BQSA_P3(nn.Module):
         z_global_scaled = z_global * scale_glob
 
         z_token = z_global_scaled.view(B, C, 1).expand(-1, -1, tokens_per_b).reshape(B, 1, C * tokens_per_b)
-        out_flat = z_token.expand(-1, total_blocks, -1).clone()
-
+        
         idx_flat = valid_idx.unsqueeze(-1).expand(-1, -1, C * tokens_per_b)
         ctx_flat = ctx_loc.permute(0, 1, 3, 2).reshape(B, k_actual, C * tokens_per_b)
+
+        # FIX: Ensure out_flat matches ctx_flat.dtype (prevents Float32 vs Float16 scatter crash)
+        out_flat = z_token.expand(-1, total_blocks, -1).clone().to(ctx_flat.dtype)
         out_flat.scatter_(1, idx_flat, ctx_flat)
 
         context = out_flat.reshape(B, num_h, num_w, C, bs, bs).permute(0, 3, 1, 4, 2, 5).reshape(B, C, H, W)
