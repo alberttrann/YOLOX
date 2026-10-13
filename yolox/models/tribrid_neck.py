@@ -239,8 +239,9 @@ class C2f_BQSA_P4(nn.Module):
             r_max = torch.clamp(((y2 - 1e-4) / 64.0).floor().long(), 0, num_h - 1)
             r_max = torch.max(r_max, r_min)
 
+            # REFINEMENT 5: Explicit Integer Casting (Eliminates PyTorch tensor-slice CUDA sync warnings)
             for r1, r2, c1, c2 in zip(r_min, r_max, c_min, c_max):
-                target_mask[b, r1:r2 + 1, c1:c2 + 1] = 1.0
+                target_mask[b, int(r1):int(r2) + 1, int(c1):int(c2) + 1] = 1.0
 
         return target_mask.view(batch_size, -1)
 

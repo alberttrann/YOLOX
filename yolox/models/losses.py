@@ -122,10 +122,10 @@ class PrototypeRepulsionLoss(nn.Module):
         redundant runtime VRAM allocations.
       - Normalizes intra- and inter-class penalties by active violating pairs rather
         than static permutations, preventing gradient starvation.
-      - m_intra = 0.10 (~84.3 deg) permits sub-class variance; m_inter = 0.05 enforces
+      - m_intra = 0.20 (~84.3 deg) permits sub-class variance; m_inter = 0.08 enforces
         strict categorical orthogonality on S^127.
     """
-    def __init__(self, num_classes=9, num_modes=64, m_intra=0.10, m_inter=0.05, eps=1e-5):
+    def __init__(self, num_classes=9, num_modes=64, m_intra=0.20, m_inter=0.08, eps=1e-5):
         super(PrototypeRepulsionLoss, self).__init__()
         self.num_classes = num_classes
         self.num_modes = num_modes

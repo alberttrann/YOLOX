@@ -41,7 +41,8 @@ class AntiCollisionEngramBank(nn.Module):
         B, C, H, W = h_local.shape
         D = self.latent_dim
         
-        p_interp = F.interpolate(anchor_feat, size=(H, W), mode='bilinear', align_corners=True)
+        # REFINEMENT 4: Exact Sub-Pixel Bilinear Centering (Eliminates 0.5-pixel pyramid drift)
+        p_interp = F.interpolate(anchor_feat, size=(H, W), mode='bilinear', align_corners=False)
         dw_local = self.dw_hf(h_local)
         
         # FP32 RMS Shield to prevent half-precision overflow
@@ -57,17 +58,18 @@ class AntiCollisionEngramBank(nn.Module):
         q_norm = F.normalize(q.float().permute(0, 2, 3, 1).reshape(B, H * W, D), p=2, dim=-1, eps=1e-5)
         p_norm = F.normalize(self.prototypes.float(), p=2, dim=-1, eps=1e-5)
         
-        # Scale-Adaptive Temperature Lookup
+        # Scale-Adaptive Temperature Lookup for Attention Softmax
         scores_fp32 = torch.matmul(q_norm, p_norm.t()) * self.temperature
         attn_weights = F.softmax(scores_fp32, dim=-1)
         retrieved_memory = torch.matmul(attn_weights, p_norm).to(q.dtype)
         
-        # Direct Hyperspherical Logit Extraction (Eliminates Dispatch 1!)
+        # REFINEMENT 1 (Part A): Scale-Normalized Logit Extraction (Equalizes P3 vs P5 gradient pull)
         scores_by_class = scores_fp32.view(B, H * W, self.num_classes, self.num_modes)
         log_k = math.log(float(self.num_modes))
-        raw_class_scores = torch.logsumexp(scores_by_class, dim=-1) - log_k
+        raw_lse = torch.logsumexp(scores_by_class, dim=-1) - log_k
+        raw_class_scores = (raw_lse / self.temperature) * 16.0  # Normalized to uniform T=16.0 scale
         
-        # Orthonormal Margin Uncertainty Calculation (Direct on Prototype Scores)
+        # Orthonormal Margin Uncertainty Calculation
         p_mem = torch.sigmoid(raw_class_scores.detach())
         top2_p, _ = torch.topk(p_mem, k=2, dim=-1)
         margin = torch.clamp(top2_p[..., 0:1] - top2_p[..., 1:2], min=0.0, max=1.0)
@@ -84,12 +86,12 @@ class AntiCollisionEngramBank(nn.Module):
         slope_k = F.softplus(torch.matmul(mem_dir, self.v_k))
         dist_penalty = torch.clamp(self.omega, min=0.0, max=2.0) * (slope_q.unsqueeze(-1) + slope_k.unsqueeze(-1))
         
-        # Balanced Gate Logit: Eliminates the oppressive -2.5 baseline clamp
         gate_logit = 4.0 * uncertainty - dist_penalty - 0.5
         g_raw = torch.sigmoid(gate_logit) * obj_flat
         
+        # REFINEMENT 2: Objectness-Gated Curriculum Floor (Zero empty background/sky pollution)
         curriculum_floor = 0.20 * max(0.0, 1.0 - float(epoch) / 15.0)
-        g_effective = torch.max(g_raw, torch.tensor(curriculum_floor, device=q.device, dtype=q.dtype))
+        g_effective = torch.max(g_raw, curriculum_floor * obj_flat)
         
         # Inverted Atmospheric Entropy Modulator:
         # Opens memory support under visual degradation rather than shutting off!
@@ -271,17 +273,17 @@ class TDE_Head(YOLOXHead):
             w_conv = self.cls_preds[k].weight
             w_norm = F.normalize(w_conv.float(), p=2, dim=[1, 2, 3], eps=1e-5).to(cls_feat.dtype)
             
-            # 1. Normalized dot-product + Shared Scalar Prior Bias
-            # Unconstrained Convolutional Highway (Carries full clean-domain capacity)
+            # 1. Unconstrained Convolutional Highway
             z_conv = self.cls_preds[k](restored_feat)
             
-            # Zero-Mean Centered Prototype Logit Injection (Residual memory assist)
+            # 2. Zero-Mean Centered Prototype Logit Injection
             raw_scores_spatial = raw_scores.permute(0, 2, 1).reshape(B, self.num_classes, H, W).to(cls_feat.dtype)
             proto_mean = raw_scores_spatial.mean(dim=1, keepdim=True)
             s_proto_centered = raw_scores_spatial - proto_mean
             
-            # Additive Decision Boundary
-            cls_out = z_conv + gate * s_proto_centered
+            # REFINEMENT 1 (Part B): Decoupled Logit Scale (Bounds prototype assist to ~[-3.0, +3.0])
+            proto_scale = 3.0 / 16.0
+            cls_out = z_conv + (gate * s_proto_centered * proto_scale)
 
             if self.training:
                 output = torch.cat([reg_out, obj_out, cls_out], 1)

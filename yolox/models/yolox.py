@@ -35,12 +35,13 @@ class YOLOX(nn.Module):
         self.head = head
         self.num_classes = head.num_classes
 
-        # Prototype Hyperspherical Repulsion Engine (m_intra=0.10, m_inter=0.05)
+        # REFINEMENT 3: Welch-Bound Aligned Margins (m_intra=0.20, m_inter=0.08)
+        # Eliminates persistent geometric gradient noise on S^127
         self.repulse_loss = PrototypeRepulsionLoss(
             num_classes=self.num_classes,
             num_modes=64,
-            m_intra=0.10,
-            m_inter=0.05
+            m_intra=0.20,
+            m_inter=0.08
         )
 
         self.sem_loss_fn = GaussianFocalLoss(alpha=2.0, beta=4.0)
