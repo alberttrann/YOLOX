@@ -24,13 +24,14 @@ class GaussianOccupancyTargetGenerator:
         
         heatmaps = torch.zeros((B, num_classes, H, W), device=device, dtype=torch.float32)
         
+        # 3D Grid: Shape [1, H, W]
         y_coord, x_coord = torch.meshgrid(
             torch.arange(H, device=device, dtype=torch.float32),
             torch.arange(W, device=device, dtype=torch.float32),
             indexing="ij"
         )
-        x_grid = x_coord.unsqueeze(0).unsqueeze(0)  # [1, 1, H, W]
-        y_grid = y_coord.unsqueeze(0).unsqueeze(0)  # [1, 1, H, W]
+        x_grid = x_coord.unsqueeze(0)  # Shape: [1, H, W]
+        y_grid = y_coord.unsqueeze(0)  # Shape: [1, H, W]
 
         for b in range(B):
             img_targets = targets[b]
@@ -41,22 +42,21 @@ class GaussianOccupancyTargetGenerator:
             valid_boxes = img_targets[valid_mask]
             classes = valid_boxes[:, 0].long()
             
-            # FRICTION FIX: Snap to integer grid cell coordinates and clamp within boundaries!
-            # Guarantees (x_grid - xc)^2 == 0 at peak, producing exact 1.0 targets!
+            # Snap center to discrete integer grid coordinates: Shape [K, 1, 1]
             xc = torch.clamp(torch.round(valid_boxes[:, 1] / stride), 0, W - 1).view(-1, 1, 1)
             yc = torch.clamp(torch.round(valid_boxes[:, 2] / stride), 0, H - 1).view(-1, 1, 1)
             w = (valid_boxes[:, 3] / stride).view(-1, 1, 1)
             h = (valid_boxes[:, 4] / stride).view(-1, 1, 1)
 
-            # Minimum 0.75 sigma guarantees smooth 3-cell spatial dispersion on small objects
             sig_x = torch.clamp(w / 6.0, min=0.75)
             sig_y = torch.clamp(h / 6.0, min=0.75)
 
+            # [1, H, W] - [K, 1, 1] broadcasts cleanly to [K, H, W]
             exp_term = -( (x_grid - xc).pow(2) / (2.0 * sig_x.pow(2)) + 
                           (y_grid - yc).pow(2) / (2.0 * sig_y.pow(2)) )
-            gaussian = torch.exp(torch.clamp(exp_term, min=-20.0))
+            gaussian = torch.exp(torch.clamp(exp_term, min=-20.0))  # Shape: [K, H, W]
 
-            # FRICTION FIX: Vectorized Class-Batched Reduction (9 dispatches instead of 80+)
+            # Vectorized Class-Batched Reduction: cls_mask has shape [K], matching dim 0 of gaussian!
             for c in range(num_classes):
                 cls_mask = (classes == c)
                 if cls_mask.any():
