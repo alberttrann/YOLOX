@@ -146,9 +146,7 @@ class TTTAdaptiveStage(nn.Module):
                     lr_key = name.replace('.', '_')
                     effective_lr = torch.clamp(F.softplus(self.ttt_lrs[lr_key]) * decay_factor, min=1e-4, max=0.20)
                     g_safe = torch.nan_to_num(g.detach(), nan=0.0, posinf=1.0, neginf=-1.0)
-                    new_param = (curr_params[name].float() - effective_lr * g_safe).to(input_dtype)
-                    if not self.training:
-                        new_param = new_param.detach()
+                    new_param = (curr_params[name].float() - effective_lr * g_safe).to(input_dtype).detach()
                     updated_backbone_params[name] = new_param
                 
                 curr_params = updated_backbone_params

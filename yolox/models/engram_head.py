@@ -630,15 +630,12 @@ class TDE_Head(YOLOXHead):
 
         pair_wise_ious = bboxes_iou(gt_bboxes_per_image, bboxes_preds, False)
 
-        # 3. Asymmetric Scale-Prior Barrier
+        # 3. Symmetrical Low-Friction Scale Prior (Gentle tie-breaker capped at 0.05)
         canonical_scale = cand_strides * 4.0
         scale_ratio = gt_scale / (canonical_scale + 1e-5)
-        c_scale_prior = torch.where(
-            scale_ratio < 1.0,
-            torch.log(scale_ratio + 1e-5).pow(2) * 0.15,
-            torch.clamp(torch.log(scale_ratio + 1e-5).pow(2) * 0.02, max=0.05)
-        )
+        c_scale_prior = torch.clamp(torch.log(scale_ratio + 1e-5).pow(2) * 0.03, max=0.05)
 
+        # 2D Gaussian Wasserstein Distance (NWD) Calculation
         p_c = bboxes_preds[:, :2]
         g_c = gt_bboxes_per_image[:, :2]
         c_dist_sq = (p_c.unsqueeze(0) - g_c.unsqueeze(1)).pow(2).sum(-1)
@@ -649,12 +646,11 @@ class TDE_Head(YOLOXHead):
         diag_gt_safe = torch.clamp(torch.sqrt(g_s.pow(2).sum(-1) + 1e-7).unsqueeze(1) + 1e-5, min=8.0)
         pair_wise_nwd = torch.exp(-2.0 * (torch.sqrt(w2_sq) / diag_gt_safe))
 
-        # 4. Scale-Adaptive Dynamic-K Budget in SimOTA (100% Vectorized GPU Implementation)
-        # FIX: Define hybrid_overlap before using it
+        # 4. Balanced Scale-Adaptive Dynamic-K Budget in SimOTA (100% Vectorized GPU Implementation)
         hybrid_overlap = 0.5 * (pair_wise_ious + pair_wise_nwd)
 
         is_macro = (gt_scale.view(-1, 1) >= 96.0)
-        n_cand = min(16, hybrid_overlap.size(1))
+        n_cand = min(14, hybrid_overlap.size(1))
         
         topk_overlap, _ = torch.topk(hybrid_overlap, n_cand, dim=1)  # [num_gt, n_cand]
 
@@ -664,8 +660,9 @@ class TDE_Head(YOLOXHead):
 
         dynamic_ks = (topk_overlap * cand_mask).sum(dim=1).round().int()
 
-        min_k = torch.where(is_macro.squeeze(-1), 3, 1)
-        max_k = torch.where(is_macro.squeeze(-1), 16, 10)
+        # Balanced Bounds: Micro [2, 8] | Macro [3, 12]
+        min_k = torch.where(is_macro.squeeze(-1), 3, 2)
+        max_k = torch.where(is_macro.squeeze(-1), 12, 8)
         
         dynamic_ks = torch.clamp(dynamic_ks, min=min_k, max=max_k)
         # Note: The slow Python 'for g in range(num_gt):' loop is deleted.

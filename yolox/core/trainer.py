@@ -236,6 +236,11 @@ class Trainer:
         torch.cuda.set_device(self.local_rank)
         model = self.exp.get_model()
         logger.info("Model Summary: {}".format(get_model_info(model, self.exp.test_size)))
+        for m in model.modules():
+            if hasattr(m, "total_ops"):
+                delattr(m, "total_ops")
+            if hasattr(m, "total_params"):
+                delattr(m, "total_params")
         model.to(self.device)
 
         self.optimizer = self.exp.get_optimizer(self.args.batch_size)
@@ -424,8 +429,9 @@ class Trainer:
                 evalmodel = evalmodel.module
 
         with adjust_status(evalmodel, training=False):
+            # Pass half=self.amp_training so validation runs in FP16 Tensor Cores!
             (ap50_95, ap50, summary), predictions = self.exp.eval(
-                evalmodel, self.evaluator, self.is_distributed, return_outputs=True
+                evalmodel, self.evaluator, self.is_distributed, half=self.amp_training, return_outputs=True
             )
 
         update_best_ckpt = ap50_95 > self.best_ap
