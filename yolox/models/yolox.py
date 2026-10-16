@@ -87,12 +87,14 @@ class YOLOX(nn.Module):
 
     def _get_aux_multiplier(self):
         """
-        Extends auxiliary regularization to maintain prototype separation into Epoch 55-70.
-        Prevents premature feature freeze before Mosaic is disabled.
+        --- REFINEMENT 3: DE-COUPLED 3-PHASE CURRICULUM SCAFFOLDING ---
+        Epochs 1-35 : Full representation & manifold shaping (1.00)
+        Epochs 35-65: Smooth cosine fade of auxiliary constraints (1.00 -> 0.15)
+        Epochs 65-80: Pure detection & L1 box refinement with locked 0.15 floor
         """
-        decay_start = 50   # Shifted from 30
-        decay_end = 70     # Shifted from 65
-        min_ratio = 0.15   # Raised from 0.10 to prevent prototype collapse
+        decay_start = 35   # De-coupled: finishes decaying BEFORE Epoch 65 Mosaic shutoff
+        decay_end = 65     # Reaches floor exactly as no_aug_epochs activates
+        min_ratio = 0.15   # Bounded floor prevents prototype collapse
         
         if self.current_epoch < decay_start:
             return 1.0
@@ -147,8 +149,12 @@ class YOLOX(nn.Module):
             lambda_idx = self._get_indexer_loss_weight()
             aux_mult = self._get_aux_multiplier()
             
+            # --- REFINEMENT 2: CMA COVARIANCE WHITENING WARMUP RAMP ---
+            # Allows Dark2 convolutions to learn edge primitives before enforcing decorrelation
+            cma_ramp = min(1.0, float(self.current_epoch) / 10.0)
+
             lambda_mem = 0.05 * aux_mult
-            lambda_cma = 0.10 * aux_mult
+            lambda_cma = 0.10 * cma_ramp * aux_mult
             lambda_rep = 0.01 * aux_mult
             lambda_phase = 0.05 * min(1.0, float(self.current_epoch) / 5.0) * aux_mult
             lambda_sem = 0.05 * aux_mult  # Calibrated to 0.05 for balanced multi-task gradients

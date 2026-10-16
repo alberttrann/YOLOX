@@ -449,11 +449,17 @@ class TDE_Head(YOLOXHead):
         class_fg_counts = cls_targets_concat.sum(dim=0)
         active_class_mask = class_fg_counts > 0.0
 
+        # --- REFINEMENT 1: 70/30 BALANCED HYBRID CLASSIFICATION LOSS ---
+        # 70% Global anchor normalization (stabilizes dominant class convergence)
+        loss_cls_pos_global = (weighted_bce * pos_mask).sum() / num_fg
+        
+        # 30% Per-class equalized normalization (protects vulnerable rare classes)
         if active_class_mask.any():
-            loss_cls_pos = (pos_bce_per_class[active_class_mask] / torch.clamp(class_fg_counts[active_class_mask], min=1.0)).mean()
+            loss_cls_pos_equal = (pos_bce_per_class[active_class_mask] / torch.clamp(class_fg_counts[active_class_mask], min=1.0)).mean()
         else:
-            loss_cls_pos = 0.0
+            loss_cls_pos_equal = 0.0
 
+        loss_cls_pos = 0.70 * loss_cls_pos_global + 0.30 * loss_cls_pos_equal
         loss_cls = loss_cls_pos + loss_cls_neg
 
         loss_l1 = 0.0
