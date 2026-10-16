@@ -12,7 +12,7 @@ from .losses import PrototypeRepulsionLoss
 from .yolo_head import YOLOXHead
 from .yolo_pafpn import YOLOPAFPN
 
-from .aux_semantic_head import GaussianOccupancyTargetGenerator, GaussianFocalLoss
+from .aux_semantic_head import BoxOccupancyTargetGenerator, ActiveClassFocalDiceLoss
 
 class YOLOX(nn.Module):
     """
@@ -44,7 +44,7 @@ class YOLOX(nn.Module):
             m_inter=0.08
         )
 
-        self.sem_loss_fn = GaussianFocalLoss(alpha=2.0, beta=4.0)
+        self.sem_loss_fn = ActiveClassFocalDiceLoss()
 
         self.current_epoch = 0
         self.max_epochs = 80
@@ -136,7 +136,7 @@ class YOLOX(nn.Module):
             # 5. Evaluate Weak Semantic Affordance Loss
             if sem_pred is not None and targets is not None:
                 feat_size = (sem_pred.shape[-2], sem_pred.shape[-1])
-                target_heatmaps = GaussianOccupancyTargetGenerator.generate(
+                target_heatmaps = BoxOccupancyTargetGenerator.generate(
                     targets, num_classes=self.num_classes, feat_size=feat_size, stride=8.0
                 )
                 raw_sem_loss = self.sem_loss_fn(sem_pred, target_heatmaps)

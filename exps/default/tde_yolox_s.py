@@ -160,11 +160,11 @@ class Exp(MyExp):
 
     def get_optimizer(self, batch_size):
         """
-        CERTIFIED MuSGD OPTIMIZER PARTITION:
+        CERTIFIED MuSGD OPTIMIZER PARTITION v3.6:
           - Group 0 (Muon): STRICTLY Prototypes [576, 128] on S^127 (lr=0.02, lr_factor=8.0, WD=0.0)
-          - Group 1 (SGD Decay): All 2D/4D Convolutions & Linear Projections (lr=base_lr, lr_factor=1.0, WD=5e-4)
-          - Group 2 (SGD No-Decay): Biases, Normalizations, and 1D Scalers (lr=base_lr, lr_factor=1.0, WD=0.0)
-          - Group 3 (Meta-SGD): Stage 1 TTT learning rates (lr=base_lr*0.05, lr_factor=0.05, WD=0.0)
+          - Group 1 (SGD Decay): All Convolutions, Projections, ScaleAttnRes.w, and w_hf (WD=5e-4)
+          - Group 2 (SGD No-Decay): Biases, Normalization Affines, aligner.gamma/beta, Scalar Gates (WD=0.0)
+          - Group 3 (Meta-SGD): Stage 1 TTT Step Sizes ttt_lrs_* (lr=base_lr*0.05, lr_factor=0.05, WD=0.0)
         """
         if "optimizer" in self.__dict__:
             return self.optimizer
@@ -183,57 +183,112 @@ class Exp(MyExp):
             if not p.requires_grad:
                 continue
 
-            # 1. ONLY Prototypes on S^127 go to Muon (Riemannian Manifold Optimization)
+            # -------------------------------------------------------------
+            # RULE 1: ONLY Prototypes on S^127 go to Muon Engine
+            # -------------------------------------------------------------
             if "prototypes" in name:
                 pg_muon.append(p)
                 registered_params.add(p)
                 continue
 
-            # 2. Stage 1 TTT Step Sizes -> Meta-SGD
+            # -------------------------------------------------------------
+            # RULE 2: Stage 1 TTT Meta-SGD Step Sizes (Slow Learning Rate)
+            # -------------------------------------------------------------
             if "ttt_lrs" in name:
                 pg_meta.append(p)
                 registered_params.add(p)
                 continue
 
-            # 3. 1D Biases, Normalizations, and Scalar Gates -> SGD No-Decay
-            # FIX: Use name.endswith(".w") to avoid matching standard ".weight" conv kernels!
+            # -------------------------------------------------------------
+            # RULE 3: Routing Weights & High-Frequency Gains MUST HAVE DECAY!
+            # Solves the 500%-800% norm explosion discovered in Checkpoint Probe!
+            # -------------------------------------------------------------
+            is_explicit_decay = (
+                "attnres" in name and name.endswith(".w")
+                or "w_hf" in name
+            )
+            if is_explicit_decay:
+                pg_sgd_decay.append(p)
+                registered_params.add(p)
+                continue
+
+            # -------------------------------------------------------------
+            # RULE 4: True Biases, Normalization Scales, and Bounded Physical Gates
+            # (No Weight Decay to prevent feature magnitude shrinkage)
+            # -------------------------------------------------------------
             is_no_decay = (
                 "bias" in name
-                or p.ndim <= 1
                 or any(k in name for k in ["gn.", "bn.", "norm.", "bn1.", "net.1."])
-                or name.endswith(".w")
                 or any(k in name for k in [
-                    "mask_token", "gr_gate", "gamma", "beta", 
-                    "v_q", "v_k", "omega", "w_hf", "lambda_fog", "k_sigma", "pool_alpha"
+                    "aligner.gamma", "aligner.beta", "gamma", 
+                    "gr_gate", "omega", "lambda_fog", "k_sigma", "pool_alpha"
                 ])
+                or (p.ndim <= 1 and not is_explicit_decay)
             )
 
             if is_no_decay:
                 pg_sgd_no_decay.append(p)
                 registered_params.add(p)
             else:
-                # 4. ALL Convolutions & Linear Projections -> SGD with Weight Decay (5e-4)
+                # -------------------------------------------------------------
+                # RULE 5: All 2D/4D Convolutions, Linear Projections, and Decoders
+                # -------------------------------------------------------------
                 pg_sgd_decay.append(p)
                 registered_params.add(p)
 
+        # Strict completeness assertion: No parameter left behind!
         unassigned = all_trainable_params - registered_params
-        assert len(unassigned) == 0, f"Unassigned parameters detected: {unassigned}"
+        assert len(unassigned) == 0, f"FATAL: Unassigned parameters detected in optimizer setup: {unassigned}"
 
-        logger.info(
-            f"MuSGD Registered Param Groups: "
-            f"Muon={len(pg_muon)} | SGD Decay={len(pg_sgd_decay)} | "
-            f"SGD No-Decay={len(pg_sgd_no_decay)} | Meta-SGD={len(pg_meta)}"
-        )
+        logger.info("=" * 80)
+        logger.info("CERTIFIED MuSGD OPTIMIZER PARTITION v3.6:")
+        logger.info(f"  • Group 0 (Muon S^127)      : {len(pg_muon):3d} tensors | LR={0.02:.5f} (8.0x) | WD=0.0")
+        logger.info(f"  • Group 1 (SGD with Decay)  : {len(pg_sgd_decay):3d} tensors | LR={base_lr:.5f} (1.0x) | WD={self.weight_decay}")
+        logger.info(f"  • Group 2 (SGD No-Decay)    : {len(pg_sgd_no_decay):3d} tensors | LR={base_lr:.5f} (1.0x) | WD=0.0")
+        logger.info(f"  • Group 3 (Meta-SGD TTT)    : {len(pg_meta):3d} tensors | LR={base_lr * 0.05:.5f} (0.05x)| WD=0.0")
+        logger.info("=" * 80)
 
         param_groups = [
-            # Group 0: Muon (Prototypes: lr=0.02, lr_factor=8.0x, WD=0.0)
-            {"params": pg_muon, "use_muon": True, "lr": 0.02, "lr_factor": 0.02 / base_lr, "momentum": 0.95, "weight_decay": 0.0, "nesterov": True},
-            # Group 1: Convolutions & Projections (Bounded by weight decay 5e-4)
-            {"params": pg_sgd_decay, "use_muon": False, "lr": base_lr, "lr_factor": 1.0, "momentum": 0.9, "weight_decay": self.weight_decay, "nesterov": True},
-            # Group 2: Biases, Normalizations, and Scalar Gates (WD=0.0)
-            {"params": pg_sgd_no_decay, "use_muon": False, "lr": base_lr, "lr_factor": 1.0, "momentum": 0.9, "weight_decay": 0.0, "nesterov": True},
-            # Group 3: Meta-SGD Step Sizes
-            {"params": pg_meta, "use_muon": False, "lr": base_lr * 0.05, "lr_factor": 0.05, "momentum": 0.9, "weight_decay": 0.0, "nesterov": True},
+            # Group 0: Muon (Prototypes on S^127)
+            {
+                "params": pg_muon, 
+                "use_muon": True, 
+                "lr": 0.02, 
+                "lr_factor": 0.02 / base_lr, 
+                "momentum": 0.95, 
+                "weight_decay": 0.0, 
+                "nesterov": True
+            },
+            # Group 1: Convolutions, Projections, ScaleAttnRes.w, and w_hf (Bounded by 5e-4 decay!)
+            {
+                "params": pg_sgd_decay, 
+                "use_muon": False, 
+                "lr": base_lr, 
+                "lr_factor": 1.0, 
+                "momentum": self.momentum, 
+                "weight_decay": self.weight_decay, 
+                "nesterov": True
+            },
+            # Group 2: Biases, Normalization Affines, aligner.gamma/beta, and Physical Scalars
+            {
+                "params": pg_sgd_no_decay, 
+                "use_muon": False, 
+                "lr": base_lr, 
+                "lr_factor": 1.0, 
+                "momentum": self.momentum, 
+                "weight_decay": 0.0, 
+                "nesterov": True
+            },
+            # Group 3: Meta-SGD Step Sizes (ttt_lrs_*)
+            {
+                "params": pg_meta, 
+                "use_muon": False, 
+                "lr": base_lr * 0.05, 
+                "lr_factor": 0.05, 
+                "momentum": self.momentum, 
+                "weight_decay": 0.0, 
+                "nesterov": True
+            },
         ]
 
         self.optimizer = MuSGD(param_groups, muon=1.0, sgd=0.0)

@@ -269,7 +269,8 @@ class C2f_BQSA_P4(nn.Module):
             k_actual = max(1, min(total_blocks, int(round(rho_dynamic * float(total_blocks)))))
 
         # 2. Master Feature Conditioning (Unified v3.4 Engine)
-        feat_cond = self.rmbconv(self.rca(feat))
+        # Clean local structure first, then apply clean coordinate attention:
+        feat_cond = self.rca(self.rmbconv(feat))
 
         # 3. Dynamic Saliency Pool Gating
         s_up = F.interpolate(p5_saliency.float(), size=(H, W), mode='nearest')
@@ -399,7 +400,8 @@ class C2f_BQSA_P3(nn.Module):
         feat = y[-1]
         B, C, H, W = feat.shape
 
-        feat_cond = self.rmbconv(self.rca(feat))
+        # Clean local structure first, then apply clean coordinate attention:
+        feat_cond = self.rca(self.rmbconv(feat))
 
         bs = min(self.block_size, H, W)
         num_h = max(1, H // bs)

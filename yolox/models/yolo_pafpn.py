@@ -100,7 +100,7 @@ class YOLOPAFPN(nn.Module):
 
         # 4. TRAINING-ONLY WEAK SEMANTIC AFFORDANCE DECODER (Zero test-time overhead)
         if self.training:
-            sem_pred = self.aux_sem_head(n3_out, n4_out)
+            sem_pred = self.aux_sem_head(n3_out, n4_out, n5_out)
         else:
             sem_pred = None
 

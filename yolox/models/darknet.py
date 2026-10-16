@@ -180,23 +180,21 @@ class CSPDarknet(nn.Module):
         x_clean_stem = self.stem(x)
         outputs["stem"] = x_clean_stem
         
-        # 2. EVALUATE FOURIER PHASE CONSISTENCY WITH STATIONARY ANCHOR
+        # 2. EVALUATE FOURIER PHASE LOSS DIRECTLY ON STEM REPRESENTATIONS
+        # Saves 2 full forward passes through Dark2 per iteration!
         if self.training:
             with torch.no_grad():
                 x_perturbed = self._fourier_amplitude_perturb(x)
-                stem_pert = self.stem(x_perturbed)
-                # FIX: z_clean is a detached, stationary target (zero gradient fighting on dark2!)
-                z_clean, _ = self.dark2(x_clean_stem.detach(), run_ttt=False, epoch=epoch, max_epochs=max_epochs)
             
-            # Only the perturbed branch updates parameters to match the stationary clean anchor
-            z_pert, _ = self.dark2(stem_pert, run_ttt=False, epoch=epoch, max_epochs=max_epochs)
+            stem_pert = self.stem(x_perturbed)
             
-            sim = F.cosine_similarity(z_clean.flatten(1), z_pert.flatten(1), dim=-1)
+            # Asymmetric clean anchor prevents gradient cancellation on detection
+            sim = F.cosine_similarity(x_clean_stem.detach().flatten(1), stem_pert.flatten(1), dim=-1)
             phase_loss = (1.0 - sim).mean()
         else:
             phase_loss = torch.tensor(0.0, device=x.device)
 
-        # 3. ADAPTIVE STAGE 1 (DARK2) VIA COVARIATE MOMENT ALIGNMENT
+        # 3. ADAPTIVE STAGE 1 (DARK2) VIA CMA
         run_ttt = False
         if not self.training:
             if ttt_prob is None or ttt_prob > 0.0:
@@ -206,11 +204,10 @@ class CSPDarknet(nn.Module):
             if prob > 0.0 and torch.rand(1).item() < prob:
                 run_ttt = True
 
-        # Forward clean stem features into Dark2 with CMA functional adaptation
         x, cma_loss = self.dark2(x_clean_stem, run_ttt=run_ttt, epoch=epoch, max_epochs=max_epochs)
         outputs["dark2"] = x
         
-        # 4. DEEP CONVOLUTIONAL HIGHWAYS (Dark3-Dark5)
+        # 4. DEEP CONVOLUTIONAL HIGHWAYS
         x = self.dark3(x)
         outputs["dark3"] = x
         x = self.dark4(x)

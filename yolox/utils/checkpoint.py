@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding:utf-8 -*-
 # Copyright (c) Megvii Inc. All rights reserved.
-# Integrated for TDE-YOLOX v3.1: Canonical Checkpoint Remapper with Verified Weight Transfer
+# Integrated for TDE-YOLOX v3.6: Canonical Checkpoint Remapper with Verified Weight Transfer
 
 import os
 import shutil
@@ -12,12 +12,13 @@ import torch
 
 def load_ckpt(model, ckpt):
     """
-    TDE-YOLOX v3.1 Master Pretrained Checkpoint Loader.
+    TDE-YOLOX v3.6 Master Pretrained Checkpoint Loader.
     Certified Innovations:
       - Strips 'module.' prefixes strictly at index 0.
       - Canonicalizes 'backbone.backbone.' to 'backbone.' symmetrically.
       - Remaps renamed Neck Convolutions (lateral_conv0 -> lateral_c5, reduce_conv1 -> reduce_p4).
       - Correctly identifies channel-doubling Scale-AttnRes downsamplers (down_n3, down_n4) as custom layers.
+      - Whitelists all custom modules (including 'aligner') to prevent false-alarm missing-weight warnings.
       - Preserves trained Scale-AttnRes weights when present; enforces zero-init assertion on base loads.
       - Whitelists expected class-count shape mismatches (9 vs 80 classes).
     """
@@ -34,10 +35,11 @@ def load_ckpt(model, ckpt):
     model_state_dict = model.state_dict()
     load_dict = {}
 
+    # Complete Whitelist: Added "aligner" to recognize AdaptiveChannelAligner parameters
     custom_layers = [
         "memory_banks", "anchor_projectors", "local_projectors", "manifold_decoders", 
-        "post_engram_dw", "p5_dense_attn", "p4_bqsa", "p3_bqsa", "projector", "ttt_lrs",
-        "down_n3", "down_n4", "aux_sem_head", "cls_biases"  # Scale-AttnRes channel-doubling downsamplers
+        "post_engram_dw", "p5_dense_attn", "p4_bqsa", "p3_bqsa", "projector", "aligner", "ttt_lrs",
+        "down_n3", "down_n4", "aux_sem_head", "cls_biases"
     ]
 
     # Only lateral_c5 and reduce_p4 share identical tensor dimensions with standard YOLOX
