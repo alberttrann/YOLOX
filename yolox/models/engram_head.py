@@ -94,16 +94,17 @@ class AntiCollisionEngramBank(nn.Module):
         g_raw = torch.sigmoid(gate_logit) * obj_envelope
         # Warmup floor smoothly transitions from 0.15 -> 0.05 over 30 epochs (NOT 0.0 at epoch 15!)
         # Permanent 0.05 baseline ensures the memory path is never completely silenced on true objects.
-        warmup_ratio = max(0.0, 1.0 - float(epoch) / 30.0)
+        # DYNAMIC CURRICULUM HORIZON: Scales floor decay proportionally to max_epochs (37.5% of run)
+        max_ep = float(getattr(self, "max_epochs", 80))
+        warmup_horizon = max(10.0, max_ep * 0.375)
+        warmup_ratio = max(0.0, 1.0 - float(epoch) / warmup_horizon)
         curriculum_floor = 0.05 + 0.10 * warmup_ratio
         g_effective = torch.max(g_raw, curriculum_floor * obj_envelope)
         
-        # 6. Source-Normalized Atmospheric Entropy Modulator
+        # RESOLUTION-INVARIANT ATMOSPHERIC MODULATOR:
+        # Operates directly on the normalized optical contrast ratio r_H in [0.0, 1.0]
         h_val = h_s.float() if torch.is_tensor(h_s) else torch.tensor(h_s, device=q.device, dtype=torch.float32)
-        if h_val <= 1.0:
-            h_ratio = torch.clamp(h_val, min=0.0, max=1.0)
-        else:
-            h_ratio = torch.clamp(h_val / math.log(576.0), min=0.0, max=1.0)
+        h_ratio = torch.clamp(h_val, min=0.0, max=1.0)
 
         atmo_modulator = 0.75 + 0.50 * torch.sigmoid(4.0 * (h_ratio - 0.50)).to(q.dtype)
         g_final = torch.clamp(g_effective * atmo_modulator, min=0.0, max=0.70)
@@ -206,7 +207,8 @@ class TDE_Head(YOLOXHead):
 
     def forward(self, inputs, labels=None, imgs=None):
         xin, p_anchors, h_s = inputs
-        h_s = torch.nan_to_num(h_s, nan=math.log(400.0), posinf=math.log(400.0), neginf=0.0)
+        # DYNAMIC ENTROPY FALLBACK: Defaults cleanly to neutral contrast (0.50) if NaN/Inf occurs
+        h_s = torch.nan_to_num(h_s, nan=0.50, posinf=1.0, neginf=0.10)
 
         outputs = []
         origin_preds = []
@@ -239,12 +241,16 @@ class TDE_Head(YOLOXHead):
             
             mem_conv = self.manifold_decoders[k](mem_restored)
             
-            # FP32 RMS Scale Shield
+            # FP32 CANONICAL RMS SCALE SHIELD:
+            # Prevents memory from being downscaled to faded fog levels while guarding against decoder explosion!
             cls_fp32 = cls_feat.float()
             mem_fp32 = mem_conv.float()
             rms_cls = torch.sqrt(torch.mean(cls_fp32.pow(2), dim=1, keepdim=True) + 1e-5)
             rms_mem = torch.sqrt(torch.mean(mem_fp32.pow(2), dim=1, keepdim=True) + 1e-5)
-            scale_ratio = torch.clamp(rms_cls / rms_mem, min=0.10, max=10.0)
+            
+            # Floor at 1.0 guarantees that when weather suppresses conv features, memory preserves canonical signal!
+            target_energy = torch.clamp(rms_cls, min=1.0)
+            scale_ratio = torch.clamp(target_energy / rms_mem, min=0.10, max=5.0)
             mem_conv_scaled = (mem_fp32 * scale_ratio).to(cls_feat.dtype)
             
             gate = gate.to(cls_feat.dtype)
@@ -532,12 +538,10 @@ class TDE_Head(YOLOXHead):
                 0.0
             )
 
+        # DYNAMIC STRIDE BINDING: Derives level masks directly from configured self.strides
         strides_1d = expanded_strides[0]
-        mask_p3 = (strides_1d == 8)
-        mask_p4 = (strides_1d == 16)
-        mask_p5 = (strides_1d == 32)
-        level_masks = [mask_p3, mask_p4, mask_p5]
-        level_strides = [8.0, 16.0, 32.0]
+        level_masks = [(strides_1d == s) for s in self.strides]
+        level_strides = [float(s) for s in self.strides]
 
         gt_cx = gt_bboxes_per_image[:, 0:1]
         gt_cy = gt_bboxes_per_image[:, 1:2]
