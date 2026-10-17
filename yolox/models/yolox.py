@@ -155,9 +155,9 @@ class YOLOX(nn.Module):
 
             lambda_mem = 0.05 * aux_mult
             lambda_cma = 0.10 * cma_ramp * aux_mult
-            lambda_rep = 0.01 * aux_mult
+            lambda_rep = 0.05 * aux_mult  # Re-balanced from 0.01 -> 0.05 to prevent S^127 prototype merging!
             lambda_phase = 0.05 * min(1.0, float(self.current_epoch) / 5.0) * aux_mult
-            lambda_sem = 0.05 * aux_mult  # Calibrated to 0.05 for balanced multi-task gradients
+            lambda_sem = 0.05 * aux_mult
 
             total_loss = (
                 total_det_loss

@@ -115,6 +115,7 @@ def make_parser():
     parser.add_argument("--legacy", dest="legacy", default=False, action="store_true")
     parser.add_argument("--test", dest="test", default=False, action="store_true")
     parser.add_argument("--speed", dest="speed", default=False, action="store_true")
+    parser.add_argument("--no-ema", dest="no_ema", default=False, action="store_true", help="Evaluate live model weights instead of ModelEMA shadow weights")
     parser.add_argument("opts", default=None, nargs=argparse.REMAINDER)
     return parser
 
@@ -169,11 +170,11 @@ def main(exp, args, num_gpu):
     ckpt = torch.load(ckpt_file, map_location=f"cuda:{rank}")
 
     if isinstance(ckpt, dict):
-        if "ema" in ckpt and ckpt["ema"] is not None:
+        if not getattr(args, "no_ema", False) and "ema" in ckpt and ckpt["ema"] is not None:
             logger.info("Loading ModelEMA shadow weights for evaluation...")
             ckpt_state = ckpt["ema"]
         elif "model" in ckpt and ckpt["model"] is not None:
-            logger.info("Loading standard model weights for evaluation...")
+            logger.info("Loading standard LIVE model weights for evaluation (bypassing ModelEMA)...")
             ckpt_state = ckpt["model"]
         else:
             ckpt_state = ckpt

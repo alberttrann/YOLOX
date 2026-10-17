@@ -3,6 +3,7 @@
 # Integrated for TDE-YOLOX v3.1: Certified Multi-Engine Trainer & Synchronization Barrier
 
 import datetime
+import math
 import os
 import time
 from loguru import logger
@@ -148,11 +149,18 @@ class Trainer:
         step_successful = (scale_after >= scale_before)
         if self.use_model_ema and step_successful:
             self.ema_model.update(self.model)
-            # Post-EMA Riemannian Retraction onto unit hypersphere S^127
+            
+            # S^127 HYPERSPHERICAL PROTOTYPE PROTECTION:
+            # Mirrors live Muon-optimized prototypes directly into the EMA shadow model.
+            # Convolutions retain temporal EMA smoothing; Prototypes maintain live S^127 orthogonality!
             with torch.no_grad():
-                for m in self.ema_model.ema.modules():
-                    if hasattr(m, "prototypes") and getattr(m.prototypes, "is_hypersphere", False):
-                        m.prototypes.data.copy_(F.normalize(m.prototypes.data, p=2, dim=-1, eps=1e-5))
+                live_model = self.model.module if hasattr(self.model, "module") else self.model
+                ema_model = self.ema_model.ema.module if hasattr(self.ema_model.ema, "module") else self.ema_model.ema
+                
+                if hasattr(live_model, "head") and hasattr(ema_model, "head"):
+                    for m_live, m_ema in zip(live_model.head.memory_banks, ema_model.head.memory_banks):
+                        if hasattr(m_live, "prototypes") and hasattr(m_ema, "prototypes"):
+                            m_ema.prototypes.data.copy_(m_live.prototypes.data)
 
         # Update learning rates while respecting per-group lr_factor
         lr = self.lr_scheduler.update_lr(self.progress_in_iter + 1)
@@ -266,16 +274,24 @@ class Trainer:
         if self.is_distributed:
             model = DDP(model, device_ids=[self.local_rank], broadcast_buffers=False)
 
-        # ModelEMA Initialization with Zero-Step Fresh Warmup Protection
+        # ModelEMA Initialization with Schedule-Proportional Decay Warmup
         if self.use_model_ema:
             self.ema_model = ModelEMA(model, 0.9998)
+            
+            # --- PILLAR 1: SCHEDULE-PROPORTIONAL EMA DECAY WARMUP ---
+            # Replaces the hard-coded 2000 constant with actual dataset warmup steps:
+            total_warmup_iters = max(1.0, float(self.exp.warmup_epochs * self.max_iter))
+            tau_ema = total_warmup_iters / 2.5
+            self.ema_model.decay = lambda x: 0.9998 * (1.0 - math.exp(-float(x) / tau_ema))
+            # --------------------------------------------------------
+
             if self._loaded_ema_state is not None:
                 self.ema_model.ema.load_state_dict(self._loaded_ema_state)
                 self.ema_model.updates = self.max_iter * self.start_epoch
                 logger.info("Successfully restored ModelEMA shadow weights from checkpoint!")
             else:
                 self.ema_model.updates = 0
-                logger.info("No EMA state found; initialized fresh ModelEMA with zero-step warmup.")
+                logger.info("Initialized Schedule-Proportional ModelEMA (Tau = {:.1f} iters).".format(tau_ema))
 
         self.model = model
         self.evaluator = self.exp.get_evaluator(batch_size=self.args.batch_size, is_distributed=self.is_distributed)

@@ -43,7 +43,8 @@ class ScaleAttnRes(nn.Module):
         V = torch.stack(sources, dim=0)
         K = torch.stack([self.norm(s) for s in sources], dim=0)
 
-        w_safe = torch.clamp(self.w, min=-5.0, max=5.0)
+        # DTYPE-SAFE EINSUM: Ensures exact precision matching under AMP / FP16 / FP32
+        w_safe = torch.clamp(self.w.to(dtype=K.dtype), min=-5.0, max=5.0)
         logits = torch.einsum('c, m b c h w -> m b h w', w_safe, K) * self.scale
         # Softmax computed strictly in FP32
         weights = F.softmax(logits.float(), dim=0).to(V.dtype)
@@ -144,29 +145,28 @@ class P5ExclusiveDenseAttention(nn.Module):
         attn_fp32 = torch.matmul(q_fp32, k_fp32.transpose(-2, -1)) * self.scale
         attn_fp32 = F.softmax(attn_fp32, dim=-1)
 
-        # 2. Saliency Extraction in FP32 with Safe Variance
-        # TRUE SHANNON ATTENTION ENTROPY (Eliminates artificial z-score compression):
+        # 2. Saliency Extraction in FP32 with Safe Contrast Ratio
         diag_elements = attn_fp32.diagonal(dim1=-2, dim2=-1)
         saliency_sum = attn_fp32.sum(dim=-2) - diag_elements
         saliency = saliency_sum.mean(dim=1).reshape(B, 1, H, W) / max(1.0, float(N - 1))
         
         s_flat = saliency.flatten(1).float()
-        s_sum = s_flat.sum(dim=-1, keepdim=True) + 1e-7
-        p_dist = s_flat / s_sum
         
-        h_s_raw = (-torch.sum(p_dist * torch.log(p_dist + 1e-7), dim=-1).mean()).detach()
-        h_s_fallback = math.log(max(2, N))
-        h_s_clean = torch.nan_to_num(h_s_raw, nan=h_s_fallback, posinf=h_s_fallback, neginf=0.0)
-        # SOURCE-NORMALIZATION: Returns a scale-invariant ratio strictly in [0.0, 1.0]!
-        h_max = math.log(max(2, N))
-        h_ratio = torch.clamp(h_s_clean / h_max, min=0.0, max=1.0)
-        # 3. Value Aggregation strictly in FP32
+        # PHYSICAL OPTICAL SALIENCY CONTRAST RATIO:
+        # Measures relative attention contrast Cv = sigma(s) / mu(s) to eliminate the 1.0000 saturation trap!
+        # Clean daylight: High contrast (Cv ~ 0.85) -> h_ratio ~ 0.28 (Exploratory routing, calm memory).
+        # Dense fog/snow: Uniform scattering (Cv -> 0.05) -> h_ratio -> 0.95 (Sharp routing, active memory).
+        s_mean = torch.mean(s_flat, dim=-1, keepdim=True)
+        s_var = torch.clamp(torch.var(s_flat, dim=-1, keepdim=True, unbiased=False), min=1e-8)
+        s_std = torch.sqrt(s_var)
+        c_v = s_std / (s_mean + 1e-6)
+        
+        h_ratio_raw = torch.exp(-1.5 * c_v).mean()
+        h_ratio = torch.clamp(torch.nan_to_num(h_ratio_raw, nan=0.50, posinf=1.0, neginf=0.10), min=0.10, max=1.0)
+        # 3. Value Aggregation strictly in FP32 (Pure Context Preservation)
+        # Eliminates destructive Gram-Schmidt cancellation on macro-objects (Buses/Trucks)!
         y_fp32 = torch.matmul(attn_fp32, v.float())
-        v_fp32 = v.float()
-        v_norm_sq = (v_fp32 * v_fp32).sum(dim=-1, keepdim=True) + 1e-5
-        proj_scalar = (y_fp32 * v_fp32).sum(dim=-1, keepdim=True) / v_norm_sq
-        z = (y_fp32 - proj_scalar * v_fp32).to(v.dtype)
-        z_spatial = self.proj(z.permute(0, 1, 3, 2).reshape(B, C, H, W))
+        z_spatial = self.proj(y_fp32.to(v.dtype).permute(0, 1, 3, 2).reshape(B, C, H, W))
 
         # 4. Gated Residual Highway with Learnable Fog Coupling
         g_xsa = torch.sigmoid(self.w_r1(x) + self.w_r2(z_spatial) + (self.lambda_fog * h_ratio))
@@ -230,8 +230,20 @@ class C2f_BQSA_P4(nn.Module):
             xc, yc = valid_boxes[:, 1], valid_boxes[:, 2]
             w, h   = valid_boxes[:, 3], valid_boxes[:, 4]
 
-            x1, y1 = xc - w / 2.0, yc - h / 2.0
-            x2, y2 = xc + w / 2.0, yc + h / 2.0
+            x1 = xc - w / 2.0
+            y1 = yc - h / 2.0
+            x2 = xc + w / 2.0
+            y2 = yc + h / 2.0
+
+            # --- INSERT HERE: DYNAMIC 16:9 CANVAS FILTER ---
+            # Discards targets that are completely off-screen before grid clamping
+            img_w = float(num_w * 64.0)  # Dynamically adapts to 1024px (num_w=16) or multiscale
+            img_h = float(num_h * 64.0)  # Dynamically adapts to 576px (num_h=9) or multiscale
+            on_screen = (x2 > 0) & (y2 > 0) & (x1 < img_w) & (y1 < img_h)
+            if not on_screen.any():
+                continue
+            x1, y1, x2, y2 = x1[on_screen], y1[on_screen], x2[on_screen], y2[on_screen]
+            # -----------------------------------------------
 
             c_min = torch.clamp((x1 / 64.0).floor().long(), 0, num_w - 1)
             c_max = torch.clamp(((x2 - 1e-4) / 64.0).floor().long(), 0, num_w - 1)
@@ -241,7 +253,6 @@ class C2f_BQSA_P4(nn.Module):
             r_max = torch.clamp(((y2 - 1e-4) / 64.0).floor().long(), 0, num_h - 1)
             r_max = torch.max(r_max, r_min)
 
-            # REFINEMENT 5: Explicit Integer Casting (Eliminates PyTorch tensor-slice CUDA sync warnings)
             for r1, r2, c1, c2 in zip(r_min, r_max, c_min, c_max):
                 target_mask[b, int(r1):int(r2) + 1, int(c1):int(c2) + 1] = 1.0
 
@@ -259,58 +270,53 @@ class C2f_BQSA_P4(nn.Module):
         total_blocks = num_h * num_w
         tokens_per_b = bs * bs
 
-        # 1. FIXED K IN TRAINING VS ELASTIC IN INFERENCE
+        # 1. DIRECT OPTICAL ENTROPY RATIO (Eliminates redundant / ln(144) squashing)
+        # h_s is already the normalized atmospheric ratio r_H in [0.0, 1.0] from P5!
+        h_ratio_stat = torch.clamp(h_s.float(), 0.0, 1.0)
+
         if self.training:
             k_actual = max(1, min(total_blocks, int(round(self.sparsity_ratio * float(total_blocks)))))
         else:
-            h_max = math.log(max(2, total_blocks))
-            h_ratio = torch.clamp(h_s.float() / h_max, 0.0, 1.0)
-            rho_dynamic = torch.clamp(0.18 + 0.17 * h_ratio, min=0.18, max=0.35).item()
+            rho_dynamic = torch.clamp(0.18 + 0.17 * h_ratio_stat, min=0.18, max=0.35).item()
             k_actual = max(1, min(total_blocks, int(round(rho_dynamic * float(total_blocks)))))
 
         # 2. Master Feature Conditioning (Unified v3.4 Engine)
-        # Clean local structure first, then apply clean coordinate attention:
         feat_cond = self.rca(self.rmbconv(feat))
 
-        # 3. Dynamic Saliency Pool Gating
+        # 3. Dynamic Saliency Fusion (P5 Macro Prior + P4 Micro MaxPool)
         s_up = F.interpolate(p5_saliency.float(), size=(H, W), mode='nearest')
         block_saliency = F.avg_pool2d(s_up, kernel_size=bs, stride=bs).view(B, -1)
 
-        mu_s = block_saliency.mean(dim=-1, keepdim=True)
-        var_s = torch.clamp(torch.var(block_saliency, dim=-1, keepdim=True, unbiased=False), min=1e-8)
-        sigma_s = torch.sqrt(var_s) + 1e-5
-        
-        h_ratio_stat = torch.clamp(h_s.float() / math.log(max(2, total_blocks)), 0.0, 1.0)
-        k_sig = torch.clamp(F.softplus(self.k_sigma), min=0.5, max=3.5)
-        tau_pool = torch.clamp(mu_s - k_sig * h_ratio_stat * sigma_s, min=0.0)
-        pool_mask = (block_saliency >= tau_pool).to(feat.dtype)
+        # Standardize P5 saliency as an additive constructive prior
+        s_mean = block_saliency.mean(dim=-1, keepdim=True)
+        s_std = torch.sqrt(torch.clamp(torch.var(block_saliency, dim=-1, keepdim=True, unbiased=False), min=1e-8))
+        p5_macro_prior = (block_saliency - s_mean) / s_std
 
-        empty_mask = (pool_mask.sum(dim=-1, keepdim=True) == 0)
-        if empty_mask.any():
-            top1_fallback = torch.zeros_like(pool_mask).scatter_(-1, block_saliency.argmax(dim=-1, keepdim=True), 1.0)
-            pool_mask = torch.where(empty_mask, top1_fallback, pool_mask)
-
-        # 4. Hybrid Saliency Scoring & Gumbel Selection
+        # 4. HySparse2 Hybrid Saliency Scoring (Captures 1-pixel micro peaks)
         scores = self.indexer(self.indexer_norm(feat_cond))
         scores_avg = F.avg_pool2d(scores, kernel_size=bs, stride=bs).view(B, -1)
         scores_max = F.max_pool2d(scores, kernel_size=bs, stride=bs).view(B, -1)
         
         alpha = torch.sigmoid(self.pool_alpha)
+        # KEEP THIS VARIABLE NAMED block_scores (Resolves Pylance lines 361/365!)
         block_scores = alpha * scores_max + (1.0 - alpha) * scores_avg
-        masked_scores_fp32 = block_scores.float() * pool_mask.float() - (1.0 - pool_mask.float()) * 500.0
+
+        # CONSTRUCTIVE SYNERGY: P4 Micro MaxPool + P5 Macro Prior
+        # Eliminates the destructive -500.0 kill-switch so small objects are never extinguished!
+        candidate_scores_fp32 = block_scores.float() + 0.35 * p5_macro_prior
 
         if self.training:
-            u = torch.rand_like(masked_scores_fp32, dtype=torch.float32)
+            u = torch.rand_like(candidate_scores_fp32, dtype=torch.float32)
             gumbel = -torch.log(-torch.log(u + 1e-7) + 1e-7)
             tau_adaptive = torch.clamp(self.tau * (1.0 - 0.35 * h_ratio_stat), min=0.10)
-            soft_scores = F.softmax((masked_scores_fp32 + gumbel) / tau_adaptive, dim=-1).to(feat.dtype)
+            soft_scores = F.softmax((candidate_scores_fp32 + gumbel) / tau_adaptive, dim=-1).to(feat.dtype)
 
             _, topk_idx = torch.topk(soft_scores, k_actual, dim=-1)
             hard_mask = torch.zeros_like(soft_scores).scatter_(-1, topk_idx, 1.0)
             ste_mask = (hard_mask - soft_scores).detach() + soft_scores
             ste_weights = torch.gather(ste_mask, -1, topk_idx).unsqueeze(-1).unsqueeze(-1)
         else:
-            _, topk_idx = torch.topk(masked_scores_fp32, k_actual, dim=-1)
+            _, topk_idx = torch.topk(candidate_scores_fp32, k_actual, dim=-1)
             ste_weights = 1.0
 
         # 5. Extract Q, K, V
@@ -342,10 +348,15 @@ class C2f_BQSA_P4(nn.Module):
 
         # 7. Dense Queries Attend to [Sparse + Quad-Ambient] Keys/Values
         q_flat = q.reshape(B, C, H * W)
+       # Full FP32 QK and Value aggregation with Non-Destructive Ambient Bias
         q_fp32 = q_flat.transpose(-2, -1).float()
         k_fp32 = k_all.float()
-        attn_fp32 = torch.matmul(q_fp32, k_fp32) * (C ** -0.5)
-        attn_fp32 = F.softmax(attn_fp32, dim=-1)
+        
+        # Out-of-place additive tensor addition: 100% autograd and TensorRT compliant
+        ambient_bias = torch.zeros(1, 1, k_all.shape[-1], device=x.device, dtype=torch.float32)
+        ambient_bias[..., -4:] = 0.50
+        logits_fp32 = torch.matmul(q_fp32, k_fp32) * (C ** -0.5) + ambient_bias
+        attn_fp32 = F.softmax(logits_fp32, dim=-1)
 
         context = torch.matmul(
             v_all.float(), attn_fp32.transpose(-2, -1)
