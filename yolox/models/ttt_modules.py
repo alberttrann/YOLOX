@@ -35,55 +35,40 @@ import contextlib
 
 
 class CovariateMomentAligner(nn.Module):
-    """
-    Certified Covariance Energy Alignment (CEA) Engine:
-      - Elastic Covariance Margin (tau = 0.30): Preserves natural semantic co-activation.
-        Penalizes strictly common-mode atmospheric haze/snow scattering!
-      - Active Zero-Mean Loss L_mean: Gives beta active gradients to eliminate DC airlight.
-      - Elastic Energy Band [0.50, 2.00]: Protects clean channels from variance collapse.
-      - Spatial Decimation (::2, ::2) with .reshape(): Unbiased variance, zero memory leaks.
-      - Returns per-sample loss [B] for true instance-independent adaptation.
-    """
     def __init__(self, eps=1e-5):
         super().__init__()
         self.eps = eps
 
     def forward(self, feat):
         B, C, H, W = feat.shape
-        
-        # 1. Spatial Decimation: Preserves true channel variance without low-pass blurring
         feat_sub = feat[:, :, ::2, ::2].float()
         N = float(feat_sub.shape[-2] * feat_sub.shape[-1])
-        
+
         mu = feat_sub.mean(dim=[-2, -1], keepdim=True)
         f_centered = feat_sub - mu
-        # Defensive .reshape() eliminates non-contiguous memory stride crashes:
         f_flat = f_centered.reshape(B, C, -1)
-        
-        # Sample Covariance Matrix Sigma: Shape [B, C, C]
+
         sigma = torch.bmm(f_flat, f_flat.transpose(1, 2)) / max(1.0, N - 1.0)
         sigma = torch.nan_to_num(sigma, nan=0.0, posinf=1.0, neginf=-1.0)
-        
+
         # 2. ACTIVE MARGIN-BOUNDED COVARIANCE LOSS (tau = 0.30)
         eye = torch.eye(C, device=feat.device, dtype=torch.float32).unsqueeze(0)
         off_diag_cov = sigma * (1.0 - eye)
-        # Elastic Margin: Only penalizes covariance exceeding natural semantic threshold (0.30)
         excess_cov = torch.clamp(torch.abs(off_diag_cov) - 0.30, min=0.0)
-        l_cov = excess_cov.pow(2).sum(dim=[-2, -1]) / float(C - 1)  # Shape: [B]
-        
+        l_cov = excess_cov.pow(2).sum(dim=[-2, -1]) / float(C - 1)
+
         # 3. ELASTIC DYNAMIC ENERGY BAND ON DIAGONAL VARIANCE [0.50, 2.00]
         var_diag = torch.diagonal(sigma, dim1=-2, dim2=-1)
         std_diag = torch.sqrt(torch.clamp(var_diag, min=self.eps, max=100.0))
-        collapse_penalty = torch.clamp(0.50 - std_diag, min=0.0).pow(2)
-        saturation_penalty = torch.clamp(std_diag - 2.00, min=0.0).pow(2)
-        l_energy = (collapse_penalty + saturation_penalty).sum(dim=-1)       # Shape: [B]
-        
-        # 4. KOSCHMIEDER DC AIRLIGHT ZERO-MEAN LOSS (Gives beta active gradients!)
-        l_mean = mu.squeeze(-1).squeeze(-1).pow(2).sum(dim=-1)               # Shape: [B]
-        
-        # Balanced Multi-Moment Loss per Sample: Shape [B]
-        loss_cea_per_sample = l_cov + 0.5 * l_energy + 0.5 * l_mean
-        return torch.nan_to_num(loss_cea_per_sample, nan=0.0)
+        l_energy = (torch.clamp(0.50 - std_diag, min=0.0).pow(2) + 
+                    torch.clamp(std_diag - 2.00, min=0.0).pow(2)).sum(dim=-1)
+
+        # 4. KOSCHMIEDER DC AIRLIGHT SHIFT RELATIVE TO CLEAN SiLU MEAN (+0.40)
+        # Prevents driving beta negative and destroying Dark3 activation energy
+        l_mean = (mu.squeeze(-1).squeeze(-1) - 0.40).pow(2).sum(dim=-1)
+
+        loss_cea = l_cov + 0.5 * l_energy + 0.5 * l_mean
+        return torch.nan_to_num(loss_cea, nan=0.0)
 
 
 class AdaptiveChannelAligner(nn.Module):
@@ -102,31 +87,17 @@ class AdaptiveChannelAligner(nn.Module):
 
 
 class TTTAdaptiveStage(nn.Module):
-    """
-    TDE-YOLOX Master TTT Engine:
-      - Feature-Stationary: Dark2 convolutions run ONCE forward and receive full detection loss.
-      - Per-Instance Adaptation: Shape [B, C, 1, 1] guarantees zero cross-sample batch contamination.
-      - FP32 Master Weight Precision: Eliminates FP16 inner-loop gradient underflow.
-      - Calibrated Channel Gradients: Moves gamma and beta by physically meaningful magnitudes.
-      - Exact Inverse-Softplus Initialization: Zero step-size explosion on Day 1.
-      - Sub-millisecond inner loop: Zero backprop through deep convolutions!
-    """
     def __init__(self, stage_module, in_channels, init_ttt_lr=0.05):
         super().__init__()
         self.backbone_stage = stage_module
         self.aligner = AdaptiveChannelAligner(in_channels)
         self.cma_aligner = CovariateMomentAligner(eps=1e-5)
-        
-        # EXACT INVERSE-SOFTPLUS INITIALIZATION:
-        # Guarantees softplus(init_raw) == init_ttt_lr (0.0500) exactly!
         init_raw = math.log(max(1e-6, math.exp(init_ttt_lr) - 1.0))
         self.ttt_lrs_gamma = nn.Parameter(torch.ones(1, in_channels, 1, 1) * init_raw)
         self.ttt_lrs_beta = nn.Parameter(torch.ones(1, in_channels, 1, 1) * init_raw)
 
-    def forward(self, x_in, run_ttt=True, epoch=0, max_epochs=80):
-        # 1. Forward through Dark2 convolutions (Standard forward pass: receives full detection loss!)
+    def forward(self, x_in, run_ttt=True, epoch=0, max_epochs=65):
         feat_base = self.backbone_stage(x_in)
-        
         if not run_ttt:
             return feat_base, torch.tensor(0.0, device=x_in.device)
 
@@ -135,55 +106,34 @@ class TTTAdaptiveStage(nn.Module):
         is_inference = (not torch.is_grad_enabled())
         context = torch.enable_grad() if is_inference else contextlib.nullcontext()
 
-        # Cosine decay factor across training epochs
-        if self.training:
-            decay = 0.5 * (1.0 + math.cos(math.pi * float(epoch) / float(max(1, max_epochs))))
-        else:
-            decay = 1.0
-
+        # UNIFIED STATIONARY 1-STEP MAML (v3.6):
+        # Step size decay = 1.0 in BOTH training and inference (eliminates covariate shift)
         with context:
-            # Expand affine parameters per sample [B, C, 1, 1] in FP32 for numerical safety
             gamma = self.aligner.gamma.float().repeat(B, 1, 1, 1)
             beta = self.aligner.beta.float().repeat(B, 1, 1, 1)
-
-            # Detach feature base for the inner loop to isolate MAML graph
             f_curr = feat_base.detach()
 
-            # Execute 1 step in training, 2 steps in inference
-            inner_steps = 1 if self.training else 2
+            if not self.training:
+                gamma = gamma.detach().requires_grad_(True)
+                beta = beta.detach().requires_grad_(True)
 
-            for step in range(inner_steps):
-                # Ensure gamma and beta are fresh leaves in FP32 for this step in inference
-                if not self.training:
-                    gamma = gamma.detach().requires_grad_(True)
-                    beta = beta.detach().requires_grad_(True)
+            f_adapted = f_curr.float() * gamma + beta
+            loss_cma = self.cma_aligner(f_adapted).sum()
+            grad_gamma, grad_beta = torch.autograd.grad(loss_cma, [gamma, beta], retain_graph=False)
 
-                # Differentiable affine feature modulation in FP32
-                f_adapted = f_curr.float() * gamma + beta
-                loss_cma_per_sample = self.cma_aligner(f_adapted)  # Shape: [B]
-                inner_loss = loss_cma_per_sample.sum()
+            lr_g = torch.clamp(F.softplus(self.ttt_lrs_gamma), min=1e-4, max=0.25)
+            lr_b = torch.clamp(F.softplus(self.ttt_lrs_beta), min=1e-4, max=0.25)
 
-                # Gradients directly on gamma and beta vectors [B, C, 1, 1]
-                grad_gamma, grad_beta = torch.autograd.grad(inner_loss, [gamma, beta], retain_graph=False)
+            gamma = gamma - lr_g * grad_gamma.detach()
+            beta = beta - lr_b * grad_beta.detach()
 
-                # Adaptive Step Sizes with exact softplus scaling
-                lr_g = torch.clamp(F.softplus(self.ttt_lrs_gamma) * decay, min=1e-4, max=0.25)
-                lr_b = torch.clamp(F.softplus(self.ttt_lrs_beta) * decay, min=1e-4, max=0.25)
+            # POSITIVITY GUARD: Prevents even loss function from flipping gamma negative
+            gamma = torch.clamp(gamma, min=0.10, max=3.00)
 
-                # Parameter updates remain strictly in FP32 to prevent gradient underflow
-                gamma = gamma - lr_g * grad_gamma.detach()
-                beta = beta - lr_b * grad_beta.detach()
-
-        # 2. FINAL ADAPTED OUTPUT (Cast to input_dtype ONLY at the output interface!)
         out = (feat_base.float() * gamma + beta).to(input_dtype)
-        
-        # Optimization: Only compute aux_cma_loss during training where it is actually used
-        if self.training:
-            aux_cma_loss = (self.cma_aligner(out).mean() / float(C))
-        else:
-            aux_cma_loss = torch.tensor(0.0, device=x_in.device)
-
+        aux_cma_loss = (self.cma_aligner(out).mean() / float(C)) if self.training else torch.tensor(0.0, device=x_in.device)
         return out, aux_cma_loss
+
 
 import math
 import torch
@@ -328,56 +278,43 @@ class UnifiedRMBConv(nn.Module):
 
 
 class UnifiedRCA(nn.Module):
-    """
-    TDE-YOLOX Master Directional Coordinate Attention:
-      - Channel SNR Booster (Mean + Max cross-channel token).
-      - Fully Decoupled Vertical & Horizontal Normalization (Zero Cross-Axis Bleed).
-      - Identity-Anchored Calibrated Gate: Exactly 1.000x at step zero; clamped in [0.0, 2.0].
-      - Canonical Parameter Preservation: Zero optimizer or checkpoint friction.
-    """
+    """Decoupled Coordinate Attention with Dedicated Axis Normalization (v3.6)."""
     def __init__(self, in_channels, reduction=32):
         super().__init__()
         mip = max(8, in_channels // reduction)
         
-        # Channel-augmented input (C + 1)
-        self.conv1 = nn.Conv2d(in_channels + 1, mip, kernel_size=1)
-        self.gn1 = nn.GroupNorm(8 if mip % 8 == 0 else math.gcd(mip, 8), mip, eps=1e-5)
-        self.act = nn.SiLU()
-        
+        # Dedicated Vertical (H) Pipeline
+        self.conv_h_in = nn.Conv2d(in_channels + 1, mip, kernel_size=1)
+        self.gn_h = nn.GroupNorm(8 if mip % 8 == 0 else math.gcd(mip, 8), mip, eps=1e-5)
         self.conv_h = nn.Conv2d(mip, in_channels, kernel_size=1)
+
+        # Dedicated Horizontal (W) Pipeline
+        self.conv_w_in = nn.Conv2d(in_channels + 1, mip, kernel_size=1)
+        self.gn_w = nn.GroupNorm(8 if mip % 8 == 0 else math.gcd(mip, 8), mip, eps=1e-5)
         self.conv_w = nn.Conv2d(mip, in_channels, kernel_size=1)
+        self.act = nn.SiLU()
 
     def forward(self, x):
         identity = x
         b, c, h, w = x.shape
 
-        # 1. Global Channel SNR Reference Map
         z_mean = torch.mean(x.float(), dim=1, keepdim=True).to(x.dtype)
         z_max, _ = torch.max(x, dim=1, keepdim=True)
         z = (0.5 * z_mean + 0.5 * z_max).to(x.dtype)
-        x_aug = torch.cat([x, z], dim=1)  # [B, C+1, H, W]
+        x_aug = torch.cat([x, z], dim=1)
 
-        # 2. Vertical Coordinate Pooling (Height)
-        # Evaluated independently: gn1 normalizes across H spatial positions alone
-        h_avg = F.adaptive_avg_pool2d(x_aug, (h, 1))
-        h_max = F.adaptive_max_pool2d(x_aug, (h, 1))
-        x_h = 0.5 * h_avg + 0.5 * h_max
-        feat_h = self.act(self.gn1(self.conv1(x_h)))
-        gate_h = torch.sigmoid(self.conv_h(feat_h))  # [B, C, H, 1]
+        # Vertical Coordinate Pooling (Height)
+        x_h = 0.5 * F.adaptive_avg_pool2d(x_aug, (h, 1)) + 0.5 * F.adaptive_max_pool2d(x_aug, (h, 1))
+        feat_h = self.act(self.gn_h(self.conv_h_in(x_h)))
+        gate_h = torch.sigmoid(self.conv_h(feat_h))
 
-        # 3. Horizontal Coordinate Pooling (Width)
-        # Evaluated independently: gn1 normalizes across W spatial positions alone
-        w_avg = F.adaptive_avg_pool2d(x_aug, (1, w))
-        w_max = F.adaptive_max_pool2d(x_aug, (1, w))
-        x_w = 0.5 * w_avg + 0.5 * w_max
-        feat_w = self.act(self.gn1(self.conv1(x_w)))
-        gate_w = torch.sigmoid(self.conv_w(feat_w))  # [B, C, 1, W]
+        # Horizontal Coordinate Pooling (Width)
+        x_w = 0.5 * F.adaptive_avg_pool2d(x_aug, (1, w)) + 0.5 * F.adaptive_max_pool2d(x_aug, (1, w))
+        feat_w = self.act(self.gn_w(self.conv_w_in(x_w)))
+        gate_w = torch.sigmoid(self.conv_w(feat_w))
 
-        # 4. Identity-Anchored Calibrated Modulation
-        # Exactly 1.000x at init (clamp(4.0 * 0.25, max=2.0) = 1.0), strictly bounded in [0.0, 2.0]
         raw_gate = 4.0 * (gate_h * gate_w)
         attn_gate = torch.clamp(raw_gate, min=0.0, max=2.0)
-
         return (identity * attn_gate).to(x.dtype)
     
 class SimAM(nn.Module):

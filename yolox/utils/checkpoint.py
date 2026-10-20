@@ -35,14 +35,13 @@ def load_ckpt(model, ckpt):
     model_state_dict = model.state_dict()
     load_dict = {}
 
-    # Complete Whitelist: Added "aligner" to recognize AdaptiveChannelAligner parameters
+    # Whitelist custom modules initialized cleanly via Kaiming Uniform
     custom_layers = [
         "memory_banks", "anchor_projectors", "local_projectors", "manifold_decoders", 
         "post_engram_dw", "p5_dense_attn", "p4_bqsa", "p3_bqsa", "projector", "aligner", "ttt_lrs",
         "down_n3", "down_n4", "aux_sem_head", "cls_biases"
     ]
 
-    # Only lateral_c5 and reduce_p4 share identical tensor dimensions with standard YOLOX
     neck_remap = {
         "backbone.lateral_c5.": "backbone.lateral_conv0.",
         "backbone.reduce_p4.": "backbone.reduce_conv1.",

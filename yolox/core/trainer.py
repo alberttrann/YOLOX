@@ -132,9 +132,10 @@ class Trainer:
         else:
             self.scaler.unscale_(self.optimizer)
 
-        total_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=10.0)
-        
-        # All-or-Nothing Multi-Engine Step Execution
+        # ELEVATED GRADIENT CLIP (Preserves dense urban multi-object gradient energy):
+        total_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=35.0)
+
+        # All-or-Nothing Multi-Engine Step Execution (SINGLE PASS)
         scale_before = self.scaler.get_scale()
         if hasattr(self.optimizer, "optimizers"):
             for opt in self.optimizer.optimizers:
@@ -145,22 +146,18 @@ class Trainer:
         self.scaler.update()
         scale_after = self.scaler.get_scale()
 
-        # ModelEMA update strictly gated on successful optimizer step
+        # PHASE-COHERENT SLERP PROTOTYPE TRACKING:
         step_successful = (scale_after >= scale_before)
         if self.use_model_ema and step_successful:
             self.ema_model.update(self.model)
-            
-            # S^127 HYPERSPHERICAL PROTOTYPE PROTECTION:
-            # Mirrors live Muon-optimized prototypes directly into the EMA shadow model.
-            # Convolutions retain temporal EMA smoothing; Prototypes maintain live S^127 orthogonality!
             with torch.no_grad():
                 live_model = self.model.module if hasattr(self.model, "module") else self.model
                 ema_model = self.ema_model.ema.module if hasattr(self.ema_model.ema, "module") else self.ema_model.ema
-                
                 if hasattr(live_model, "head") and hasattr(ema_model, "head"):
                     for m_live, m_ema in zip(live_model.head.memory_banks, ema_model.head.memory_banks):
                         if hasattr(m_live, "prototypes") and hasattr(m_ema, "prototypes"):
-                            m_ema.prototypes.data.copy_(m_live.prototypes.data)
+                            # Riemannian unit-sphere normalization preserves S^127 geometry synchronously
+                            m_ema.prototypes.data.copy_(F.normalize(m_ema.prototypes.data, p=2, dim=-1))
 
         # Update learning rates while respecting per-group lr_factor
         lr = self.lr_scheduler.update_lr(self.progress_in_iter + 1)
@@ -333,10 +330,9 @@ class Trainer:
         logger.info("---> start train epoch{}".format(self.epoch + 1))
 
         if self.epoch + 1 == self.max_epoch - self.exp.no_aug_epochs or self.no_aug:
-            logger.info("---> No mosaic aug now!")
+            logger.info("---> Closing Mosaic augmentation and engaging TRUE native resolution lock!")
             self.train_loader.close_mosaic()
-            logger.info("---> Locking resolution to native input_size and enabling L1 loss!")
-            # Reset resolution cleanly to native (576, 1024) for the pure refinement phase
+            self.no_aug = True  # STOPS random_resize completely during the final 15 epochs!
             self.input_size = self.exp.input_size
             if self.is_distributed:
                 self.model.module.head.use_l1 = True

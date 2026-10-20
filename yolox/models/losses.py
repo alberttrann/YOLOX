@@ -116,24 +116,21 @@ class AdaptiveNWDloss(nn.Module):
 
 class PrototypeRepulsionLoss(nn.Module):
     """
-    Closed-Form Hyperspherical Prototype Margin Repulsion Loss.
-    Certified for TDE-YOLOX v3.1:
-      - Pre-registers persistent GPU buffers (eye_mask, diff_class_mask) to eliminate
-        redundant runtime VRAM allocations.
-      - Normalizes intra- and inter-class penalties by active violating pairs rather
-        than static permutations, preventing gradient starvation.
-      - m_intra = 0.20 (~84.3 deg) permits sub-class variance; m_inter = 0.08 enforces
-        strict categorical orthogonality on S^127.
+    Closed-Form Hyperspherical Prototype Margin Repulsion Loss (v3.6).
+    Welch-Bound Compliant:
+      - m_intra = 0.25: Allows natural multi-modal sub-class variance.
+      - m_inter = 0.15: Enforces ~81.4 deg categorical orthogonality on S^127
+        safely above the theoretical Welch bound (0.078) and noise floor (0.088).
     """
-    def __init__(self, num_classes=9, num_modes=64, m_intra=0.20, m_inter=0.08, eps=1e-5):
+    def __init__(self, num_classes=9, num_modes=64, m_intra=0.25, m_inter=0.15, eps=1e-5):
         super(PrototypeRepulsionLoss, self).__init__()
         self.num_classes = num_classes
         self.num_modes = num_modes
-        self.m_intra = m_intra
-        self.m_inter = m_inter
+        self.m_intra = float(m_intra)
+        self.m_inter = float(m_inter)
         self.eps = eps
 
-        # Pre-registered persistent GPU buffers: eliminates VRAM churn across 80 epochs
+        # Pre-registered persistent GPU buffers: eliminates VRAM churn across training
         class_ids = torch.arange(num_classes).repeat_interleave(num_modes)
         diff_class_mask = class_ids.unsqueeze(0) != class_ids.unsqueeze(1)
         self.register_buffer("diff_class_mask", diff_class_mask, persistent=False)

@@ -40,10 +40,10 @@ class Exp(MyExp):
         self.multiscale_range = 1    
         
         # Dynamic Mosaic Curriculum: Active at 50% during feature representation (Epochs 1 -> 65)
-        self.mosaic_prob = 0.50
+        self.mosaic_prob = 1.0
         self.mosaic_scale = (0.5, 1.5)
-        self.enable_mixup = False
-        self.mixup_prob = 0.0
+        self.enable_mixup = True
+        self.mixup_prob = 0.15
 
         # RIGID GEOMETRY CONSTRAINTS (Autonomous Driving Dashcam Standard)
         # Prevents bounding box dilation and background label noise on thin vertical objects
@@ -61,11 +61,10 @@ class Exp(MyExp):
 
         # --- TRAINING SCHEDULE ---
         self.max_epoch = 80
-        self.warmup_epochs = 10
+        self.warmup_epochs = 5
         self.no_aug_epochs = 15    
         
-        # FIX: Keep learning rate floor at 10% (retains ~0.00025 step size during Epochs 65-80)
-        self.min_lr_ratio = 0.10  # Raised from 0.05
+        self.min_lr_ratio = 0.05
         
         self.basic_lr_per_img = 0.01 / 64.0
         self.weight_decay = 0.0005
@@ -200,30 +199,18 @@ class Exp(MyExp):
                 continue
 
             # -------------------------------------------------------------
-            # RULE 3: Routing Weights & High-Frequency Gains MUST HAVE DECAY!
-            # Solves the 500%-800% norm explosion discovered in Checkpoint Probe!
-            # -------------------------------------------------------------
-            is_explicit_decay = (
-                "attnres" in name and name.endswith(".w")
-                or "w_hf" in name
-            )
-            if is_explicit_decay:
-                pg_sgd_decay.append(p)
-                registered_params.add(p)
-                continue
-
-            # -------------------------------------------------------------
-            # RULE 4: True Biases, Normalization Scales, and Bounded Physical Gates
-            # (No Weight Decay to prevent feature magnitude shrinkage)
+            # RULE 3: Biases, Norm Affines, Scalar Gates, w_hf, and attnres.w (NO DECAY)
+            # Protected from L2 regularization so routing and textures do not decay to 0.0!
             # -------------------------------------------------------------
             is_no_decay = (
                 "bias" in name
                 or any(k in name for k in ["gn.", "bn.", "norm.", "bn1.", "net.1."])
                 or any(k in name for k in [
                     "aligner.gamma", "aligner.beta", "gamma", 
-                    "gr_gate", "omega", "lambda_fog", "k_sigma", "pool_alpha"
+                    "gr_gate", "omega", "lambda_fog", "k_sigma", "pool_alpha",
+                    "w_hf", "attnres"
                 ])
-                or (p.ndim <= 1 and not is_explicit_decay)
+                or (p.ndim <= 1)
             )
 
             if is_no_decay:
@@ -231,7 +218,7 @@ class Exp(MyExp):
                 registered_params.add(p)
             else:
                 # -------------------------------------------------------------
-                # RULE 5: All 2D/4D Convolutions, Linear Projections, and Decoders
+                # RULE 4: All 2D/4D Convolutions, Linear Projections, and Decoders (WITH DECAY)
                 # -------------------------------------------------------------
                 pg_sgd_decay.append(p)
                 registered_params.add(p)

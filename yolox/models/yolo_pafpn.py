@@ -86,11 +86,16 @@ class YOLOPAFPN(nn.Module):
         _p5_h, _p5_w = p5_feat.shape[-2], p5_feat.shape[-1]
         _h_s_fallback = math.log(max(2, _p5_h * _p5_w))
         h_s = torch.nan_to_num(h_s, nan=_h_s_fallback, posinf=_h_s_fallback, neginf=0.0)
+        import torch.nn.functional as F
 
-        p4_in = torch.cat([self.upsample(self.lateral_c5(p5_feat)), c4], dim=1)
+        # DYNAMIC SKIP-MATCHED INTERPOLATION:
+        # Guarantees spatial dimensions match C4 and C3 regardless of odd/even rounding
+        p5_up = F.interpolate(self.lateral_c5(p5_feat), size=c4.shape[-2:], mode="nearest")
+        p4_in = torch.cat([p5_up, c4], dim=1)
         p4_out, p4_indices, indexer_loss = self.p4_bqsa(p4_in, p5_saliency, h_s, targets=targets)
 
-        p3_in = torch.cat([self.upsample(self.reduce_p4(p4_out)), c3], dim=1)
+        p4_up = F.interpolate(self.reduce_p4(p4_out), size=c3.shape[-2:], mode="nearest")
+        p3_in = torch.cat([p4_up, c3], dim=1)
         p3_out = self.p3_bqsa(p3_in, p4_indices)
 
         # 3. BOTTOM-UP SCALE-ATTNRES GRADIENT HIGHWAY

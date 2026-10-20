@@ -25,39 +25,21 @@ class RMSNorm(nn.Module):
         return (x_fp32 * norm_fp32 * gamma_safe).to(x.dtype)
 
 
-class ScaleAttnRes(nn.Module):
-    """
-    Symmetrical Scale-AttnRes Highway.
-    Computes Lipschitz-bounded (ratio ~0.42x) depth-wise attention across pyramid scales.
-    Accepts spatial_ratio and **kwargs for universal interface compatibility.
-    """
-    def __init__(self, dim, num_sources=3, spatial_ratio=1.0, **kwargs):
-        super().__init__()
-        self.dim = dim
-        self.num_sources = num_sources
-        self.scale = dim ** -0.5
-        self.w = nn.Parameter(torch.zeros(dim))
-        self.norm = RMSNorm(dim, eps=1e-5)
-
-    def forward(self, sources):
-        V = torch.stack(sources, dim=0)
-        K = torch.stack([self.norm(s) for s in sources], dim=0)
-
-        # DTYPE-SAFE EINSUM: Ensures exact precision matching under AMP / FP16 / FP32
-        w_safe = torch.clamp(self.w.to(dtype=K.dtype), min=-5.0, max=5.0)
-        logits = torch.einsum('c, m b c h w -> m b h w', w_safe, K) * self.scale
-        # Softmax computed strictly in FP32
-        weights = F.softmax(logits.float(), dim=0).to(V.dtype)
-
-        return torch.sum(weights.unsqueeze(2) * V, dim=0)
-
-
 class RotaryEmbedding2D(nn.Module):
-    def __init__(self, dim):
+    """
+    Continuous Aspect-Preserved 2D-RoPE (v3.6 Enhanced).
+    Calibrated with Vision Base Frequency theta=100.0 (RoPE-ViT, ECCV 2024):
+      - Contracts wavelengths to fit small vision grids (18x32 at P5).
+      - Eliminates the dormant frequency trap of theta=10000.
+      - Maps continuous coordinates to canonical base grid (18, 32) for scale equivariance.
+    """
+    def __init__(self, dim, theta=100.0):
         super().__init__()
         self.dim = dim
+        self.theta = float(theta)
         half_dim = dim // 2
-        inv_freq = 1.0 / (10000 ** (torch.arange(0, half_dim, 2).float() / half_dim))
+        # Vision-calibrated frequency spectrum (theta = 100.0):
+        inv_freq = 1.0 / (self.theta ** (torch.arange(0, half_dim, 2).float() / half_dim))
         self.register_buffer("inv_freq", inv_freq, persistent=False)
 
     def _rotate_half(self, x):
@@ -71,25 +53,23 @@ class RotaryEmbedding2D(nn.Module):
         dtype = q.dtype
         half = q.shape[-1] // 2
 
-        y, x = torch.meshgrid(
-            torch.arange(H, device=device),
-            torch.arange(W, device=device),
-            indexing="ij"
-        )
+        # Continuous coordinates anchored to canonical base (18, 32):
+        norm_x = (torch.arange(W, device=device).float() / max(1.0, float(W - 1.0))) * (32.0 - 1.0)
+        norm_y = (torch.arange(H, device=device).float() / max(1.0, float(H - 1.0))) * (18.0 - 1.0)
+
+        y, x = torch.meshgrid(norm_y, norm_x, indexing="ij")
         x = x.reshape(-1)
         y = y.reshape(-1)
 
         inv_freq = self.inv_freq.to(device)
-        freqs_x = torch.einsum("i, j -> ij", x.float(), inv_freq)
-        freqs_y = torch.einsum("i, j -> ij", y.float(), inv_freq)
+        freqs_x = torch.einsum("i, j -> ij", x, inv_freq)
+        freqs_y = torch.einsum("i, j -> ij", y, inv_freq)
 
         emb_x = torch.cat([freqs_x, freqs_x], dim=-1)
         emb_y = torch.cat([freqs_y, freqs_y], dim=-1)
 
-        cos_x = emb_x.cos().to(dtype)
-        sin_x = emb_x.sin().to(dtype)
-        cos_y = emb_y.cos().to(dtype)
-        sin_y = emb_y.sin().to(dtype)
+        cos_x, sin_x = emb_x.cos().to(dtype), emb_x.sin().to(dtype)
+        cos_y, sin_y = emb_y.cos().to(dtype), emb_y.sin().to(dtype)
 
         qx, qy = q[..., :half], q[..., half:]
         kx, ky = k[..., :half], k[..., half:]
@@ -99,15 +79,10 @@ class RotaryEmbedding2D(nn.Module):
         qy = (qy * cos_y) + (self._rotate_half(qy) * sin_y)
         ky = (ky * cos_y) + (self._rotate_half(ky) * sin_y)
 
-        out_q = torch.cat([qx, qy], dim=-1).contiguous()
-        out_k = torch.cat([kx, ky], dim=-1).contiguous()
-        return out_q, out_k
+        return torch.cat([qx, qy], dim=-1).contiguous(), torch.cat([kx, ky], dim=-1).contiguous()
 
 
 class P5ExclusiveDenseAttention(nn.Module):
-    """
-    P5 Exclusive Dense Global Attention with Learnable Atmospheric Coupling.
-    """
     def __init__(self, dim, num_heads=4):
         super().__init__()
         self.dim = dim
@@ -115,19 +90,20 @@ class P5ExclusiveDenseAttention(nn.Module):
         self.head_dim = dim // num_heads
         self.scale = self.head_dim ** -0.5
 
-        # Learnable Atmospheric Coupling Parameter (replaces static lambda_fog = 2.0)
-        self.lambda_fog = nn.Parameter(torch.tensor(1.0))
-
+        # STEP-0 IDENTITY GUARDS:
+        self.lambda_fog = nn.Parameter(torch.tensor(0.0)) # Starts at 0.0
         self.qkv = nn.Conv2d(dim, dim * 3, kernel_size=1)
         self.proj = nn.Conv2d(dim, dim, kernel_size=1)
-        self.rope = RotaryEmbedding2D(self.head_dim)
+        nn.init.zeros_(self.proj.weight) # Projection delta starts at exact zero
+        if self.proj.bias is not None:
+            nn.init.zeros_(self.proj.bias)
 
+        self.rope = RotaryEmbedding2D(self.head_dim)
         self.w_r1 = nn.Conv2d(dim, dim, kernel_size=1)
         self.w_r2 = nn.Conv2d(dim, dim, kernel_size=1)
         nn.init.normal_(self.w_r1.weight, mean=0.0, std=0.01)
         nn.init.normal_(self.w_r2.weight, mean=0.0, std=0.01)
-        if self.w_r1.bias is not None:
-            nn.init.zeros_(self.w_r1.bias)
+        nn.init.constant_(self.w_r1.bias, -4.0) # Gate starts at sigma(-4.0) = 0.018
         if self.w_r2.bias is not None:
             nn.init.zeros_(self.w_r2.bias)
 
@@ -136,55 +112,29 @@ class P5ExclusiveDenseAttention(nn.Module):
         N = H * W
         qkv = self.qkv(x).reshape(B, 3, self.num_heads, self.head_dim, N).permute(1, 0, 2, 4, 3)
         q, k, v = qkv[0], qkv[1], qkv[2]
-
         q, k = self.rope(q, k, H, W)
 
-        # 1. QK Matmul in FP32
-        q_fp32 = q.float()
-        k_fp32 = k.float()
-        attn_fp32 = torch.matmul(q_fp32, k_fp32.transpose(-2, -1)) * self.scale
-        attn_fp32 = F.softmax(attn_fp32, dim=-1)
+        attn_fp32 = F.softmax(torch.matmul(q.float(), k.float().transpose(-2, -1)) * self.scale, dim=-1)
 
-        # 2. Saliency Extraction in FP32 with Safe Contrast Ratio
+        # Per-Sample Atmospheric Contrast Ratio (Retains Batch Dimension [B, 1, 1, 1])
         diag_elements = attn_fp32.diagonal(dim1=-2, dim2=-1)
         saliency_sum = attn_fp32.sum(dim=-2) - diag_elements
         saliency = saliency_sum.mean(dim=1).reshape(B, 1, H, W) / max(1.0, float(N - 1))
-        
+
         s_flat = saliency.flatten(1).float()
-        
-        # PHYSICAL OPTICAL SALIENCY CONTRAST RATIO:
-        # Measures relative attention contrast Cv = sigma(s) / mu(s) to eliminate the 1.0000 saturation trap!
-        # Clean daylight: High contrast (Cv ~ 0.85) -> h_ratio ~ 0.28 (Exploratory routing, calm memory).
-        # Dense fog/snow: Uniform scattering (Cv -> 0.05) -> h_ratio -> 0.95 (Sharp routing, active memory).
         s_mean = torch.mean(s_flat, dim=-1, keepdim=True)
-        s_var = torch.clamp(torch.var(s_flat, dim=-1, keepdim=True, unbiased=False), min=1e-8)
-        s_std = torch.sqrt(s_var)
+        s_std = torch.sqrt(torch.clamp(torch.var(s_flat, dim=-1, keepdim=True, unbiased=False), min=1e-8))
         c_v = s_std / (s_mean + 1e-6)
-        
-        h_ratio_raw = torch.exp(-1.5 * c_v).mean()
-        h_ratio = torch.clamp(torch.nan_to_num(h_ratio_raw, nan=0.50, posinf=1.0, neginf=0.10), min=0.10, max=1.0)
-        # 3. Value Aggregation strictly in FP32 (Pure Context Preservation)
-        # Eliminates destructive Gram-Schmidt cancellation on macro-objects (Buses/Trucks)!
-        y_fp32 = torch.matmul(attn_fp32, v.float())
-        z_spatial = self.proj(y_fp32.to(v.dtype).permute(0, 1, 3, 2).reshape(B, C, H, W))
-
-        # 4. Gated Residual Highway with Learnable Fog Coupling
-        g_xsa = torch.sigmoid(self.w_r1(x) + self.w_r2(z_spatial) + (self.lambda_fog * h_ratio))
-        p5_feat = x + g_xsa * z_spatial
-
-        # Return h_ratio as the 3rd element!
-        return p5_feat, saliency, h_ratio
+        # Ensure h_ratio and out strictly match x.dtype (FP16 during eval, FP32 during training):
+        h_ratio = torch.clamp(torch.exp(-1.5 * c_v).view(B, 1), min=0.10, max=1.0).to(x.dtype)
+        z_spatial = self.proj(torch.matmul(attn_fp32, v.float()).to(v.dtype).permute(0, 1, 3, 2).reshape(B, C, H, W))
+        g_xsa = torch.sigmoid(self.w_r1(x) + self.w_r2(z_spatial) + (self.lambda_fog * h_ratio.view(B, 1, 1, 1))).to(x.dtype)
+        out = (x + g_xsa * z_spatial).to(x.dtype)
+        return out, saliency, h_ratio
 
 
 class C2f_BQSA_P4(nn.Module):
-    """
-    TDE-YOLOX v3.5 Master BQSA P4:
-      - Unified RCA + RMBConv Conditioning Engine
-      - Fixed K in Training (zero gradient jitter, zero DDP sync overhead)
-      - Elastic Scene-Adaptive Sparsity rho(h_s) in Inference
-      - Quad-Ambient Key/Value Tokens (2x2 grid) with RMS Energy Alignment
-    """
-    def __init__(self, c1, c2, n=1, block_size=4, sparsity_ratio=0.25):
+    def __init__(self, c1, c2, n=1, block_size=4, sparsity_ratio=0.35):
         super().__init__()
         self.c = int(c2 * 0.5)
         self.block_size = block_size
@@ -194,8 +144,6 @@ class C2f_BQSA_P4(nn.Module):
         self.cv1 = BaseConv(c1, c2, 1, 1)
         self.cv2 = BaseConv((2 + n) * self.c, c2, 1, 1)
         self.m = nn.ModuleList(Bottleneck(self.c, self.c, False, 1.0) for _ in range(n))
-
-        # v3.4 Master Conditioning Engine
         self.rca = UnifiedRCA(self.c)
         self.rmbconv = UnifiedRMBConv(self.c)
 
@@ -204,59 +152,38 @@ class C2f_BQSA_P4(nn.Module):
             nn.Conv2d(self.c, self.c, 3, padding=1, groups=self.c),
             nn.Conv2d(self.c, 1, 1)
         )
-
         self.pool_alpha = nn.Parameter(torch.tensor(0.0))
-        self.k_sigma = nn.Parameter(torch.tensor(2.0))
-
         self.qkv = nn.Conv2d(self.c, self.c * 3, 1)
-        self.proj = nn.Conv2d(self.c, self.c, 1)
+        self.proj = nn.Conv2d(self.c, self.c, 1, bias=False)
         self.gr_gate = nn.Parameter(torch.zeros(1, self.c, 1, 1))
-
     def set_tau(self, tau):
         self.tau = tau
-
     def _rasterize_gt_blocks(self, targets, batch_size, num_h, num_w, device):
-        target_mask = torch.zeros(batch_size, num_h, num_w, device=device)
+        """100% Vectorized GPU Rasterizer with Padded-Target Protection."""
         if targets is None or targets.shape[0] == 0:
-            return target_mask.view(batch_size, -1)
+            return torch.zeros(batch_size, num_h * num_w, device=device)
 
-        for b in range(batch_size):
-            img_labels = targets[b]
-            valid_mask = (img_labels[:, 3] > 0) & (img_labels[:, 4] > 0)
-            if not valid_mask.any():
-                continue
+        valid = (targets[:, :, 3] > 0) & (targets[:, :, 4] > 0)
+        x1 = targets[:, :, 1] - targets[:, :, 3] / 2.0
+        y1 = targets[:, :, 2] - targets[:, :, 4] / 2.0
+        x2 = targets[:, :, 1] + targets[:, :, 3] / 2.0
+        y2 = targets[:, :, 2] + targets[:, :, 4] / 2.0
 
-            valid_boxes = img_labels[valid_mask]
-            xc, yc = valid_boxes[:, 1], valid_boxes[:, 2]
-            w, h   = valid_boxes[:, 3], valid_boxes[:, 4]
+        c_min = (x1 / 64.0).floor().clamp(0, num_w - 1).long()
+        c_max = ((x2 - 1e-4) / 64.0).floor().clamp(0, num_w - 1).long()
+        r_min = (y1 / 64.0).floor().clamp(0, num_h - 1).long()
+        r_max = ((y2 - 1e-4) / 64.0).floor().clamp(0, num_h - 1).long()
 
-            x1 = xc - w / 2.0
-            y1 = yc - h / 2.0
-            x2 = xc + w / 2.0
-            y2 = yc + h / 2.0
+        gy, gx = torch.meshgrid(torch.arange(num_h, device=device), torch.arange(num_w, device=device), indexing="ij")
+        gx = gx.view(1, 1, num_h, num_w)
+        gy = gy.view(1, 1, num_h, num_w)
 
-            # --- INSERT HERE: DYNAMIC 16:9 CANVAS FILTER ---
-            # Discards targets that are completely off-screen before grid clamping
-            img_w = float(num_w * 64.0)  # Dynamically adapts to 1024px (num_w=16) or multiscale
-            img_h = float(num_h * 64.0)  # Dynamically adapts to 576px (num_h=9) or multiscale
-            on_screen = (x2 > 0) & (y2 > 0) & (x1 < img_w) & (y1 < img_h)
-            if not on_screen.any():
-                continue
-            x1, y1, x2, y2 = x1[on_screen], y1[on_screen], x2[on_screen], y2[on_screen]
-            # -----------------------------------------------
-
-            c_min = torch.clamp((x1 / 64.0).floor().long(), 0, num_w - 1)
-            c_max = torch.clamp(((x2 - 1e-4) / 64.0).floor().long(), 0, num_w - 1)
-            c_max = torch.max(c_max, c_min)
-
-            r_min = torch.clamp((y1 / 64.0).floor().long(), 0, num_h - 1)
-            r_max = torch.clamp(((y2 - 1e-4) / 64.0).floor().long(), 0, num_h - 1)
-            r_max = torch.max(r_max, r_min)
-
-            for r1, r2, c1, c2 in zip(r_min, r_max, c_min, c_max):
-                target_mask[b, int(r1):int(r2) + 1, int(c1):int(c2) + 1] = 1.0
-
-        return target_mask.view(batch_size, -1)
+        in_x = (gx >= c_min.unsqueeze(-1).unsqueeze(-1)) & (gx <= c_max.unsqueeze(-1).unsqueeze(-1))
+        in_y = (gy >= r_min.unsqueeze(-1).unsqueeze(-1)) & (gy <= r_max.unsqueeze(-1).unsqueeze(-1))
+        
+        # Guard: Invalidate padded zero-boxes before reduction to prevent poisoning block (0,0)
+        in_box = in_x & in_y & valid.unsqueeze(-1).unsqueeze(-1)
+        return in_box.any(dim=1).float().view(batch_size, -1)
 
     def forward(self, x, p5_saliency, h_s, targets=None):
         y = list(self.cv1(x).chunk(2, 1))
@@ -265,52 +192,53 @@ class C2f_BQSA_P4(nn.Module):
         B, C, H, W = feat.shape
 
         bs = min(self.block_size, H, W)
-        num_h = max(1, H // bs)
-        num_w = max(1, W // bs)
+        num_h, num_w = H // bs, W // bs
         total_blocks = num_h * num_w
         tokens_per_b = bs * bs
 
-        # 1. DIRECT OPTICAL ENTROPY RATIO (Eliminates redundant / ln(144) squashing)
-        # h_s is already the normalized atmospheric ratio r_H in [0.0, 1.0] from P5!
-        h_ratio_stat = torch.clamp(h_s.float(), 0.0, 1.0)
-
-        if self.training:
-            k_actual = max(1, min(total_blocks, int(round(self.sparsity_ratio * float(total_blocks)))))
+        # SAFE CAPACITY CALCULATION (Never exceeds total_blocks):
+        k_target = int(round(self.sparsity_ratio * float(total_blocks)))
+        if total_blocks >= 24:
+            k_actual = max(24, min(48, k_target))
         else:
-            rho_dynamic = torch.clamp(0.18 + 0.17 * h_ratio_stat, min=0.18, max=0.35).item()
-            k_actual = max(1, min(total_blocks, int(round(rho_dynamic * float(total_blocks)))))
+            k_actual = max(1, total_blocks)
 
-        # 2. Master Feature Conditioning (Unified v3.4 Engine)
         feat_cond = self.rca(self.rmbconv(feat))
-
-        # 3. Dynamic Saliency Fusion (P5 Macro Prior + P4 Micro MaxPool)
         s_up = F.interpolate(p5_saliency.float(), size=(H, W), mode='nearest')
         block_saliency = F.avg_pool2d(s_up, kernel_size=bs, stride=bs).view(B, -1)
 
-        # Standardize P5 saliency as an additive constructive prior
-        s_mean = block_saliency.mean(dim=-1, keepdim=True)
-        s_std = torch.sqrt(torch.clamp(torch.var(block_saliency, dim=-1, keepdim=True, unbiased=False), min=1e-8))
-        p5_macro_prior = (block_saliency - s_mean) / s_std
+        # Use unbiased=False to prevent NaN division-by-zero when total_blocks == 1
+        var_saliency = torch.var(block_saliency, dim=-1, keepdim=True, unbiased=False)
+        p5_macro = (block_saliency - block_saliency.mean(dim=-1, keepdim=True)) / \
+                   torch.sqrt(torch.clamp(var_saliency, min=1e-8)) if total_blocks > 1 else torch.zeros_like(block_saliency)
 
-        # 4. HySparse2 Hybrid Saliency Scoring (Captures 1-pixel micro peaks)
         scores = self.indexer(self.indexer_norm(feat_cond))
         scores_avg = F.avg_pool2d(scores, kernel_size=bs, stride=bs).view(B, -1)
         scores_max = F.max_pool2d(scores, kernel_size=bs, stride=bs).view(B, -1)
-        
         alpha = torch.sigmoid(self.pool_alpha)
-        # KEEP THIS VARIABLE NAMED block_scores (Resolves Pylance lines 361/365!)
         block_scores = alpha * scores_max + (1.0 - alpha) * scores_avg
 
-        # CONSTRUCTIVE SYNERGY: P4 Micro MaxPool + P5 Macro Prior
-        # Eliminates the destructive -500.0 kill-switch so small objects are never extinguished!
-        candidate_scores_fp32 = block_scores.float() + 0.35 * p5_macro_prior
+        # Safe unit-variance normalization with unbiased=False
+        var_bs = torch.var(block_scores, dim=-1, keepdim=True, unbiased=False)
+        bs_norm = (block_scores - block_scores.mean(dim=-1, keepdim=True)) / \
+                  torch.sqrt(torch.clamp(var_bs, min=1e-6)) if total_blocks > 1 else torch.zeros_like(block_scores)
+
+        candidate_scores_fp32 = bs_norm.float() + 0.15 * p5_macro
 
         if self.training:
-            u = torch.rand_like(candidate_scores_fp32, dtype=torch.float32)
-            gumbel = -torch.log(-torch.log(u + 1e-7) + 1e-7)
-            tau_adaptive = torch.clamp(self.tau * (1.0 - 0.35 * h_ratio_stat), min=0.10)
-            soft_scores = F.softmax((candidate_scores_fp32 + gumbel) / tau_adaptive, dim=-1).to(feat.dtype)
+            # --- TAU ADAPTIVE PATCH (Dimensionally guarded to [B, 1] to match 2D candidate_scores) ---
+            if torch.is_tensor(h_s):
+                h_stat = h_s.float().view(B, -1)[:, :1].clamp(0.0, 1.0) if h_s.numel() >= B else h_s.float().mean().view(1, 1).clamp(0.0, 1.0)
+            else:
+                h_stat = torch.tensor(float(h_s), device=x.device).view(1, 1).clamp(0.0, 1.0)
 
+            tau_adaptive = torch.clamp(self.tau * (1.0 - 0.35 * h_stat), min=0.10)
+
+            u1, u2 = torch.rand_like(candidate_scores_fp32), torch.rand_like(candidate_scores_fp32)
+            gumbel = torch.log(u1 + 1e-7) - torch.log(u2 + 1e-7)
+            
+            # Binary Gumbel-Sigmoid using tau_adaptive instead of hardcoded 0.50
+            soft_scores = torch.sigmoid((candidate_scores_fp32 + gumbel) / tau_adaptive).to(feat.dtype)
             _, topk_idx = torch.topk(soft_scores, k_actual, dim=-1)
             hard_mask = torch.zeros_like(soft_scores).scatter_(-1, topk_idx, 1.0)
             ste_mask = (hard_mask - soft_scores).detach() + soft_scores
@@ -319,7 +247,6 @@ class C2f_BQSA_P4(nn.Module):
             _, topk_idx = torch.topk(candidate_scores_fp32, k_actual, dim=-1)
             ste_weights = 1.0
 
-        # 5. Extract Q, K, V
         qkv = self.qkv(feat_cond).view(B, 3, C, H, W)
         q, k, v = qkv[:, 0], qkv[:, 1], qkv[:, 2]
 
@@ -328,13 +255,10 @@ class C2f_BQSA_P4(nn.Module):
 
         idx_exp = topk_idx.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, C, tokens_per_b)
         k_sel = torch.gather(k_b, 1, idx_exp).permute(0, 2, 1, 3).reshape(B, C, k_actual * tokens_per_b)
-        v_sel = torch.gather(v_b, 1, idx_exp) * ste_weights
-        v_sel = v_sel.permute(0, 2, 1, 3).reshape(B, C, k_actual * tokens_per_b)
+        v_sel = (torch.gather(v_b, 1, idx_exp) * ste_weights).permute(0, 2, 1, 3).reshape(B, C, k_actual * tokens_per_b)
 
-        # 6. Quad-Ambient Key/Value Tokens (2x2 Grid with RMS Energy Matching)
         k_quad = F.adaptive_avg_pool2d(k, (2, 2)).view(B, C, 4)
         v_quad = F.adaptive_avg_pool2d(v, (2, 2)).view(B, C, 4)
-
         rms_k_loc = torch.sqrt(k_sel.float().pow(2).mean(dim=[1, 2], keepdim=True) + 1e-5)
         rms_k_amb = torch.sqrt(k_quad.float().pow(2).mean(dim=[1, 2], keepdim=True) + 1e-5)
         k_quad_scaled = (k_quad.float() * torch.clamp(rms_k_loc / rms_k_amb, 0.1, 10.0)).to(k.dtype)
@@ -346,48 +270,31 @@ class C2f_BQSA_P4(nn.Module):
         k_all = torch.cat([k_sel, k_quad_scaled], dim=-1)
         v_all = torch.cat([v_sel, v_quad_scaled], dim=-1)
 
-        # 7. Dense Queries Attend to [Sparse + Quad-Ambient] Keys/Values
-        q_flat = q.reshape(B, C, H * W)
-       # Full FP32 QK and Value aggregation with Non-Destructive Ambient Bias
-        q_fp32 = q_flat.transpose(-2, -1).float()
-        k_fp32 = k_all.float()
-        
-        # Out-of-place additive tensor addition: 100% autograd and TensorRT compliant
+        q_flat = q.reshape(B, C, H * W).transpose(-2, -1).float()
         ambient_bias = torch.zeros(1, 1, k_all.shape[-1], device=x.device, dtype=torch.float32)
         ambient_bias[..., -4:] = 0.50
-        logits_fp32 = torch.matmul(q_fp32, k_fp32) * (C ** -0.5) + ambient_bias
+        logits_fp32 = torch.matmul(q_flat, k_all.float()) * (C ** -0.5) + ambient_bias
         attn_fp32 = F.softmax(logits_fp32, dim=-1)
 
-        context = torch.matmul(
-            v_all.float(), attn_fp32.transpose(-2, -1)
-        ).to(v_all.dtype).reshape(B, C, H, W)
-
+        context = torch.matmul(v_all.float(), attn_fp32.transpose(-2, -1)).to(v_all.dtype).reshape(B, C, H, W)
         gate = torch.sigmoid(self.gr_gate)
         y[-1] = y[-1] + gate * self.proj(context)
         p4_out = self.cv2(torch.cat(y, 1))
 
-        # 8. Auxiliary Focal Loss
         indexer_loss = torch.tensor(0.0, device=x.device)
         if self.training and targets is not None:
             f_target = self._rasterize_gt_blocks(targets, B, num_h, num_w, x.device)
             p_b = torch.sigmoid(block_scores.float())
             p_t = p_b * f_target.float() + (1.0 - p_b) * (1.0 - f_target.float())
-            alpha_t = 0.85 * f_target.float() + 0.15 * (1.0 - f_target.float())
-            focal_weight = (alpha_t * (1.0 - p_t).pow(2.0)).detach()
-            bce = F.binary_cross_entropy_with_logits(block_scores.float(), f_target.float(), reduction="none")
-            indexer_loss = (focal_weight * bce).mean()
+            focal_weight = ((0.85 * f_target + 0.15 * (1.0 - f_target)) * (1.0 - p_t).pow(2.0)).detach()
+            indexer_loss = (focal_weight * F.binary_cross_entropy_with_logits(block_scores.float(), f_target, reduction="none")).mean()
 
         return p4_out, topk_idx, indexer_loss
 
 
 class C2f_BQSA_P3(nn.Module):
-    """
-    TDE-YOLOX v3.5 Master BQSA P3:
-      - Synchronized Dynamic Budget Inheritance (Zero Truncation Cap)
-      - Unified RCA + RMBConv Conditioning Engine
-      - Dense Ambient Context Canvas Broadcast
-    """
-    def __init__(self, c1, c2, n=1, block_size=8, sparsity_ratio=0.25):
+    """P3 Synchronized Reuse with Zero-Delta Residual Bypass (v3.6)."""
+    def __init__(self, c1, c2, n=1, block_size=8, sparsity_ratio=0.35):
         super().__init__()
         self.c = int(c2 * 0.5)
         self.block_size = block_size
@@ -396,13 +303,12 @@ class C2f_BQSA_P3(nn.Module):
         self.cv1 = BaseConv(c1, c2, 1, 1)
         self.cv2 = BaseConv((2 + n) * self.c, c2, 1, 1)
         self.m = nn.ModuleList(Bottleneck(self.c, self.c, False, 1.0) for _ in range(n))
-
-        # v3.4 Master Conditioning Engine
         self.rca = UnifiedRCA(self.c)
         self.rmbconv = UnifiedRMBConv(self.c)
 
         self.qkv = nn.Conv2d(self.c, self.c * 3, 1)
-        self.proj = nn.Conv2d(self.c, self.c, 1)
+        # CRITICAL SAFEGUARD: bias=False ensures Proj(0) == 0 identically!
+        self.proj = nn.Conv2d(self.c, self.c, 1, bias=False)
         self.gr_gate = nn.Parameter(torch.zeros(1, self.c, 1, 1))
 
     def forward(self, x, inherited_topk_idx):
@@ -410,20 +316,14 @@ class C2f_BQSA_P3(nn.Module):
         y.extend(m(y[-1]) for m in self.m)
         feat = y[-1]
         B, C, H, W = feat.shape
-
-        # Clean local structure first, then apply clean coordinate attention:
         feat_cond = self.rca(self.rmbconv(feat))
 
         bs = min(self.block_size, H, W)
-        num_h = max(1, H // bs)
-        num_w = max(1, W // bs)
+        num_h, num_w = H // bs, W // bs
         total_blocks = num_h * num_w
         tokens_per_b = bs * bs
 
-        # SYNCHRONIZED BUDGET INHERITANCE:
-        # P3 honors P4's exact dynamic block count without the 0.25 truncation cap!
         k_actual = min(inherited_topk_idx.shape[1], total_blocks)
-
         qkv = self.qkv(feat_cond).view(B, 3, C, H, W)
         q, k, v = qkv[:, 0], qkv[:, 1], qkv[:, 2]
 
@@ -434,43 +334,45 @@ class C2f_BQSA_P3(nn.Module):
         valid_idx = torch.clamp(inherited_topk_idx[:, :k_actual], 0, total_blocks - 1)
         idx_exp = valid_idx.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, C, tokens_per_b)
 
-        q_sel = torch.gather(q_b, 1, idx_exp)
-        k_sel = torch.gather(k_b, 1, idx_exp)
-        v_sel = torch.gather(v_b, 1, idx_exp)
+        q_loc = torch.gather(q_b, 1, idx_exp).permute(0, 1, 3, 2).reshape(B * k_actual, tokens_per_b, C)
+        k_loc = torch.gather(k_b, 1, idx_exp).reshape(B * k_actual, C, tokens_per_b)
+        v_loc = torch.gather(v_b, 1, idx_exp).permute(0, 1, 3, 2).reshape(B * k_actual, tokens_per_b, C)
 
-        q_loc = q_sel.permute(0, 1, 3, 2).reshape(B * k_actual, tokens_per_b, C)
-        k_loc = k_sel.reshape(B * k_actual, C, tokens_per_b)
-        v_loc = v_sel.permute(0, 1, 3, 2).reshape(B * k_actual, tokens_per_b, C)
+        attn_fp32 = F.softmax(torch.bmm(q_loc.float(), k_loc.float()) * (C ** -0.5), dim=-1)
+        ctx_loc = torch.bmm(attn_fp32, v_loc.float()).to(v_loc.dtype).reshape(B, k_actual, tokens_per_b, C)
 
-        q_fp32 = q_loc.float()
-        k_fp32 = k_loc.float()
-        attn_fp32 = torch.bmm(q_fp32, k_fp32) * (C ** -0.5)
-        attn_fp32 = F.softmax(attn_fp32, dim=-1)
-
-        ctx_loc = torch.bmm(
-            attn_fp32, v_loc.float()
-        ).to(v_loc.dtype).reshape(B, k_actual, tokens_per_b, C)
-
-        z_global = F.adaptive_avg_pool2d(feat_cond, (1, 1))
-        rms_feat = torch.sqrt(feat_cond.float().pow(2).mean(dim=[1, 2, 3], keepdim=True) + 1e-5)
-        rms_glob = torch.sqrt(z_global.float().pow(2).mean(dim=[1, 2, 3], keepdim=True) + 1e-5)
-        scale_glob = torch.clamp(rms_feat / rms_glob, min=0.10, max=10.0).to(feat_cond.dtype)
-        z_global_scaled = z_global * scale_glob
-
-        z_token = z_global_scaled.view(B, C, 1).expand(-1, -1, tokens_per_b).reshape(B, 1, C * tokens_per_b)
-        
+        # ZERO-DELTA RESIDUAL BYPASS (v3.6):
+        # Unselected blocks receive delta = 0.000; native trunk features pass unhindered!
+        delta_flat = torch.zeros(B, total_blocks, C * tokens_per_b, device=x.device, dtype=ctx_loc.dtype)
         idx_flat = valid_idx.unsqueeze(-1).expand(-1, -1, C * tokens_per_b)
         ctx_flat = ctx_loc.permute(0, 1, 3, 2).reshape(B, k_actual, C * tokens_per_b)
+        delta_flat.scatter_(1, idx_flat, ctx_flat)
 
-        # FIX: Ensure out_flat matches ctx_flat.dtype (prevents Float32 vs Float16 scatter crash)
-        out_flat = z_token.expand(-1, total_blocks, -1).clone().to(ctx_flat.dtype)
-        out_flat.scatter_(1, idx_flat, ctx_flat)
-
-        context = out_flat.reshape(B, num_h, num_w, C, bs, bs).permute(0, 3, 1, 4, 2, 5).reshape(B, C, H, W)
-
+        context_delta = delta_flat.reshape(B, num_h, num_w, C, bs, bs).permute(0, 3, 1, 4, 2, 5).reshape(B, C, H, W)
         gate = torch.sigmoid(self.gr_gate)
-        y[-1] = y[-1] + gate * self.proj(context)
+        y[-1] = y[-1] + gate * self.proj(context_delta)
         return self.cv2(torch.cat(y, 1))
+
+
+class ScaleAttnRes(nn.Module):
+    """Lipschitz-Bounded Scale Routing with Variance Restoration (v3.6)."""
+    def __init__(self, dim, num_sources=3, spatial_ratio=1.0, **kwargs):
+        super().__init__()
+        self.dim = dim
+        self.num_sources = num_sources
+        self.scale = dim ** -0.5
+        self.w = nn.Parameter(torch.zeros(dim)) # In Group 2 (No-Decay)
+        self.norm = RMSNorm(dim, eps=1e-5)
+        self.post_norm = nn.BatchNorm2d(dim) # Restores unit dynamic range!
+
+    def forward(self, sources):
+        V = torch.stack(sources, dim=0)
+        K = torch.stack([self.norm(s) for s in sources], dim=0)
+        w_safe = torch.clamp(self.w.to(dtype=K.dtype), min=-3.0, max=3.0)
+        logits = torch.einsum('c, m b c h w -> m b h w', w_safe, K) * self.scale
+        weights = F.softmax(logits.float(), dim=0).to(V.dtype)
+        out = torch.sum(weights.unsqueeze(2) * V, dim=0)
+        return self.post_norm(out)
 
 
 class YOLOPAFPN(nn.Module):

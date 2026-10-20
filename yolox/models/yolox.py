@@ -62,6 +62,8 @@ class YOLOX(nn.Module):
         head_ref = self.head.module if hasattr(self.head, "module") else self.head
         if hasattr(head_ref, "current_epoch"):
             head_ref.current_epoch = epoch
+        if hasattr(head_ref, "max_epochs"):
+            head_ref.max_epochs = max_epochs # Dynamic hand-off!
 
         # Cosine Gumbel-Softmax Temperature Annealing tau: 1.0 -> 0.50
         tau_min = 0.50
@@ -86,21 +88,12 @@ class YOLOX(nn.Module):
         return max(0.01, 0.10 - 0.09 * progress)
 
     def _get_aux_multiplier(self):
-        """
-        --- REFINEMENT 3: DE-COUPLED 3-PHASE CURRICULUM SCAFFOLDING ---
-        Epochs 1-35 : Full representation & manifold shaping (1.00)
-        Epochs 35-65: Smooth cosine fade of auxiliary constraints (1.00 -> 0.15)
-        Epochs 65-80: Pure detection & L1 box refinement with locked 0.15 floor
-        """
-        decay_start = 35   # De-coupled: finishes decaying BEFORE Epoch 65 Mosaic shutoff
-        decay_end = 65     # Reaches floor exactly as no_aug_epochs activates
-        min_ratio = 0.15   # Bounded floor prevents prototype collapse
-        
+        # Cosine fade between Epochs 45 and 65 down to a 0.15 floor
+        decay_start, decay_end, min_ratio = 45, 65, 0.15
         if self.current_epoch < decay_start:
             return 1.0
         if self.current_epoch >= decay_end:
             return min_ratio
-            
         progress = (self.current_epoch - decay_start) / float(decay_end - decay_start)
         return min_ratio + 0.5 * (1.0 - min_ratio) * (1.0 + math.cos(progress * math.pi))
 
@@ -148,16 +141,15 @@ class YOLOX(nn.Module):
             # Master Multi-Task Loss Synthesis with Auxiliary Curriculum Decay
             lambda_idx = self._get_indexer_loss_weight()
             aux_mult = self._get_aux_multiplier()
-            
-            # --- REFINEMENT 2: CMA COVARIANCE WHITENING WARMUP RAMP ---
-            # Allows Dark2 convolutions to learn edge primitives before enforcing decorrelation
             cma_ramp = min(1.0, float(self.current_epoch) / 10.0)
 
-            lambda_mem = 0.05 * aux_mult
-            lambda_cma = 0.10 * cma_ramp * aux_mult
-            lambda_rep = 0.05 * aux_mult  # Re-balanced from 0.01 -> 0.05 to prevent S^127 prototype merging!
-            lambda_phase = 0.05 * min(1.0, float(self.current_epoch) / 5.0) * aux_mult
-            lambda_sem = 0.05 * aux_mult
+            # CALIBRATED AUXILIARY GRADIENT BUDGET (<= 10% total gradient bandwidth):
+            lambda_mem = 0.040 * aux_mult
+            lambda_cma = 0.050 * cma_ramp * aux_mult
+            lambda_rep = 0.030 * aux_mult
+            lambda_phase = 0.030 * min(1.0, float(self.current_epoch) / 5.0) * aux_mult
+            lambda_sem = 0.015 * aux_mult # Prevents macro vehicle segmentation from dominating
+            lambda_idx = 0.050 * aux_mult
 
             total_loss = (
                 total_det_loss

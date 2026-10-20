@@ -76,10 +76,18 @@ class BoxOccupancyTargetGenerator:
             occupancy = in_core + in_boundary * decay
             occupancy = occupancy.view(K, H, W)
 
-            # Union-max aggregation across present classes
+            # Union-max aggregation with boundary seam suppression
             for c in torch.unique(classes):
                 cls_mask = (classes == c)
-                heatmaps[b, c] = torch.max(occupancy[cls_mask], dim=0).values
+                boxes_of_class = occupancy[cls_mask]
+                if boxes_of_class.shape[0] > 1:
+                    # Subtract pairwise overlap seams to preserve instance boundaries
+                    max_occupancy = torch.max(boxes_of_class, dim=0).values
+                    overlap_sum = torch.sum(boxes_of_class, dim=0)
+                    seam_mask = (overlap_sum > 1.2).float() * 0.15
+                    heatmaps[b, c] = torch.clamp(max_occupancy - seam_mask, min=0.0, max=1.0)
+                else:
+                    heatmaps[b, c] = boxes_of_class[0]
 
         return heatmaps
 

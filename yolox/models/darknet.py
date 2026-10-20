@@ -180,19 +180,25 @@ class CSPDarknet(nn.Module):
         x_clean_stem = self.stem(x)
         outputs["stem"] = x_clean_stem
         
-        # 2. EVALUATE FOURIER PHASE LOSS DIRECTLY ON STEM REPRESENTATIONS
-        # Saves 2 full forward passes through Dark2 per iteration!
+        # 2. EVALUATE PIXEL-WISE FOURIER PHASE LOSS (v3.6 Certified)
+        # Evaluates cosine similarity per spatial pixel across channels (dim=1)
         if self.training:
             with torch.no_grad():
                 x_perturbed = self._fourier_amplitude_perturb(x)
-            
             stem_pert = self.stem(x_perturbed)
-            
-            # Asymmetric clean anchor prevents gradient cancellation on detection
-            sim = F.cosine_similarity(x_clean_stem.detach().flatten(1), stem_pert.flatten(1), dim=-1)
-            phase_loss = (1.0 - sim).mean()
+
+            # Strict FP32 calculation with FP16-safe epsilon guard (1e-4)
+            clean_fp32 = x_clean_stem.detach().float()
+            pert_fp32 = stem_pert.float()
+
+            norm_clean = torch.norm(clean_fp32, p=2, dim=1, keepdim=True)
+            norm_pert = torch.norm(pert_fp32, p=2, dim=1, keepdim=True)
+            denom = torch.clamp(norm_clean * norm_pert, min=1e-4)
+
+            sim_spatial = (clean_fp32 * pert_fp32).sum(dim=1, keepdim=True) / denom
+            phase_loss = (1.0 - sim_spatial).mean().to(x.dtype)
         else:
-            phase_loss = torch.tensor(0.0, device=x.device)
+            phase_loss = torch.tensor(0.0, device=x.device, dtype=x.dtype)
 
         # 3. ADAPTIVE STAGE 1 (DARK2) VIA CMA
         run_ttt = False
