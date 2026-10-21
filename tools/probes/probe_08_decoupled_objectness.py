@@ -5,13 +5,13 @@ from yolox.exp import get_exp
 
 def run_probe():
     print("=" * 70)
-    print("PROBE 08: DECOUPLED OBJECTNESS STEM & SCALE-NORMALIZED OBJECTNESS LOSS")
+    print("PROBE 08: OBJECTNESS RECEPTIVE FIELD & SCALE-NORMALIZED LOSS")
     print("=" * 70)
 
     exp = get_exp("exps/default/tde_yolox_s.py")
     head = exp.get_model().head.cuda().train()
 
-    # 1. Verify Gradient Decoupling: Zero gradients to reg_conv from Objectness Loss
+    # 1. Verify Gradient Flow: reg_conv MUST receive gradients for 160px receptive field!
     dummy_x = [
         torch.randn(2, 128, 72, 128, device="cuda", requires_grad=True),
         torch.randn(2, 256, 36, 64, device="cuda", requires_grad=True),
@@ -40,9 +40,9 @@ def run_probe():
     print(f" • Objectness Loss backpropagated into obj_preds: {obj_conv_has_grad}")
     print(f" • Objectness Loss backpropagated into reg_conv:  {reg_conv_has_grad}")
 
-    assert not reg_conv_has_grad, "CRITICAL LEAK: 190,000 negative objectness anchors are still corrupting reg_conv!"
+    assert reg_conv_has_grad, "CRITICAL LOSS OF RECEPTIVE FIELD: reg_conv is NOT receiving objectness gradients!"
     assert obj_conv_has_grad, "obj_preds failed to receive objectness gradients!"
-    print(" [PASS] Objectness branch is completely decoupled from the coordinate regression trunk.")
+    print(" [PASS] Objectness branch correctly utilizes the 5x5 (160px) reg_conv receptive field.")
     print("=" * 70 + "\n")
 
 if __name__ == "__main__":

@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 # -*- encoding: utf-8 -*-
 # Copyright (c) Megvii Inc. All rights reserved.
-# Integrated for TDE-YOLOX v3.6: Hardened Anti-Collision Memory Bank with True S^127 Chordal Distance
+# Integrated for TDE-YOLOX v3.6.1: C2A-DG Adverse Fallback Gate & Macro Spatial Restoration
 
 import math
 import torch
@@ -34,14 +34,13 @@ class AntiCollisionEngramBank(nn.Module):
         B, C, H, W = h_local.shape
         D = self.latent_dim
 
-        # P3 LOCAL-DOMINATED QUERY RE-WEIGHTING (v3.6):
+        # P3 LOCAL-DOMINATED QUERY RE-WEIGHTING:
         p_interp = F.interpolate(anchor_feat, size=(H, W), mode='bilinear', align_corners=False)
         dw_local = self.dw_hf(h_local)
         p_scale = p_interp.float() * torch.rsqrt(p_interp.float().pow(2).mean(dim=1, keepdim=True) + 1e-5)
         dw_scale = dw_local.float() * torch.rsqrt(dw_local.float().pow(2).mean(dim=1, keepdim=True) + 1e-5)
 
         if is_p3:
-            # 80% Local Texture, 20% Coarse Anchor for fine-grained micro targets
             q = (0.25 * p_scale + dw_scale).to(h_local.dtype)
         else:
             q = (p_scale + torch.clamp(self.w_hf.float(), 0.05, 1.0) * dw_scale).to(h_local.dtype)
@@ -49,25 +48,22 @@ class AntiCollisionEngramBank(nn.Module):
         q_norm = F.normalize(q.float().permute(0, 2, 3, 1).reshape(B, H * W, D), p=2, dim=-1, eps=1e-5)
         p_norm = F.normalize(self.prototypes.float(), p=2, dim=-1, eps=1e-5)
 
-        # 1. Raw cosine similarity on S^127: shape [B, H*W, 576] in [-1, 1]
+        # 1. Raw cosine similarity on S^127: shape [B, H*W, 576]
         cos_sim_all = torch.matmul(q_norm, p_norm.t())
 
         # 2. Scale-Dependent Temperature for Memory Retrieval Attention:
-        # (T=32 for P3 sharp attention; T=16 for P5 soft density)
         scores_fp32 = cos_sim_all * self.temperature
         attn_weights = F.softmax(scores_fp32, dim=-1)
         retrieved_memory = torch.matmul(attn_weights, p_norm).to(q.dtype)
 
-        # 3. Unified Mode Aggregation for Categorical Class Logits (v3.6):
-        # Uses constant T_mode = 16.0 across all scales to guarantee exact machine parity!
+        # 3. Unified Mode Aggregation for Class Logits (T_mode = 16.0):
         T_mode = 16.0
         log_k = math.log(float(self.num_modes))
         cos_by_class = cos_sim_all.view(B, H * W, self.num_classes, self.num_modes)
         raw_lse = torch.logsumexp(cos_by_class * T_mode, dim=-1) - log_k
         raw_class_scores = (raw_lse / T_mode) * 16.0
 
-        # CORRECTION OF THE INVERTED BILATERAL GATE (v3.6):
-        # High Certainty (+4.0) opens; Ambiguity / Distance Penalty (-2.0) shuts
+        # 4. Certainty Evaluation:
         p_mem = F.softmax(raw_class_scores.detach().float(), dim=-1)
         top2_p, _ = torch.topk(p_mem, k=2, dim=-1)
         certainty = torch.clamp(top2_p[..., 0:1] - top2_p[..., 1:2], min=0.0, max=1.0).to(q.dtype)
@@ -78,16 +74,14 @@ class AntiCollisionEngramBank(nn.Module):
         dist_penalty = torch.clamp(self.omega, min=0.0, max=2.0) * chordal_dist
 
         gate_logit = 4.0 * certainty - 2.0 * dist_penalty - 1.0
-
-        # OBJECTNESS BYPASS FOR FAINT OBJECTS:
-        obj_flat = objectness_mask.permute(0, 2, 3, 1).reshape(B, H * W, 1)
         gate_prob = torch.sigmoid(gate_logit)
+
+        # 5. Objectness Envelope:
+        obj_flat = objectness_mask.permute(0, 2, 3, 1).reshape(B, H * W, 1)
         effective_obj = torch.max(obj_flat.detach(), gate_prob * 0.10)
         obj_envelope = torch.clamp(effective_obj / 0.10, min=0.0, max=1.0)
-        g_effective = gate_prob * obj_envelope
 
-        # DEFENSIVE DIMENSION GUARD (v3.6):
-        # Force h_ratio to shape [B, 1, 1] (or [1, 1, 1]) to cleanly match 3D g_effective [B, H*W, 1]
+        # 6. C2A-DG ADVERSE FALLBACK MODULATION (v3.6.1):
         if torch.is_tensor(h_s):
             h_val = h_s.float()
             if h_val.numel() == B:
@@ -99,10 +93,12 @@ class AntiCollisionEngramBank(nn.Module):
         else:
             h_ratio = torch.tensor(float(h_s), device=q.device, dtype=torch.float32).view(1, 1, 1).clamp(0.0, 1.0)
 
-        atmo_modulator = 0.75 + 0.50 * torch.sigmoid(4.0 * (h_ratio - 0.50)).to(q.dtype)
-        
-        # [B, H*W, 1] * [B, 1, 1] -> strictly [B, H*W, 1] (7,680 elements!)
-        g_final = torch.clamp(g_effective * atmo_modulator, min=0.0, max=0.70)
+        atmo_severity = torch.clamp((h_ratio - 0.28) / 0.42, min=0.0, max=1.0).to(q.dtype)
+        confusion_factor = (1.0 - certainty).to(q.dtype)
+        intervention_scale = torch.max(atmo_severity, confusion_factor * 0.50)
+
+        # Gate is active ONLY under adverse weather OR high confusion:
+        g_final = torch.clamp(gate_prob * intervention_scale * obj_envelope, min=0.0, max=0.70)
 
         mem_spatial = retrieved_memory.reshape(B, H, W, D).permute(0, 3, 1, 2).to(h_local.dtype)
         gate_spatial = g_final.reshape(B, H, W, 1).permute(0, 3, 1, 2).to(h_local.dtype)
@@ -110,12 +106,6 @@ class AntiCollisionEngramBank(nn.Module):
 
 
 class TDE_Head(YOLOXHead):
-    """
-    TDE-YOLOX v3.6 Master Head:
-      - Memory-Free High-Fidelity Regression Tower (GIoU + Adaptive NWD Loss).
-      - Decoupled Classification Tower with RMS Scale-Matched Convex Switching.
-      - Level-Aware Dynamic ATSS-SimOTA Assigner.
-    """
     def __init__(self, num_classes=9, width=1.0, strides=[8, 16, 32], in_channels=[256, 512, 1024], act="silu", depthwise=False):
         super().__init__(num_classes, width, strides, in_channels, act, depthwise)
         self.latent_dim = 128
@@ -153,12 +143,10 @@ class TDE_Head(YOLOXHead):
             in_c = int(in_channels[i] * width)
             self.stems.append(BaseConv(in_c, feat_c, 1, 1, act=act))
 
-            # Regression Tower (Memory-Free)
             self.reg_convs.append(nn.Sequential(
                 BaseConv(feat_c, feat_c, 3, 1, act=act),
                 BaseConv(feat_c, feat_c, 3, 1, act=act)
             ))
-            # Classification Tower
             self.cls_convs.append(nn.Sequential(
                 BaseConv(feat_c, feat_c, 3, 1, act=act),
                 BaseConv(feat_c, feat_c, 3, 1, act=act)
@@ -187,7 +175,6 @@ class TDE_Head(YOLOXHead):
                 nn.Conv2d(feat_c, num_classes, kernel_size=1, stride=1, padding=0, bias=True)
             )
             self.reg_preds.append(nn.Conv2d(feat_c, 4, kernel_size=1, stride=1, padding=0))
-            # Evaluates directly on stem feature x (128 channels) to decouple from reg_conv:
             self.obj_preds.append(nn.Conv2d(feat_c, 1, kernel_size=1, stride=1, padding=0))
 
     def initialize_biases(self, prior_prob):
@@ -215,14 +202,13 @@ class TDE_Head(YOLOXHead):
         for k, (cls_conv, reg_conv, stride_l, x) in enumerate(zip(self.cls_convs, self.reg_convs, self.strides, xin)):
             x = self.stems[k](x)
 
-            # 1. REGRESSION TOWER (High Fidelity, Memory-Free)
+            # 1. REGRESSION & OBJECTNESS TOWER (Re-attached to reg_feat for 5x5 receptive field)
             reg_feat = reg_conv(x)
             reg_out = self.reg_preds[k](reg_feat)
-            # Evaluated directly on stem feature x to stop negative anchors from poisoning reg_conv:
-            obj_out = self.obj_preds[k](x)
+            obj_out = self.obj_preds[k](reg_feat)
             obj_mask = torch.sigmoid(obj_out)
 
-            # 2. CLASSIFICATION TOWER: Unified Associative Restoration
+            # 2. CLASSIFICATION TOWER:
             cls_feat = cls_conv(x)
             B, _, H, W = cls_feat.shape
 
@@ -236,7 +222,7 @@ class TDE_Head(YOLOXHead):
 
             mem_conv = self.manifold_decoders[k](mem_restored)
 
-            # UNCONSTRAINED LOCAL ENERGY MATCHING (Removes unit-floor inflation):
+            # Local energy matching:
             rms_cls = torch.sqrt(torch.mean(cls_feat.float().pow(2), dim=1, keepdim=True) + 1e-5)
             rms_mem = torch.sqrt(torch.mean(mem_conv.float().pow(2), dim=1, keepdim=True) + 1e-5)
             scale_ratio = torch.clamp(rms_cls / (rms_mem + 1e-5), min=0.10, max=3.0)
@@ -246,7 +232,6 @@ class TDE_Head(YOLOXHead):
             smooth_weight = torch.tensor(0.05 + 0.10 * float(k), device=restored_feat.device, dtype=cls_feat.dtype)
             restored_feat = (restored_feat + smooth_weight * torch.tanh(self.post_engram_dw[k](restored_feat))).to(cls_feat.dtype)
 
-            # UNIFORM 0.250 EFFECTIVE INJECTION WEIGHT ACROSS ALL SCALES:
             proto_scale_map = [0.500, 0.375, 0.250]
             raw_scores_spatial = raw_scores.permute(0, 2, 1).reshape(B, self.num_classes, H, W).to(cls_feat.dtype)
             s_proto_centered = raw_scores_spatial - raw_scores_spatial.mean(dim=1, keepdim=True)
@@ -401,7 +386,7 @@ class TDE_Head(YOLOXHead):
 
         num_fg = max(num_fg, 1.0)
 
-        # 1. CONSTANT 5.0 GIOU WEIGHT + SMOOTH NWD DECAY (Paced for 80 Epochs):
+        # 1. CONSTANT 5.0 GIOU WEIGHT + SMOOTH NWD DECAY:
         reg_weight = 5.0
         if self.current_epoch < 50:
             nwd_weight, loss_l1_weight = 1.25, 0.00
@@ -415,14 +400,14 @@ class TDE_Head(YOLOXHead):
         loss_giou = (self.iou_loss(bbox_preds.view(-1, 4)[fg_masks_concat], reg_targets_concat)).sum() / num_fg
         loss_nwd = (self.nwd_loss(bbox_preds.view(-1, 4)[fg_masks_concat], reg_targets_concat)).sum() / num_fg
 
-        # 2. SCALE-NORMALIZED OBJECTNESS LOSS (Cancels 576x1024 grid inflation):
+        # 2. SCALE-NORMALIZED OBJECTNESS LOSS:
         obj_preds_fp32 = obj_preds.view(-1, 1).float()
         pos_mask = obj_targets_concat.bool()
         loss_obj_pos = F.binary_cross_entropy_with_logits(obj_preds_fp32[pos_mask], obj_targets_concat[pos_mask].float(), reduction="sum") / num_fg
         loss_obj_neg = F.binary_cross_entropy_with_logits(obj_preds_fp32[~pos_mask], obj_targets_concat[~pos_mask].float(), reduction="sum") / float(obj_preds_fp32.shape[0])
         loss_obj = loss_obj_pos + (loss_obj_neg * 12.0)
 
-        # 3. 50/50 BALANCED HYBRID CLASSIFICATION LOSS (Protects rare classes):
+        # 3. 50/50 BALANCED HYBRID CLASSIFICATION LOSS:
         fg_cls_preds = cls_preds.view(-1, self.num_classes)[fg_masks_concat].float()
         raw_bce = F.binary_cross_entropy_with_logits(fg_cls_preds, cls_targets_concat.float(), reduction="none")
         pos_mask_cls = (cls_targets_concat > 0.0).float()
@@ -528,8 +513,10 @@ class TDE_Head(YOLOXHead):
         c_b = (gt_cy + delta_y) - y_centers
         is_in_centers = torch.stack([c_l, c_r, c_t, c_b], 2).min(dim=-1).values > 0.0
 
-        # ELEVATED CANDIDATE POOL (24) to match 576x1024 resolution:
-        k_cand_per_level = 24
+        is_macro = (gt_scale.view(-1, 1) >= 96.0)
+
+        # DYNAMIC CANDIDATE POOL: Macro vehicles span up to 40-150 anchors; expand pool to 48:
+        k_cand_per_level = 48 if is_macro.any() else 24
         candidate_indices_list = []
 
         for l_mask, s_l in zip(level_masks, level_strides):
@@ -537,7 +524,6 @@ class TDE_Head(YOLOXHead):
             l_cx = anchor_cx[l_mask]
             l_cy = anchor_cy[l_mask]
 
-            # Aspect-ratio bounded Mahalanobis distance (max 1.6x distortion)
             den_x = torch.clamp(gt_w * 0.50, min=s_l)
             den_y = torch.clamp(gt_h * 0.50, min=s_l)
             den_x = torch.max(den_x, gt_scale * 0.35)
@@ -591,16 +577,13 @@ class TDE_Head(YOLOXHead):
 
         hybrid_overlap = 0.5 * (pair_wise_ious + pair_wise_nwd)
 
-        is_macro = (gt_scale.view(-1, 1) >= 96.0)
         n_cand = min(14, hybrid_overlap.size(1))
-
         topk_overlap, _ = torch.topk(hybrid_overlap, n_cand, dim=1)
 
-        # Full candidate access across all scales (No micro truncation):
         cand_mask = torch.ones_like(topk_overlap)
         dynamic_ks = (topk_overlap * cand_mask).sum(dim=1).round().int()
         min_k = torch.where(is_macro.squeeze(-1), 3, 2)
-        max_k = torch.where(is_macro.squeeze(-1), 12, 10) # Raised from 8 to 10 for micro targets
+        max_k = torch.where(is_macro.squeeze(-1), 12, 10)
         dynamic_ks = torch.clamp(dynamic_ks, min=min_k, max=max_k)
 
         gt_cls_per_image = F.one_hot(gt_classes.to(torch.int64), self.num_classes).float()
