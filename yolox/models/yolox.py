@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 # -*- encoding: utf-8 -*-
 # Copyright (c) Megvii Inc. All rights reserved.
-# Integrated for TDE-YOLOX v3.3: Master Multi-Task Loss Synthesis & CMA Curriculum Gating
+# Integrated for TDE-YOLOX v3.7: Master Three-Phase Curriculum Synthesis & Level-Normalized Memory Supervision
 
 import math
 import torch
@@ -11,18 +11,16 @@ import torch.nn.functional as F
 from .losses import PrototypeRepulsionLoss
 from .yolo_head import YOLOXHead
 from .yolo_pafpn import YOLOPAFPN
-
 from .aux_semantic_head import BoxOccupancyTargetGenerator, ActiveClassFocalDiceLoss
+
 
 class YOLOX(nn.Module):
     """
-    TDE-YOLOX v3.3 Master Architecture Host.
-    
-    Certified Innovations:
-      - Master Multi-Task Synthesis: Balances 6 loss objectives across dynamic training curricula.
-      - Auxiliary Loss Curriculum Decay: Smoothly fades representation constraints to 10% (Epochs 30-65).
-      - Atomic Supervised Memory Loss: Normalized strictly by actual matched foreground anchors.
-      - First-Principles CMA Channeling: Direct supervision of channel covariance whitening.
+    TDE-YOLOX v3.7 Master Architecture Host.
+    Features:
+      - Three-Phase "Earn-Your-Influence" Curriculum: Auxiliary losses phase in smoothly over Epochs 4-13.
+      - Level-Normalized Supervised Memory Loss: P3, P4, and P5 prototypes receive equal supervision.
+      - Continuous Auxiliary Multiplier Fade: Fades smoothly to 0.15 floor between Epochs 45 and 65.
     """
     def __init__(self, backbone=None, head=None):
         super().__init__()
@@ -35,25 +33,18 @@ class YOLOX(nn.Module):
         self.head = head
         self.num_classes = head.num_classes
 
-        # REFINEMENT 3: Welch-Bound Aligned Margins (m_intra=0.20, m_inter=0.08)
-        # Eliminates persistent geometric gradient noise on S^127
+        # Welch-Bound Aligned Margins with Directed Rider-Motor Separation
         self.repulse_loss = PrototypeRepulsionLoss(
             num_classes=self.num_classes,
             num_modes=64,
-            m_intra=0.20,
-            m_inter=0.08
+            m_intra=0.25,
+            m_inter=0.15
         )
 
         self.sem_loss_fn = ActiveClassFocalDiceLoss()
 
         self.current_epoch = 0
         self.max_epochs = 80
-
-        # Curriculum Saliency Schedule Parameters
-        self.warmup_end = 10
-        self.ramp_end = 50
-        self.prob_start = 0.10
-        self.prob_end = 0.40  # Stabilized ceiling: eliminates late-epoch gradient turbulence
 
     def set_meta_training_state(self, epoch, max_epochs):
         self.current_epoch = epoch
@@ -63,9 +54,9 @@ class YOLOX(nn.Module):
         if hasattr(head_ref, "current_epoch"):
             head_ref.current_epoch = epoch
         if hasattr(head_ref, "max_epochs"):
-            head_ref.max_epochs = max_epochs # Dynamic hand-off!
+            head_ref.max_epochs = max_epochs
 
-        # Cosine Gumbel-Softmax Temperature Annealing tau: 1.0 -> 0.50
+        # Cosine Gumbel-Softmax Temperature Annealing: tau: 1.0 -> 0.50
         tau_min = 0.50
         tau_max = 1.00
         decay_horizon = max(1.0, float(max_epochs - 20))
@@ -77,8 +68,6 @@ class YOLOX(nn.Module):
             neck_ref.p4_bqsa.set_tau(current_tau)
 
     def _get_ttt_probability(self):
-        # 100% consistent feature distribution during both training and inference!
-        # Eliminates the bimodal feature shift between adapted and unadapted batches.
         return 1.0
 
     def _get_indexer_loss_weight(self):
@@ -138,18 +127,26 @@ class YOLOX(nn.Module):
             else:
                 raw_sem_loss = torch.tensor(0.0, device=x.device)
 
-            # Master Multi-Task Loss Synthesis with Auxiliary Curriculum Decay
-            lambda_idx_base = self._get_indexer_loss_weight()  # Dynamic curriculum: 0.10 -> 0.01
+            # -------------------------------------------------------------
+            # MASTER "EARN-YOUR-INFLUENCE" CURRICULUM SYNTHESIS (v3.7)
+            # -------------------------------------------------------------
             aux_mult = self._get_aux_multiplier()
-            cma_ramp = min(1.0, float(self.current_epoch) / 10.0)
+            current_ep = float(self.current_epoch) if self.current_epoch > 0 else 1.0
 
-            # CALIBRATED AUXILIARY GRADIENT BUDGET (<= 10% total gradient bandwidth):
-            lambda_mem = 0.040 * aux_mult
-            lambda_cma = 0.050 * cma_ramp * aux_mult
-            lambda_rep = 0.030 * aux_mult
-            lambda_phase = 0.030 * min(1.0, float(self.current_epoch) / 5.0) * aux_mult
-            lambda_sem = 0.015 * aux_mult
-            lambda_idx = lambda_idx_base * aux_mult  # PROPERLY SCALED (Removes L129 static override!)
+            # Early Warmup Schedules:
+            # Epochs 1-3 hold auxiliary gradient pressure at ~0 to let pre-trained YOLOX adapt cleanly
+            aux_ramp_10 = min(1.0, max(0.0, (current_ep - 3.0) / 10.0))  # Ramps 0.0 -> 1.0 (E4 to E13)
+            cma_ramp = min(1.0, current_ep / 10.0)                         # CMA loss ramp
+            phase_ramp = min(1.0, current_ep / 5.0)                       # Fourier phase ramp
+            lambda_idx_base = self._get_indexer_loss_weight()              # Indexer schedule (0.10 -> 0.01)
+
+            # Calibrated Auxiliary Loss Multipliers:
+            lambda_sem   = 0.015 * aux_ramp_10 * aux_mult  # Zone 6 Fix: Zero on Day 1!
+            lambda_mem   = 0.040 * aux_ramp_10 * aux_mult  # Zone 7 Fix: Zero on Day 1!
+            lambda_cma   = 0.050 * cma_ramp * aux_mult
+            lambda_phase = 0.030 * phase_ramp * aux_mult
+            lambda_rep   = 0.030 * aux_mult
+            lambda_idx   = lambda_idx_base * aux_mult
 
             total_loss = (
                 total_det_loss
@@ -193,31 +190,28 @@ class YOLOX(nn.Module):
         strides = [8.0, 16.0, 32.0]
         level_losses = []
 
-        flat_mask = fg_masks.view(-1)       # [B * total_anchors]
-        flat_targets = cls_targets.float()  # [N_fg_total, num_classes]
+        flat_mask = fg_masks.view(-1)
+        flat_targets = cls_targets.float()
 
         if expanded_strides is not None:
-            # 1. Safely concatenate list of stride tensors across pyramid levels
+            # Dimension-safe concatenation across list of stride tensors
             if isinstance(expanded_strides, (list, tuple)):
-                cat_strides = torch.cat(expanded_strides, dim=1)  # Shape: [1, total_anchors]
+                cat_strides = torch.cat(expanded_strides, dim=1)
             else:
                 cat_strides = expanded_strides.view(1, -1)
 
             B = aux_mem_logits[0].shape[0]
-            # 2. Dimension-safe stride expansion across the batch: [B * total_anchors]
             strides_all = cat_strides.expand(B, -1).reshape(-1)
-            fg_strides = strides_all[flat_mask]                   # [N_fg_total]
+            fg_strides = strides_all[flat_mask]
 
-            # 3. Concatenate and flatten memory logits across pyramid levels
             all_logits = torch.cat(aux_mem_logits, dim=1).view(-1, self.num_classes).float()
-            fg_logits = all_logits[flat_mask]                     # [N_fg_total, num_classes]
+            fg_logits = all_logits[flat_mask]
 
             min_len = min(fg_logits.shape[0], flat_targets.shape[0], fg_strides.shape[0])
             fg_logits = fg_logits[:min_len]
             flat_targets = flat_targets[:min_len]
             fg_strides = fg_strides[:min_len]
 
-            # 4. Level-normalized loss calculation
             for s in strides:
                 s_mask = (fg_strides == s)
                 if s_mask.any():
@@ -227,7 +221,6 @@ class YOLOX(nn.Module):
                     n_fg_s = max(1.0, float(s_mask.sum().item()))
                     level_losses.append(bce_s / (n_fg_s * float(self.num_classes)))
         else:
-            # Fallback uniform normalization
             all_logits = torch.cat(aux_mem_logits, dim=1).view(-1, self.num_classes).float()
             fg_logits = all_logits[flat_mask]
             min_len = min(fg_logits.shape[0], flat_targets.shape[0])
@@ -239,10 +232,3 @@ class YOLOX(nn.Module):
         if len(level_losses) > 0:
             return sum(level_losses) / float(len(level_losses))
         return torch.tensor(0.0, device=flat_targets.device)
-
-    def visualize(self, x, targets, save_prefix="assign_vis_"):
-        # FRICTION FIX: Unpack safely using *_ to prevent unpack errors
-        neck_output, *_ = self.backbone(
-            x, targets=targets, ttt_prob=1.0, epoch=self.max_epochs, max_epochs=self.max_epochs
-        )
-        self.head.visualize_assign_result(neck_output[0], targets, x, save_prefix)

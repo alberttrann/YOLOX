@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 # -*- encoding: utf-8 -*-
 # Copyright (c) Megvii Inc. All rights reserved.
-# Integrated for TDE-YOLOX v3.7: Combinatorial Capacity Repulsion & Directed Category Orthogonality
+# Integrated for TDE-YOLOX v3.7: Capacity-Normalized Repulsion & Directed Category Orthogonality
 
 import torch
 import torch.nn as nn
@@ -136,7 +136,6 @@ class PrototypeRepulsionLoss(nn.Module):
         intra_sim = torch.bmm(p_norm, p_norm.transpose(1, 2))
         intra_sim_non_diag = intra_sim.masked_fill(self.eye_mask, -1.0)
         intra_violations = torch.clamp(intra_sim_non_diag - self.m_intra, min=0.0)
-        # CAPACITY NORMALIZATION (Fix 10): Normalizes by total mode capacity C * K
         l_intra = intra_violations.pow(2).sum() / float(C * K)
 
         # 2. Inter-Class Orthogonality (Welch-compliant categorical separation)

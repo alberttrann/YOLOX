@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding:utf-8 -*-
 # Copyright (c) Megvii Inc. All rights reserved.
-# Integrated for TDE-YOLOX v3.7: Calibrated MuSGD Partition, Harmonized Evaluation & Native 16:9 Canvas
+# Integrated for TDE-YOLOX v3.7: Conservative Augmentation (Zone 8 Mixup Disabled) & Calibrated Optimization
 
 import os
 import random
@@ -26,7 +26,7 @@ class Exp(MyExp):
         self.exp_name = os.path.split(os.path.realpath(__file__))[1].split(".")[0]
         self.act = "silu"
 
-        # Dataset & Training Config
+        # Dataset & Training Parameters
         self.num_classes = 9         # BDD100K 9 detection categories
         self.init_ttt_lr = 0.05      # Stage 1 GroupNorm Covariate Moment Alignment rate
         self.ttt_noise_std = 0.08
@@ -35,14 +35,16 @@ class Exp(MyExp):
         self.input_size = (576, 1024)   # (Height, Width)
         self.test_size = (576, 1024)
         
-        # Multiscale range over integer multiples of 64
+        # Multiscale range over integer multiples of 64: {(512, 896), (576, 1024), (640, 1152)}
         self.multiscale_range = 1    
         
-        # Training Augmentation Settings
+        # ZONE 8 CONSERVATIVE AUGMENTATION (TDE 2.0.4 & Official Megvii YOLOX-S Standard):
+        # 100% 4-quadrant opaque Mosaic preserves high-density scene context;
+        # Mixup is DISABLED to prevent synthetic translucency on small 9M YOLOX-S capacity!
         self.mosaic_prob = 1.0
         self.mosaic_scale = (0.5, 1.5)
-        self.enable_mixup = True
-        self.mixup_prob = 0.15
+        self.enable_mixup = False
+        self.mixup_prob = 0.0
 
         # Rigid Geometry Constraints (Dashcam Perspective Standard)
         self.hsv_prob = 1.0
@@ -73,6 +75,7 @@ class Exp(MyExp):
         self.data_num_workers = 4
         self.batch_size = 16
 
+        # Standard training validation threshold (prevents early noise from flooding eval)
         self.test_conf = 0.01
         self.nmsthre = 0.65
 
@@ -149,7 +152,7 @@ class Exp(MyExp):
         CALIBRATED MuSGD OPTIMIZER PARTITION v3.7:
           - Group 0 (Muon): Prototypes on S^127 calibrated to LR = base_lr * 1.5 (0.45 deg/step velocity)
           - Group 1 (SGD Decay): Convolutions, Projections, Decoders (WD = 5e-4)
-          - Group 2 (SGD No-Decay): Biases, Norms, aligner.gamma/beta, w_hf, and attnres.w (WD = 0.0)
+          - Group 2 (SGD No-Decay): Biases, Norms, aligner.gamma/beta, w_hf, and scalar gates (WD = 0.0)
           - Group 3 (Meta-SGD): Stage 1 TTT Step Sizes ttt_lrs_* (LR = base_lr * 0.05, WD = 0.0)
         """
         if "optimizer" in self.__dict__:
@@ -187,7 +190,7 @@ class Exp(MyExp):
                 or any(k in name for k in ["gn.", "bn.", "norm.", "bn1.", "net.1."])
                 or any(k in name for k in [
                     "aligner.gamma", "aligner.beta", "gamma", 
-                    "gr_gate", "omega", "lambda_fog", "k_sigma", "pool_alpha",
+                    "gate", "omega", "lambda_fog", "k_sigma", "pool_alpha",
                     "w_hf", "attnres"
                 ])
                 or (p.ndim <= 1)
@@ -204,8 +207,6 @@ class Exp(MyExp):
         unassigned = all_trainable_params - registered_params
         assert len(unassigned) == 0, f"FATAL: Unassigned parameters in optimizer setup: {unassigned}"
 
-        # MUON VELOCITY CALIBRATION (Fix 27):
-        # Setting Muon LR = base_lr * 1.5 (0.00375) reduces angular velocity from 2.43 deg/iter to 0.45 deg/iter
         muon_lr = base_lr * 1.5
 
         logger.info("=" * 80)

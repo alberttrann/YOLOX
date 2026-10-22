@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 # -*- encoding: utf-8 -*-
 # Copyright (c) Megvii Inc. All rights reserved.
-# Integrated for TDE-YOLOX v3.7: Step-0 Identity Neck, GroupNorm Variance Restoration & P3 Zero-Delta Bypass
+# Integrated for TDE-YOLOX v3.7: Step-0 Backbone Trunk Highways & Hybrid GRC Bottom-Up Processing
 
 import math
 import torch
@@ -138,7 +138,9 @@ class P5ExclusiveDenseAttention(nn.Module):
 
 class C2f_BQSA_P4(nn.Module):
     """
-    P4 HySparse2 Block-Queried Attention with Step-0 Identity Guards & GPU-Vectorized Padded Target Rasterization.
+    P4 HySparse2 Block-Queried Attention with Step-0 Backbone Trunk Highway (Zone 3).
+    Preserves 98.2% of pre-trained Dark4 features (C4) on Step 0 while progressively
+    earning multi-scale C2f representation during training.
     """
     def __init__(self, c1, c2, n=1, block_size=4, sparsity_ratio=0.35):
         super().__init__()
@@ -147,12 +149,15 @@ class C2f_BQSA_P4(nn.Module):
         self.sparsity_ratio = sparsity_ratio
         self.tau = 1.0
 
-        self.cv1 = BaseConv(c1, c2, 1, 1)
-        self.cv2 = BaseConv((2 + n) * self.c, c2, 1, 1)
-        self.m = nn.ModuleList(Bottleneck(self.c, self.c, False, 1.0) for _ in range(n))
+        # PRETRAINED CSPLAYER TRUNK (Loads from COCO C3_p4!):
+        self.conv1 = BaseConv(c1, self.c, 1, 1, act="silu")
+        self.conv2 = BaseConv(c1, self.c, 1, 1, act="silu")
+        self.conv3 = BaseConv(2 * self.c, c2, 1, 1, act="silu")
+        self.m = nn.Sequential(*[Bottleneck(self.c, self.c, shortcut=False, expansion=1.0, act="silu") for _ in range(n)])
+
+        # BQSA RESIDUAL ATTENTION BRANCH:
         self.rca = UnifiedRCA(self.c)
         self.rmbconv = UnifiedRMBConv(self.c)
-
         self.indexer_norm = RMSNorm(self.c, eps=1e-5)
         self.indexer = nn.Sequential(
             nn.Conv2d(self.c, self.c, 3, padding=1, groups=self.c),
@@ -161,10 +166,10 @@ class C2f_BQSA_P4(nn.Module):
         self.pool_alpha = nn.Parameter(torch.tensor(0.0))
         self.qkv = nn.Conv2d(self.c, self.c * 3, 1)
 
-        # CRITICAL STEP-0 IDENTITY GUARDS (Criterion 5):
+        # Step-0 Identity Guards (Criterion 5):
         self.proj = nn.Conv2d(self.c, self.c, 1, bias=False)
         nn.init.zeros_(self.proj.weight)  # Zero projection at initialization
-        self.gr_gate = nn.Parameter(torch.full((1, self.c, 1, 1), -4.0))  # Starts at sigma(-4.0) = 0.018
+        self.gr_gate = nn.Parameter(torch.full((1, self.c, 1, 1), -4.0))  # Gate ≈ 0.018
 
     def set_tau(self, tau):
         self.tau = tau
@@ -196,11 +201,13 @@ class C2f_BQSA_P4(nn.Module):
         return in_box.any(dim=1).float().view(batch_size, -1)
 
     def forward(self, x, p5_saliency, h_s, targets=None):
-        y = list(self.cv1(x).chunk(2, 1))
-        y.extend(m(y[-1]) for m in self.m)
-        feat = y[-1]
-        B, C, H, W = feat.shape
+        # 1. Pretrained CSPLayer Trunk (100% COCO feature flow!)
+        x_1 = self.conv1(x)
+        x_2 = self.conv2(x)
+        x_1 = self.m(x_1)
 
+        # 2. Residual BQSA Attention Branch (Evaluates on x_1)
+        B, C, H, W = x_1.shape
         bs = min(self.block_size, H, W)
         num_h, num_w = H // bs, W // bs
         total_blocks = num_h * num_w
@@ -209,7 +216,7 @@ class C2f_BQSA_P4(nn.Module):
         k_target = int(round(self.sparsity_ratio * float(total_blocks)))
         k_actual = max(24, min(48, k_target)) if total_blocks >= 24 else max(1, total_blocks)
 
-        feat_cond = self.rca(self.rmbconv(feat))
+        feat_cond = self.rca(self.rmbconv(x_1))
         s_up = F.interpolate(p5_saliency.float(), size=(H, W), mode='nearest')
         block_saliency = F.avg_pool2d(s_up, kernel_size=bs, stride=bs).view(B, -1)
 
@@ -236,10 +243,9 @@ class C2f_BQSA_P4(nn.Module):
                 h_stat = torch.tensor(float(h_s), device=x.device).view(1, 1).clamp(0.0, 1.0)
 
             tau_adaptive = torch.clamp(self.tau * (1.0 - 0.35 * h_stat), min=0.10)
-
             u1, u2 = torch.rand_like(candidate_scores_fp32), torch.rand_like(candidate_scores_fp32)
             gumbel = torch.log(u1 + 1e-7) - torch.log(u2 + 1e-7)
-            soft_scores = torch.sigmoid((candidate_scores_fp32 + gumbel) / tau_adaptive).to(feat.dtype)
+            soft_scores = torch.sigmoid((candidate_scores_fp32 + gumbel) / tau_adaptive).to(x_1.dtype)
             _, topk_idx = torch.topk(soft_scores, k_actual, dim=-1)
             hard_mask = torch.zeros_like(soft_scores).scatter_(-1, topk_idx, 1.0)
             ste_mask = (hard_mask - soft_scores).detach() + soft_scores
@@ -279,8 +285,12 @@ class C2f_BQSA_P4(nn.Module):
 
         context = torch.matmul(v_all.float(), attn_fp32.transpose(-2, -1)).to(v_all.dtype).reshape(B, C, H, W)
         gate = torch.sigmoid(self.gr_gate)
-        y[-1] = y[-1] + gate * self.proj(context)
-        p4_out = self.cv2(torch.cat(y, 1))
+
+        # Residual attention enhancement on top of pre-trained CSPLayer branch
+        x_1 = x_1 + gate * self.proj(context)
+
+        # 3. Pretrained Fusion Conv (conv3)
+        p4_out = self.conv3(torch.cat([x_1, x_2], dim=1))
 
         indexer_loss = torch.tensor(0.0, device=x.device)
         if self.training and targets is not None:
@@ -295,7 +305,11 @@ class C2f_BQSA_P4(nn.Module):
 
 class C2f_BQSA_P3(nn.Module):
     """
-    P3 Synchronized Reuse with Step-0 Identity Guards & Zero-Delta Residual Bypass.
+    Pretrained CSPLayer Trunk with Residual Synchronized BQSA Attention (P3).
+      - Trunk: Loads pre-trained COCO C3_p3 weights (100% trained on Day 1!).
+      - Attention: Inherits P4 indices, evaluates local attention, and adds context
+        as a Step-0 Identity-Guarded Residual (proj=0, gate=-4.0).
+      - Zero-Delta Bypass: Unselected blocks receive a delta of EXACTLY 0.00000.
     """
     def __init__(self, c1, c2, n=1, block_size=8, sparsity_ratio=0.35):
         super().__init__()
@@ -303,25 +317,34 @@ class C2f_BQSA_P3(nn.Module):
         self.block_size = block_size
         self.sparsity_ratio = sparsity_ratio
 
-        self.cv1 = BaseConv(c1, c2, 1, 1)
-        self.cv2 = BaseConv((2 + n) * self.c, c2, 1, 1)
-        self.m = nn.ModuleList(Bottleneck(self.c, self.c, False, 1.0) for _ in range(n))
+        # PRETRAINED CSPLAYER TRUNK (Loads directly from COCO C3_p3 weights!):
+        self.conv1 = BaseConv(c1, self.c, 1, 1, act="silu")
+        self.conv2 = BaseConv(c1, self.c, 1, 1, act="silu")
+        self.conv3 = BaseConv(2 * self.c, c2, 1, 1, act="silu")
+        self.m = nn.Sequential(*[
+            Bottleneck(self.c, self.c, shortcut=False, expansion=1.0, act="silu") 
+            for _ in range(n)
+        ])
+
+        # BQSA RESIDUAL ATTENTION BRANCH:
         self.rca = UnifiedRCA(self.c)
         self.rmbconv = UnifiedRMBConv(self.c)
-
         self.qkv = nn.Conv2d(self.c, self.c * 3, 1)
 
-        # CRITICAL STEP-0 IDENTITY GUARDS:
+        # STEP-0 IDENTITY GUARDS (Criterion 5):
         self.proj = nn.Conv2d(self.c, self.c, 1, bias=False)
         nn.init.zeros_(self.proj.weight)  # Zero projection at initialization
-        self.gr_gate = nn.Parameter(torch.full((1, self.c, 1, 1), -4.0))  # Starts at sigma(-4.0) = 0.018
+        self.gr_gate = nn.Parameter(torch.full((1, self.c, 1, 1), -4.0))  # Gate ≈ 0.018
 
     def forward(self, x, inherited_topk_idx):
-        y = list(self.cv1(x).chunk(2, 1))
-        y.extend(m(y[-1]) for m in self.m)
-        feat = y[-1]
-        B, C, H, W = feat.shape
-        feat_cond = self.rca(self.rmbconv(feat))
+        # 1. Pretrained CSPLayer Trunk Split
+        x_1 = self.conv1(x)
+        x_2 = self.conv2(x)
+        x_1 = self.m(x_1)
+
+        # 2. Residual BQSA Attention Branch (Evaluates on x_1)
+        B, C, H, W = x_1.shape
+        feat_cond = self.rca(self.rmbconv(x_1))
 
         bs = min(self.block_size, H, W)
         num_h, num_w = H // bs, W // bs
@@ -332,10 +355,12 @@ class C2f_BQSA_P3(nn.Module):
         qkv = self.qkv(feat_cond).view(B, 3, C, H, W)
         q, k, v = qkv[:, 0], qkv[:, 1], qkv[:, 2]
 
+        # Block-wise reshaping
         q_b = q.view(B, C, num_h, bs, num_w, bs).permute(0, 2, 4, 1, 3, 5).reshape(B, total_blocks, C, tokens_per_b)
         k_b = k.view(B, C, num_h, bs, num_w, bs).permute(0, 2, 4, 1, 3, 5).reshape(B, total_blocks, C, tokens_per_b)
         v_b = v.view(B, C, num_h, bs, num_w, bs).permute(0, 2, 4, 1, 3, 5).reshape(B, total_blocks, C, tokens_per_b)
 
+        # Gather inherited active blocks
         valid_idx = torch.clamp(inherited_topk_idx[:, :k_actual], 0, total_blocks - 1)
         idx_exp = valid_idx.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, C, tokens_per_b)
 
@@ -347,25 +372,47 @@ class C2f_BQSA_P3(nn.Module):
         ctx_loc = torch.bmm(attn_fp32, v_loc.float()).to(v_loc.dtype).reshape(B, k_actual, tokens_per_b, C)
 
         # ZERO-DELTA RESIDUAL BYPASS:
-        # Unselected blocks receive delta = 0.000; native trunk features pass unhindered!
+        # Unselected blocks receive delta = 0.00000; native trunk features pass unhindered!
         delta_flat = torch.zeros(B, total_blocks, C * tokens_per_b, device=x.device, dtype=ctx_loc.dtype)
         idx_flat = valid_idx.unsqueeze(-1).expand(-1, -1, C * tokens_per_b)
         ctx_flat = ctx_loc.permute(0, 1, 3, 2).reshape(B, k_actual, C * tokens_per_b)
         delta_flat.scatter_(1, idx_flat, ctx_flat)
 
         context_delta = delta_flat.reshape(B, num_h, num_w, C, bs, bs).permute(0, 3, 1, 4, 2, 5).reshape(B, C, H, W)
+        
+        # Identity-Guarded Residual Addition
         gate = torch.sigmoid(self.gr_gate)
-        y[-1] = y[-1] + gate * self.proj(context_delta)
+        x_1 = x_1 + gate * self.proj(context_delta)
+
+        # 3. Pretrained Fusion Conv (conv3)
+        p3_out = self.conv3(torch.cat([x_1, x_2], dim=1))
+        return p3_out
+
+
+class C2f(nn.Module):
+    """Faster, lighter CSP Bottleneck with 2 convolutions (YOLOv8 style)."""
+    def __init__(self, c1, c2, n=1, shortcut=True, g=1, e=0.5):
+        super().__init__()
+        self.c = int(c2 * e)
+        self.cv1 = BaseConv(c1, 2 * self.c, 1, 1)
+        self.cv2 = BaseConv((2 + n) * self.c, c2, 1, 1)
+        self.m = nn.ModuleList(
+            Bottleneck(self.c, self.c, shortcut=shortcut, expansion=1.0, depthwise=False, act="silu")
+            for _ in range(n)
+        )
+
+    def forward(self, x):
+        y = list(self.cv1(x).chunk(2, 1))
+        y.extend(m(y[-1]) for m in self.m)
         return self.cv2(torch.cat(y, 1))
 
 
 class ScaleAttnRes(nn.Module):
     """
-    Lipschitz-Bounded Scale Routing with Step-0 Identity Trunk Prior (Criterion 5).
-      - Source 0 (Primary Neck Trunk P_l) receives +4.0 prior logit bias => 96.5% - 98.2% weight on Step 0.
-      - Pure Prior Routing: Eliminates post-norm mean-shifting, preserving the positive SiLU
-        activation distribution (+0.40) expected by pretrained COCO head stems.
-      - Learns continuous multi-scale feedback routing smoothly during training.
+    Hybrid GRC Highway: Multi-Scale Attention Routing + C2f Non-Linear Refinement.
+      - Source 0 (Primary Trunk P_l) prior bias => Softmax([4, 0, 0]) = 96.5% on Step 0!
+      - Pure Scale-Preserving Output: Zero GroupNorm mean-shift (preserves +0.40 SiLU mean).
+      - C2f Refinement Block: Richest multi-level gradient paths with Step-0 Quad-Zero Guard.
     """
     def __init__(self, dim, num_sources=3, spatial_ratio=1.0, **kwargs):
         super().__init__()
@@ -376,10 +423,23 @@ class ScaleAttnRes(nn.Module):
         self.w = nn.Parameter(torch.zeros(dim))  # In Group 2 (No-Decay)
         self.norm = RMSNorm(dim, eps=1e-5)
         
-        # STEP-0 TRUNK PRIOR: Source 0 (P_l) gets +4.0 bias => Softmax([4, 0, 0]) = 96.5% on Day 1!
+        # Step-0 Trunk Prior: Source 0 (P_l) gets 96.5% - 98.2% weight at Step 0
         prior_logits = torch.zeros(num_sources)
         prior_logits[0] = 4.0
         self.register_buffer("prior_logits", prior_logits.view(-1, 1, 1, 1, 1))
+
+        # C2F NON-LINEAR REFINEMENT (Richest Gradient Paths):
+        self.refine = C2f(dim, dim, n=1, shortcut=True, e=0.5)
+        
+        # STEP-0 QUAD-ZERO IDENTITY GUARD (Criterion 5):
+        # Guarantees self.refine(x) outputs EXACT 0.00000 on Day 1!
+        nn.init.zeros_(self.refine.cv2.conv.weight)
+        if self.refine.cv2.conv.bias is not None:
+            nn.init.zeros_(self.refine.cv2.conv.bias)
+        nn.init.zeros_(self.refine.cv2.bn.weight)
+        nn.init.zeros_(self.refine.cv2.bn.bias)
+        
+        self.refine_gate = nn.Parameter(torch.full((1, dim, 1, 1), -4.0))
 
     def forward(self, sources):
         V = torch.stack(sources, dim=0)          # [M, B, C, H, W]
@@ -388,10 +448,15 @@ class ScaleAttnRes(nn.Module):
         w_safe = torch.clamp(self.w.to(dtype=K.dtype), min=-3.0, max=3.0)
         logits = torch.einsum('c, m b c h w -> m b h w', w_safe, K) * self.scale
         
-        # Add trunk prior bias: Source 0 receives >96.5% weight at initialization
         logits_biased = logits.unsqueeze(2) + self.prior_logits.to(logits.dtype)
         weights = F.softmax(logits_biased.float(), dim=0).to(V.dtype)
         
-        # Pure scale-preserving combination (zero mean-shift, zero contrast flattening)
-        out = torch.sum(weights * V, dim=0)
-        return out
+        # 1. Bounded Multi-Scale GRC Skip Routing
+        out_routed = torch.sum(weights * V, dim=0)
+
+        # 2. C2f Non-Linear Feature Refinement (=== 0.00000 on Step 0)
+        delta_c2f = self.refine(out_routed)
+        gate_refine = torch.sigmoid(self.refine_gate)
+        out_final = out_routed + gate_refine * delta_c2f
+
+        return out_final

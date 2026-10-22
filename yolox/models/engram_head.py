@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 # -*- encoding: utf-8 -*-
 # Copyright (c) Megvii Inc. All rights reserved.
-# Integrated for TDE-YOLOX v3.7: Calibrated Bilateral Gating, Non-Redundant P5 Queries & Metric-Harmonized Assigner
+# Integrated for TDE-YOLOX v3.7: Conservative Head & Memory Restoration (Zones 1 & 2 Complete)
 
 import math
 import torch
@@ -16,9 +16,10 @@ from .yolo_head import YOLOXHead
 
 class AntiCollisionEngramBank(nn.Module):
     """
-    Calibrated Orthonormal Associative Memory Bank on S^127.
+    Calibrated Orthonormal Associative Memory Bank on S^127 with Progressive Maturity Gating.
+      - Dual-Trigger Gating: Physical turbidity (atmo_severity) engages instantly under fog/snow.
+      - Clean Daylight Maturity: Ramps from 0.0 -> 1.0 over Epochs 3-15, locking gate closed on Day 1.
       - Calibrated Certainty: Softmax temperature tau_cert = 4.0 eliminates uncertainty saturation.
-      - Harmonized Bilateral Gate: Activates on high uncertainty (1 - U) and atmospheric turbidity.
       - Multiplicative Objectness: Evaluates strictly to 0.0 on background tokens (zero memory leakage).
       - Balanced Query Fusion: 50/50 anchor/local weighting on P4 and P5; local-dominated on P3.
     """
@@ -41,7 +42,7 @@ class AntiCollisionEngramBank(nn.Module):
         B, C, H, W = h_local.shape
         D = self.latent_dim
 
-        # 1. BALANCED QUERY RECEPTIVE FIELD FUSION (Fix 22):
+        # 1. BALANCED QUERY RECEPTIVE FIELD FUSION:
         p_interp = F.interpolate(anchor_feat, size=(H, W), mode='bilinear', align_corners=False)
         dw_local = self.dw_hf(h_local)
         p_scale = p_interp.float() * torch.rsqrt(p_interp.float().pow(2).mean(dim=1, keepdim=True) + 1e-5)
@@ -73,9 +74,8 @@ class AntiCollisionEngramBank(nn.Module):
         raw_lse = torch.logsumexp(cos_by_class * T_mode, dim=-1) - log_k
         raw_class_scores = raw_lse  # Shape: [B, H*W, num_classes]
 
-        # 5. CALIBRATED CERTAINTY ESTIMATION (Fix 6):
-        # Softmax temperature tau_cert = 4.0 contracts delta_z from 13.6 -> 3.4,
-        # mapping certainty U across a dynamic range [0.05, 0.85] instead of saturating at 0.998!
+        # 5. CALIBRATED CERTAINTY ESTIMATION (tau_cert = 4.0):
+        # Contracts delta_z from 13.6 -> 3.4, mapping certainty U across a dynamic range [0.05, 0.85]
         p_mem = F.softmax(raw_class_scores.detach().float() / 4.0, dim=-1)
         top2_p, _ = torch.topk(p_mem, k=2, dim=-1)
         certainty = torch.clamp(top2_p[..., 0:1] - top2_p[..., 1:2], min=0.0, max=1.0).to(q.dtype)
@@ -86,12 +86,12 @@ class AntiCollisionEngramBank(nn.Module):
         chordal_dist = torch.clamp(1.0 - cos_sim, min=0.0, max=2.0).to(q.dtype)
         dist_penalty = torch.clamp(self.omega, min=0.0, max=2.0) * chordal_dist
 
-        # 6. HARMONIZED BILATERAL GATE LOGIC (Fix 5):
-        # Gate activates when visual confusion is high (1 - U), chordal distance is small, and haze is present
+        # 6. HARMONIZED BILATERAL GATE LOGIC:
+        # Gate activates when visual confusion is high (1 - U) and chordal distance is small
         gate_logit = 3.0 * (1.0 - certainty) - 2.0 * dist_penalty - 1.5
         gate_prob = torch.sigmoid(gate_logit)
 
-        # Atmospheric Turbidity Integration from Physical Dark Channel Sensor
+        # Atmospheric Turbidity from Physical Dark Channel Sensor
         if torch.is_tensor(h_s):
             h_ratio = h_s.float().view(B, 1, 1).clamp(0.0, 1.0) if h_s.numel() >= B else h_s.float().mean().view(1, 1, 1).clamp(0.0, 1.0)
         else:
@@ -99,10 +99,18 @@ class AntiCollisionEngramBank(nn.Module):
 
         # Calibrated turbidity severity: 0.0 on clean daylight (mu_dark <= 0.10)
         atmo_severity = torch.clamp((h_ratio - 0.10) / 0.30, min=0.0, max=1.0).to(q.dtype)
-        confusion_factor = (1.0 - certainty).to(q.dtype)
-        intervention_scale = torch.max(atmo_severity, confusion_factor * 0.50)
 
-        # 7. STRICT MULTIPLICATIVE OBJECTNESS ENVELOPE (Fix 4 & Fix 9):
+        # ZONE 1 FIX: Clean-Daylight Memory Maturity Schedule
+        # Locked to 0.000 during Epochs 1-3 clean daylight; adverse weather bypasses maturity instantly!
+        if self.training:
+            current_ep = float(epoch) if epoch > 0 else 1.0
+            maturity = min(1.0, max(0.0, (current_ep - 3.0) / 12.0))
+        else:
+            maturity = 1.0  # Full maturity during evaluation
+
+        intervention_scale = torch.max(atmo_severity, maturity * (1.0 - certainty) * 0.50)
+
+        # 7. STRICT MULTIPLICATIVE OBJECTNESS ENVELOPE:
         # Background tokens (obj -> 0) evaluate strictly to 0.0, eliminating background memory injection
         obj_flat = objectness_mask.permute(0, 2, 3, 1).reshape(B, H * W, 1).to(q.dtype)
         obj_envelope = torch.clamp(obj_flat / 0.15, min=0.0, max=1.0)
@@ -201,6 +209,9 @@ class TDE_Head(YOLOXHead):
         else:
             h_s = torch.tensor(float(h_s), device=xin[0].device, dtype=torch.float32)
 
+        # Physical Atmospheric Extinction Severity
+        atmo_severity = torch.clamp((h_s - 0.10) / 0.30, min=0.0, max=1.0)
+
         outputs = []
         origin_preds = []
         x_shifts = []
@@ -212,6 +223,11 @@ class TDE_Head(YOLOXHead):
         # Instead of redundant P5 self-projection, pool P5 into a global context token
         p5_global_context = F.adaptive_avg_pool2d(p_anchors[2], (1, 1))
         scale_anchors = [p_anchors[1], p_anchors[2], p5_global_context]
+
+        # ZONE 2 FIX: Phased Prototype Assist Ramp
+        # Throttles prototype logit assist to 0.0 on Epochs 1-3, phasing in smoothly by Epoch 13
+        current_ep = float(self.current_epoch) if self.current_epoch > 0 else 1.0
+        assist_ramp = min(1.0, max(0.0, (current_ep - 3.0) / 10.0))
 
         for k, (cls_conv, reg_conv, stride_l, x) in enumerate(zip(self.cls_convs, self.reg_convs, self.strides, xin)):
             x = self.stems[k](x)
@@ -242,16 +258,21 @@ class TDE_Head(YOLOXHead):
             scale_ratio = torch.clamp(rms_cls / (rms_mem + 1e-5), min=0.10, max=3.0)
             mem_conv_scaled = (mem_conv.float() * scale_ratio).to(cls_feat.dtype)
 
-            restored_feat = ((1.0 - 0.60 * gate) * cls_feat + gate * mem_conv_scaled).to(cls_feat.dtype)
+            # ZONE 1 FIX: Decoupled Airlight Attenuation
+            # In clean daylight (atmo_severity = 0.0), alpha_fog === 0.0 => cls_feat is NEVER attenuated!
+            # In dense fog (atmo_severity = 1.0), alpha_fog = 0.60 => atmospheric noise is suppressed!
+            alpha_fog = (0.60 * atmo_severity.view(-1, 1, 1, 1)).to(cls_feat.dtype)
+            restored_feat = ((1.0 - alpha_fog * gate) * cls_feat + gate * mem_conv_scaled).to(cls_feat.dtype)
+
             smooth_weight = torch.tensor(0.05 + 0.10 * float(k), device=restored_feat.device, dtype=cls_feat.dtype)
             restored_feat = (restored_feat + smooth_weight * torch.tanh(self.post_engram_dw[k](restored_feat))).to(cls_feat.dtype)
 
-            # OBJECTNESS-GATED PROTOTYPE ASSIST (Fix 9):
-            # Multiplying by obj_mask prevents +0.68 to +1.0 logit boost on pure background tokens!
+            # ZONE 2 FIX: Phased Objectness-Gated Prototype Assist
+            # Gated by assist_ramp (0.0 on Day 1) and obj_mask (0.0 on background)
             proto_scale_map = [0.500, 0.375, 0.250]
             raw_scores_spatial = raw_scores.permute(0, 2, 1).reshape(B, self.num_classes, H, W).to(cls_feat.dtype)
             s_proto_centered = raw_scores_spatial - raw_scores_spatial.mean(dim=1, keepdim=True)
-            cls_out = self.cls_preds[k](restored_feat) + (gate * obj_mask * s_proto_centered * proto_scale_map[k])
+            cls_out = self.cls_preds[k](restored_feat) + (assist_ramp * gate * obj_mask * s_proto_centered * proto_scale_map[k])
 
             if self.training:
                 output = torch.cat([reg_out, obj_out, cls_out], 1)
@@ -416,16 +437,15 @@ class TDE_Head(YOLOXHead):
         loss_giou = (self.iou_loss(bbox_preds.view(-1, 4)[fg_masks_concat], reg_targets_concat)).sum() / num_fg
         loss_nwd = (self.nwd_loss(bbox_preds.view(-1, 4)[fg_masks_concat], reg_targets_concat)).sum() / num_fg
 
-        # CANONICAL OBJECTNESS LOSS:
-        # Standard un-focal BCE provides strong downward gradient pressure across all
-        # background anchors, preventing false positives from floating up to 0.02 - 0.05.
+        # CANONICAL YOLOX OBJECTNESS LOSS (Fix A):
+        # Un-focal BCE provides strong downward pressure on all background anchors
         obj_preds_fp32 = obj_preds.view(-1, 1).float()
         bce_obj_raw = F.binary_cross_entropy_with_logits(
             obj_preds_fp32, obj_targets_concat.float(), reduction="none"
         )
         loss_obj = bce_obj_raw.sum() / num_fg
 
-        # ASYMMETRIC FOCAL MODULATION ON CLASSIFICATION (Fix 26):
+        # ASYMMETRIC FOCAL MODULATION ON CLASSIFICATION:
         # Applies gamma=1.5 on negative classes to eliminate the 8:1 negative gradient volume
         fg_cls_preds = cls_preds.view(-1, self.num_classes)[fg_masks_concat].float()
         p_cls = torch.sigmoid(fg_cls_preds)
@@ -433,7 +453,7 @@ class TDE_Head(YOLOXHead):
         
         pos_mask_cls = (cls_targets_concat > 0.0).float()
         neg_mask_cls = 1.0 - pos_mask_cls
-        focal_neg_mod = (p_cls).pow(1.5)  # Suppresses easy negative class terms
+        focal_neg_mod = (p_cls).pow(1.5)
 
         loss_cls_neg = (focal_neg_mod * raw_bce * neg_mask_cls).sum() / num_fg
         loss_cls_pos_global = (raw_bce * pos_mask_cls).sum() / num_fg
@@ -599,18 +619,23 @@ class TDE_Head(YOLOXHead):
 
         hybrid_overlap = 0.5 * (pair_wise_ious + pair_wise_nwd)
 
-        # FOOTPRINT-AWARE DYNAMIC-K ALLOCATION (Fix 21):
+        # FOOTPRINT-AWARE THRESHOLDED DYNAMIC-K ALLOCATION (Fix 21 & TDE 2.0.4 Safe Recovery):
         n_cand = min(36, hybrid_overlap.size(1))
         topk_overlap, _ = torch.topk(hybrid_overlap, n_cand, dim=1)
 
+        # Rejects low-quality background anchors (overlap < 0.15) from inflating k_dynamic
+        tau_overlap = 0.15
+        cand_mask = (topk_overlap >= tau_overlap).float()
+        dynamic_ks = (topk_overlap * cand_mask).sum(dim=1).round().int()
+
+        # Footprint bounds: Micro in [2, 10]; Macro in [4, 36]
         n_cells_footprint = (gt_w * gt_h) / (16.0 * 16.0)
         macro_mask = is_macro.squeeze(-1)
         k_max_macro = torch.clamp((0.35 * n_cells_footprint.squeeze(-1)).round().int(), min=12, max=36)
         max_k = torch.where(macro_mask, k_max_macro, 10)
         min_k = torch.where(macro_mask, 4, 2)
 
-        cand_mask = torch.ones_like(topk_overlap)
-        dynamic_ks = (topk_overlap * cand_mask).sum(dim=1).round().int()
+        # min_k guarantee: Even if 0 candidates pass 0.15, min_k guarantees targets are never orphaned!
         dynamic_ks = torch.clamp(dynamic_ks, min=min_k, max=max_k)
 
         gt_cls_per_image = F.one_hot(gt_classes.to(torch.int64), self.num_classes).float()
@@ -628,7 +653,7 @@ class TDE_Head(YOLOXHead):
                 reduction="none"
             ).sum(-1)
 
-        # ASSIGNER-LOSS METRIC HARMONIZATION (Fix 19):
+        # Assigner-Loss Metric Harmonization
         cost_iou_w = 5.0
         if self.current_epoch < 50:
             current_nwd_weight = 1.25
