@@ -305,11 +305,9 @@ class C2f_BQSA_P4(nn.Module):
 
 class C2f_BQSA_P3(nn.Module):
     """
-    Pretrained CSPLayer Trunk with Residual Synchronized BQSA Attention (P3).
-      - Trunk: Loads pre-trained COCO C3_p3 weights (100% trained on Day 1!).
-      - Attention: Inherits P4 indices, evaluates local attention, and adds context
-        as a Step-0 Identity-Guarded Residual (proj=0, gate=-4.0).
-      - Zero-Delta Bypass: Unselected blocks receive a delta of EXACTLY 0.00000.
+    P3 Pretrained CSPLayer Trunk with Synchronized BQSA Attention Reuse & Zero-Delta Bypass.
+      - Trunk: Loads 100% pre-trained COCO C3_p3 weights on Day 1!
+      - Attention: Inherits P4 Top-K block indices directly; unselected blocks receive delta = 0.000.
     """
     def __init__(self, c1, c2, n=1, block_size=8, sparsity_ratio=0.35):
         super().__init__()
@@ -317,32 +315,29 @@ class C2f_BQSA_P3(nn.Module):
         self.block_size = block_size
         self.sparsity_ratio = sparsity_ratio
 
-        # PRETRAINED CSPLAYER TRUNK (Loads directly from COCO C3_p3 weights!):
+        # PRETRAINED CSPLAYER TRUNK (Loads from COCO C3_p3!):
         self.conv1 = BaseConv(c1, self.c, 1, 1, act="silu")
         self.conv2 = BaseConv(c1, self.c, 1, 1, act="silu")
         self.conv3 = BaseConv(2 * self.c, c2, 1, 1, act="silu")
-        self.m = nn.Sequential(*[
-            Bottleneck(self.c, self.c, shortcut=False, expansion=1.0, act="silu") 
-            for _ in range(n)
-        ])
+        self.m = nn.Sequential(*[Bottleneck(self.c, self.c, shortcut=False, expansion=1.0, act="silu") for _ in range(n)])
 
         # BQSA RESIDUAL ATTENTION BRANCH:
         self.rca = UnifiedRCA(self.c)
         self.rmbconv = UnifiedRMBConv(self.c)
         self.qkv = nn.Conv2d(self.c, self.c * 3, 1)
 
-        # STEP-0 IDENTITY GUARDS (Criterion 5):
+        # Step-0 Identity Guards (Criterion 5):
         self.proj = nn.Conv2d(self.c, self.c, 1, bias=False)
-        nn.init.zeros_(self.proj.weight)  # Zero projection at initialization
-        self.gr_gate = nn.Parameter(torch.full((1, self.c, 1, 1), -4.0))  # Gate ≈ 0.018
+        nn.init.zeros_(self.proj.weight)
+        self.gr_gate = nn.Parameter(torch.full((1, self.c, 1, 1), -4.0))
 
     def forward(self, x, inherited_topk_idx):
-        # 1. Pretrained CSPLayer Trunk Split
+        # 1. Pretrained CSPLayer Trunk (100% COCO feature flow!)
         x_1 = self.conv1(x)
         x_2 = self.conv2(x)
         x_1 = self.m(x_1)
 
-        # 2. Residual BQSA Attention Branch (Evaluates on x_1)
+        # 2. Synchronized BQSA Attention Branch (Evaluates on x_1)
         B, C, H, W = x_1.shape
         feat_cond = self.rca(self.rmbconv(x_1))
 
@@ -355,12 +350,10 @@ class C2f_BQSA_P3(nn.Module):
         qkv = self.qkv(feat_cond).view(B, 3, C, H, W)
         q, k, v = qkv[:, 0], qkv[:, 1], qkv[:, 2]
 
-        # Block-wise reshaping
         q_b = q.view(B, C, num_h, bs, num_w, bs).permute(0, 2, 4, 1, 3, 5).reshape(B, total_blocks, C, tokens_per_b)
         k_b = k.view(B, C, num_h, bs, num_w, bs).permute(0, 2, 4, 1, 3, 5).reshape(B, total_blocks, C, tokens_per_b)
         v_b = v.view(B, C, num_h, bs, num_w, bs).permute(0, 2, 4, 1, 3, 5).reshape(B, total_blocks, C, tokens_per_b)
 
-        # Gather inherited active blocks
         valid_idx = torch.clamp(inherited_topk_idx[:, :k_actual], 0, total_blocks - 1)
         idx_exp = valid_idx.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, C, tokens_per_b)
 
@@ -371,17 +364,16 @@ class C2f_BQSA_P3(nn.Module):
         attn_fp32 = F.softmax(torch.bmm(q_loc.float(), k_loc.float()) * (C ** -0.5), dim=-1)
         ctx_loc = torch.bmm(attn_fp32, v_loc.float()).to(v_loc.dtype).reshape(B, k_actual, tokens_per_b, C)
 
-        # ZERO-DELTA RESIDUAL BYPASS:
-        # Unselected blocks receive delta = 0.00000; native trunk features pass unhindered!
+        # Zero-Delta Residual Bypass: Unselected blocks receive delta = 0.000
         delta_flat = torch.zeros(B, total_blocks, C * tokens_per_b, device=x.device, dtype=ctx_loc.dtype)
         idx_flat = valid_idx.unsqueeze(-1).expand(-1, -1, C * tokens_per_b)
         ctx_flat = ctx_loc.permute(0, 1, 3, 2).reshape(B, k_actual, C * tokens_per_b)
         delta_flat.scatter_(1, idx_flat, ctx_flat)
 
         context_delta = delta_flat.reshape(B, num_h, num_w, C, bs, bs).permute(0, 3, 1, 4, 2, 5).reshape(B, C, H, W)
-        
-        # Identity-Guarded Residual Addition
         gate = torch.sigmoid(self.gr_gate)
+
+        # Residual attention enhancement on top of pre-trained CSPLayer branch
         x_1 = x_1 + gate * self.proj(context_delta)
 
         # 3. Pretrained Fusion Conv (conv3)
