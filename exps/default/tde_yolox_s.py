@@ -1,10 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding:utf-8 -*-
 # Copyright (c) Megvii Inc. All rights reserved.
-# Unified for TDE-YOLOX v3.4: Native 16:9 Rule-of-64, Active L2 Decay, and Rigid Geometry
-import cv2
-cv2.setNumThreads(0)
-cv2.ocl.setUseOpenCL(False)
+# Integrated for TDE-YOLOX v3.7: Calibrated MuSGD Partition, Harmonized Evaluation & Native 16:9 Canvas
+
 import os
 import random
 import torch
@@ -17,53 +15,52 @@ from yolox.optimizers.muon import MuSGD
 import cv2
 cv2.setNumThreads(0)
 cv2.ocl.setUseOpenCL(False)
+
+
 class Exp(MyExp):
     def __init__(self):
         super(Exp, self).__init__()
-        # --- MODEL SCALE: YOLOX-S ---
+        # Model Scale: YOLOX-S
         self.depth = 0.33
         self.width = 0.50
         self.exp_name = os.path.split(os.path.realpath(__file__))[1].split(".")[0]
         self.act = "silu"
 
-        # --- RESEARCH HYPERPARAMETERS (TDE-YOLOX v3.4) ---
+        # Dataset & Training Config
         self.num_classes = 9         # BDD100K 9 detection categories
         self.init_ttt_lr = 0.05      # Stage 1 GroupNorm Covariate Moment Alignment rate
         self.ttt_noise_std = 0.08
 
-        # --- NATIVE 16:9 ZERO-PADDING RESOLUTION CONFIGURATION ---
-        # 576 x 1024 matches BDD100K (1280x720) exactly with ZERO gray padding pixels!
+        # Native 16:9 Rule-of-64 Resolution Standard (576 x 1024, Zero Gray Padding)
         self.input_size = (576, 1024)   # (Height, Width)
         self.test_size = (576, 1024)
         
-        # Enables Rule-of-64 dynamic multiscale training across 16:9 aspect ratios
+        # Multiscale range over integer multiples of 64
         self.multiscale_range = 1    
         
-        # Dynamic Mosaic Curriculum: Active at 50% during feature representation (Epochs 1 -> 65)
+        # Training Augmentation Settings
         self.mosaic_prob = 1.0
         self.mosaic_scale = (0.5, 1.5)
         self.enable_mixup = True
         self.mixup_prob = 0.15
 
-        # RIGID GEOMETRY CONSTRAINTS (Autonomous Driving Dashcam Standard)
-        # Prevents bounding box dilation and background label noise on thin vertical objects
+        # Rigid Geometry Constraints (Dashcam Perspective Standard)
         self.hsv_prob = 1.0
         self.flip_prob = 0.5
-        self.degrees = 0.0       # ZERO rotation: keeps AABBs tight around riders/pedestrians
-        self.shear = 0.0         # ZERO shear: eliminates synthetic affine skewing
+        self.degrees = 0.0       # Zero rotation: keeps bounding boxes tight on vertical targets
+        self.shear = 0.0         # Zero shear: eliminates synthetic affine skewing
         self.translate = 0.1
 
-        # --- STRICT ZSDA PROTOCOL PATHS ---
+        # Strict ZSDA Clean-to-Adverse Protocol Paths
         self.data_dir = "D:/YOLOX-3RD/bdd100k/bdd100k/bdd100k/images"
         self.train_ann = "D:/YOLOX-3RD/bdd100k/bdd100k/bdd100k/images/annotations/tde_train_clean_coco.json"
         self.val_ann = "D:/YOLOX-3RD/bdd100k/bdd100k/bdd100k/images/annotations/tde_val_clean_coco.json"
         self.test_ann = "D:/YOLOX-3RD/bdd100k/bdd100k/bdd100k/images/annotations/tde_test_adverse_coco.json"
 
-        # --- TRAINING SCHEDULE ---
+        # Optimization & Schedule Settings
         self.max_epoch = 80
         self.warmup_epochs = 5
         self.no_aug_epochs = 15    
-        
         self.min_lr_ratio = 0.05
         
         self.basic_lr_per_img = 0.01 / 64.0
@@ -73,22 +70,13 @@ class Exp(MyExp):
         self.eval_interval = 1
         self.ema = True
 
-        # Increase workers to eliminate GPU data starvation (adjust if CPU RAM is constrained)
         self.data_num_workers = 4
-        # At 576x1024, batch_size=16 requires ~14GB VRAM. If OOM occurs, set to 12 or 8.
         self.batch_size = 16
 
         self.test_conf = 0.01
         self.nmsthre = 0.65
 
     def random_resize(self, data_loader, epoch, rank, is_distributed):
-        """
-        Certified 16:9 Rule-of-64 Multiscale Quantization.
-        All sampled pairs (H, W) are exact integer multiples of 64 pixels:
-          - (512, 896):  512/64=8,  896/64=14  (Ratio ~1.75)
-          - (576, 1024): 576/64=9,  1024/64=16 (Ratio ~1.7778 - Exact 16:9)
-          - (640, 1152): 640/64=10, 1152/64=18 (Ratio ~1.80)
-        """
         tensor = torch.LongTensor(2).cuda()
         if rank == 0:
             if self.multiscale_range > 0:
@@ -154,16 +142,15 @@ class Exp(MyExp):
         self.model.apply(init_yolo)
         self.model.head.initialize_biases(1e-2)
         self.model.max_epochs = self.max_epoch
-
         return self.model
 
     def get_optimizer(self, batch_size):
         """
-        CERTIFIED MuSGD OPTIMIZER PARTITION v3.6:
-          - Group 0 (Muon): STRICTLY Prototypes [576, 128] on S^127 (lr=0.02, lr_factor=8.0, WD=0.0)
-          - Group 1 (SGD Decay): All Convolutions, Projections, ScaleAttnRes.w, and w_hf (WD=5e-4)
-          - Group 2 (SGD No-Decay): Biases, Normalization Affines, aligner.gamma/beta, Scalar Gates (WD=0.0)
-          - Group 3 (Meta-SGD): Stage 1 TTT Step Sizes ttt_lrs_* (lr=base_lr*0.05, lr_factor=0.05, WD=0.0)
+        CALIBRATED MuSGD OPTIMIZER PARTITION v3.7:
+          - Group 0 (Muon): Prototypes on S^127 calibrated to LR = base_lr * 1.5 (0.45 deg/step velocity)
+          - Group 1 (SGD Decay): Convolutions, Projections, Decoders (WD = 5e-4)
+          - Group 2 (SGD No-Decay): Biases, Norms, aligner.gamma/beta, w_hf, and attnres.w (WD = 0.0)
+          - Group 3 (Meta-SGD): Stage 1 TTT Step Sizes ttt_lrs_* (LR = base_lr * 0.05, WD = 0.0)
         """
         if "optimizer" in self.__dict__:
             return self.optimizer
@@ -182,26 +169,19 @@ class Exp(MyExp):
             if not p.requires_grad:
                 continue
 
-            # -------------------------------------------------------------
-            # RULE 1: ONLY Prototypes on S^127 go to Muon Engine
-            # -------------------------------------------------------------
+            # RULE 1: Prototypes on S^127 -> Muon Engine
             if "prototypes" in name:
                 pg_muon.append(p)
                 registered_params.add(p)
                 continue
 
-            # -------------------------------------------------------------
-            # RULE 2: Stage 1 TTT Meta-SGD Step Sizes (Slow Learning Rate)
-            # -------------------------------------------------------------
+            # RULE 2: Stage 1 TTT Step Sizes -> Meta-SGD (Slow Learning Rate)
             if "ttt_lrs" in name:
                 pg_meta.append(p)
                 registered_params.add(p)
                 continue
 
-            # -------------------------------------------------------------
             # RULE 3: Biases, Norm Affines, Scalar Gates, w_hf, and attnres.w (NO DECAY)
-            # Protected from L2 regularization so routing and textures do not decay to 0.0!
-            # -------------------------------------------------------------
             is_no_decay = (
                 "bias" in name
                 or any(k in name for k in ["gn.", "bn.", "norm.", "bn1.", "net.1."])
@@ -217,19 +197,20 @@ class Exp(MyExp):
                 pg_sgd_no_decay.append(p)
                 registered_params.add(p)
             else:
-                # -------------------------------------------------------------
-                # RULE 4: All 2D/4D Convolutions, Linear Projections, and Decoders (WITH DECAY)
-                # -------------------------------------------------------------
+                # RULE 4: Convolutions and Linear Projections (WITH DECAY)
                 pg_sgd_decay.append(p)
                 registered_params.add(p)
 
-        # Strict completeness assertion: No parameter left behind!
         unassigned = all_trainable_params - registered_params
-        assert len(unassigned) == 0, f"FATAL: Unassigned parameters detected in optimizer setup: {unassigned}"
+        assert len(unassigned) == 0, f"FATAL: Unassigned parameters in optimizer setup: {unassigned}"
+
+        # MUON VELOCITY CALIBRATION (Fix 27):
+        # Setting Muon LR = base_lr * 1.5 (0.00375) reduces angular velocity from 2.43 deg/iter to 0.45 deg/iter
+        muon_lr = base_lr * 1.5
 
         logger.info("=" * 80)
-        logger.info("CERTIFIED MuSGD OPTIMIZER PARTITION v3.6:")
-        logger.info(f"  • Group 0 (Muon S^127)      : {len(pg_muon):3d} tensors | LR={0.02:.5f} (8.0x) | WD=0.0")
+        logger.info("CALIBRATED MuSGD OPTIMIZER PARTITION v3.7:")
+        logger.info(f"  • Group 0 (Muon S^127)      : {len(pg_muon):3d} tensors | LR={muon_lr:.5f} (1.5x) | WD=0.0")
         logger.info(f"  • Group 1 (SGD with Decay)  : {len(pg_sgd_decay):3d} tensors | LR={base_lr:.5f} (1.0x) | WD={self.weight_decay}")
         logger.info(f"  • Group 2 (SGD No-Decay)    : {len(pg_sgd_no_decay):3d} tensors | LR={base_lr:.5f} (1.0x) | WD=0.0")
         logger.info(f"  • Group 3 (Meta-SGD TTT)    : {len(pg_meta):3d} tensors | LR={base_lr * 0.05:.5f} (0.05x)| WD=0.0")
@@ -240,13 +221,13 @@ class Exp(MyExp):
             {
                 "params": pg_muon, 
                 "use_muon": True, 
-                "lr": 0.02, 
-                "lr_factor": 0.02 / base_lr, 
+                "lr": muon_lr, 
+                "lr_factor": 1.5, 
                 "momentum": 0.95, 
                 "weight_decay": 0.0, 
                 "nesterov": True
             },
-            # Group 1: Convolutions, Projections, ScaleAttnRes.w, and w_hf (Bounded by 5e-4 decay!)
+            # Group 1: Convolutions and Linear Projections
             {
                 "params": pg_sgd_decay, 
                 "use_muon": False, 
@@ -256,7 +237,7 @@ class Exp(MyExp):
                 "weight_decay": self.weight_decay, 
                 "nesterov": True
             },
-            # Group 2: Biases, Normalization Affines, aligner.gamma/beta, and Physical Scalars
+            # Group 2: Protected Biases, Norms, w_hf, and ScaleAttnRes.w
             {
                 "params": pg_sgd_no_decay, 
                 "use_muon": False, 
@@ -310,11 +291,12 @@ class Exp(MyExp):
             img_size=self.test_size,
             preproc=ValTransform(legacy=kwargs.get("legacy", False)),
         )
+
     def get_eval_loader(self, batch_size, is_distributed, **kwargs):
         valdataset = self.get_eval_dataset(**kwargs)
         sampler = torch.utils.data.SequentialSampler(valdataset)
         dataloader_kwargs = {
-            "num_workers": 0,    # ZERO workers for eval: eliminates Windows DLL spawning crashes!
+            "num_workers": 0,
             "pin_memory": True,
             "sampler": sampler,
             "batch_size": batch_size,

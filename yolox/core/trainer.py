@@ -146,7 +146,7 @@ class Trainer:
         self.scaler.update()
         scale_after = self.scaler.get_scale()
 
-        # PHASE-COHERENT SLERP PROTOTYPE TRACKING:
+        # PHASE-COHERENT PROTOTYPE TRACKING (Fix 16):
         step_successful = (scale_after >= scale_before)
         if self.use_model_ema and step_successful:
             self.ema_model.update(self.model)
@@ -156,8 +156,9 @@ class Trainer:
                 if hasattr(live_model, "head") and hasattr(ema_model, "head"):
                     for m_live, m_ema in zip(live_model.head.memory_banks, ema_model.head.memory_banks):
                         if hasattr(m_live, "prototypes") and hasattr(m_ema, "prototypes"):
-                            # Riemannian unit-sphere normalization preserves S^127 geometry synchronously
-                            m_ema.prototypes.data.copy_(F.normalize(m_ema.prototypes.data, p=2, dim=-1))
+                            # SYNCHRONOUS RIEMANNIAN REFLECTION:
+                            # Live prototypes are copied directly into the shadow bank on S^127!
+                            m_ema.prototypes.data.copy_(F.normalize(m_live.prototypes.data, p=2, dim=-1))
 
         # Update learning rates while respecting per-group lr_factor
         lr = self.lr_scheduler.update_lr(self.progress_in_iter + 1)
@@ -329,15 +330,24 @@ class Trainer:
 
         logger.info("---> start train epoch{}".format(self.epoch + 1))
 
-        if self.epoch + 1 == self.max_epoch - self.exp.no_aug_epochs or self.no_aug:
-            logger.info("---> Closing Mosaic augmentation and engaging TRUE native resolution lock!")
-            self.train_loader.close_mosaic()
-            self.no_aug = True  # STOPS random_resize completely during the final 15 epochs!
-            self.input_size = self.exp.input_size
+        # CONTINUOUS L1 RAMP SYNCHRONIZATION (Fix 18):
+        # Engages use_l1 starting at Epoch 58 (max_epoch - no_aug_epochs - 7)
+        # Allows the smooth 7-epoch cosine handoff (0.0 -> 1.0) to execute before Mosaic closes
+        l1_start_epoch = self.max_epoch - self.exp.no_aug_epochs - 7
+        if self.epoch + 1 >= l1_start_epoch:
             if self.is_distributed:
                 self.model.module.head.use_l1 = True
             else:
                 self.model.head.use_l1 = True
+            if self.epoch + 1 == l1_start_epoch:
+                logger.info("---> Engaging Smooth L1 Regression Handoff (Epochs 58 to 65)...")
+
+        # Mosaic closure and native resolution lock at Epoch 65
+        if self.epoch + 1 == self.max_epoch - self.exp.no_aug_epochs or self.no_aug:
+            logger.info("---> Closing Mosaic augmentation and engaging TRUE native resolution lock!")
+            self.train_loader.close_mosaic()
+            self.no_aug = True
+            self.input_size = self.exp.input_size
             self.exp.eval_interval = 1
             if not self.no_aug:
                 self.save_ckpt(ckpt_name="last_mosaic_epoch")

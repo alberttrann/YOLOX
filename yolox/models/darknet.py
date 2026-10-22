@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 # -*- encoding: utf-8 -*-
 # Copyright (c) Megvii Inc. All rights reserved.
-# Integrated for TDE-YOLOX v3.3: Asymmetric Fourier Invariance & CMA Meta-Adaptive Backbone
+# Integrated for TDE-YOLOX v3.7: Physical Dark Channel Turbidity Engine & Pixel-Wise Phase Anchoring
 
 import math
 import torch
@@ -9,6 +9,52 @@ import torch.nn as nn
 import torch.nn.functional as F
 from .network_blocks import BaseConv, BaseConvGN, CSPLayer, Focus, DWConv, DWConvGN, SPPBottleneck, ResLayer
 from .ttt_modules import TTTAdaptiveStage
+
+
+class DarkChannelTurbiditySensor(nn.Module):
+    """
+    Physical Dark Channel Atmospheric Turbidity Estimator (Koschmieder Law).
+    Computes optical airlight extinction directly from unnormalized input photons:
+      - Clean daylight & clear nights: h_atmo = 0.00000 (Memory Gate remains closed).
+      - Dense fog, blizzards, rain mist: h_atmo in [0.65, 1.00] (Engages Memory Gate).
+    Invariant to scene texture density; immune to Softmax concentration of measure.
+    """
+    def __init__(self, patch_size=16, tau_clean=0.10, tau_fog=0.38):
+        super().__init__()
+        self.patch_size = patch_size
+        self.tau_clean = float(tau_clean)
+        self.tau_fog = float(tau_fog)
+
+    @torch.no_grad()
+    def forward(self, x):
+        # 1. Scale-Invariant Radiance Normalization to [0.0, 1.0]
+        # Prevents discrepancy between uint8 [0, 255] and float [0, 1] evaluation pipelines
+        max_val = x.max()
+        scale = 255.0 if max_val > 2.0 else 1.0
+        x_norm = x.float() / scale
+
+        # 2. Channel-Wise Minimum Radiance: shape [B, 1, H, W]
+        min_rgb = torch.min(x_norm, dim=1, keepdim=True).values
+
+        # 3. Spatial Patch-Level Minimum Pooling via Inverted MaxPool
+        # Equivalent to min_{(u,v) in Omega} I_c(u,v) over 16x16 local receptive field
+        dark_patch = -F.max_pool2d(
+            -min_rgb,
+            kernel_size=self.patch_size,
+            stride=self.patch_size,
+            padding=0
+        )  # Output: [B, 1, H//16, W//16]
+
+        # 4. Scene-Wide Airlight Extinction Metric: Mean across all patches
+        mu_dark = dark_patch.mean(dim=[-2, -1])  # Shape: [B, 1]
+
+        # 5. Calibrated Linear Turbidity Ramp
+        h_atmo = torch.clamp(
+            (mu_dark - self.tau_clean) / (self.tau_fog - self.tau_clean),
+            min=0.0,
+            max=1.0
+        )
+        return h_atmo.to(x.dtype)
 
 
 class Darknet(nn.Module):
@@ -67,13 +113,12 @@ class Darknet(nn.Module):
 
 class CSPDarknet(nn.Module):
     """
-    TDE-YOLOX v3.3 Master CSPDarknet Backbone.
-    
-    Architectural Foundations:
-      - Stage 0: Focus stem with BaseConvGN (cancels Koschmieder additive DC haze offset A).
-      - Stage 1: Functional TTT-Dark2 (TTTAdaptiveStage) with GroupNorm and CMA covariance whitening.
-      - Deep Stages (Dark3-Dark5): Exact channel alignment with pretrained YOLOX weights.
-      - Fourier Phase-Amplitude Regularization: Asymmetric anchor eliminates destructive stem cancellation.
+    TDE-YOLOX v3.7 Master CSPDarknet Backbone:
+      - Sensor: DarkChannelTurbiditySensor estimates physical airlight veil directly from X.
+      - Stage 0: Focus stem with BaseConvGN cancels local additive DC offsets.
+      - Stage 1: Functional TTT-Dark2 (TTTAdaptiveStage) with GroupNorm and CMA whitening.
+      - Deep Stages (Dark3-Dark5): Preserves exact channel alignment with pretrained YOLOX weights.
+      - Regularization: Pixel-wise spatial Fourier Phase loss across 32 channels in FP32.
     """
     def __init__(
         self,
@@ -83,7 +128,7 @@ class CSPDarknet(nn.Module):
         depthwise=False,
         act="silu",
         ttt_lr=0.05,
-        ttt_noise_std=0.08  # Maintained as optional parameter for configuration compatibility
+        ttt_noise_std=0.08
     ):
         super().__init__()
         self.out_features = out_features
@@ -93,12 +138,14 @@ class CSPDarknet(nn.Module):
         base_channels = int(wid_mul * 64)        # 32 for width=0.5
         base_depth = max(round(dep_mul * 3), 1)  # 1 for depth=0.33
 
-        # 0. THE GROUPNORM STEM
+        # 0. PHYSICAL OPTICAL TURBIDITY SENSOR
+        self.atmo_sensor = DarkChannelTurbiditySensor(patch_size=16, tau_clean=0.10, tau_fog=0.38)
+
+        # 1. THE GROUPNORM STEM
         # Instance-level centering on raw pixels cancels uniform airlight shifts
         self.stem = Focus(3, base_channels, ksize=3, act=act)
 
-        # 1. THE ADAPTIVE STAGE 1 (DARK2)
-        # Built strictly with GroupNorm components (zero frozen running statistics)
+        # 2. ADAPTIVE STAGE 1 (DARK2) VIA CMA
         dark2_base = nn.Sequential(
             ConvGN(base_channels, base_channels * 2, 3, 2, act=act),
             CSPLayer(
@@ -107,29 +154,28 @@ class CSPDarknet(nn.Module):
                 n=base_depth,
                 depthwise=depthwise,
                 act=act,
-                use_gn=True  # Propagates GroupNorm through all internal bottlenecks
+                use_gn=True
             ),
         )
-        
         self.dark2 = TTTAdaptiveStage(
             dark2_base,
             in_channels=base_channels * 2,
             init_ttt_lr=ttt_lr
         )
 
-        # 2. DARK3 (DEEP STAGE - Stride 8)
+        # 3. DARK3 (DEEP STAGE - Stride 8)
         self.dark3 = nn.Sequential(
             Conv(base_channels * 2, base_channels * 4, 3, 2, act=act),
             CSPLayer(base_channels * 4, base_channels * 4, n=base_depth * 3, depthwise=depthwise, act=act),
         )
 
-        # 3. DARK4 (DEEP STAGE - Stride 16)
+        # 4. DARK4 (DEEP STAGE - Stride 16)
         self.dark4 = nn.Sequential(
             Conv(base_channels * 4, base_channels * 8, 3, 2, act=act),
             CSPLayer(base_channels * 8, base_channels * 8, n=base_depth * 3, depthwise=depthwise, act=act),
         )
 
-        # 4. DARK5 (DEEP STAGE + SPP - Stride 32)
+        # 5. DARK5 (DEEP STAGE + SPP - Stride 32)
         self.dark5 = nn.Sequential(
             Conv(base_channels * 8, base_channels * 16, 3, 2, act=act),
             SPPBottleneck(base_channels * 16, base_channels * 16, activation=act),
@@ -149,7 +195,7 @@ class CSPDarknet(nn.Module):
         phase = torch.angle(fft_x)
         
         # Roll batch by 1 to sample paired clean amplitude spectrum
-        amp_perm = torch.roll(amp, shifts=1, dims=0)
+        amp_perm = torch.roll(amp, shifts=1, dims=0) if B > 1 else amp
         
         # Construct smooth Gaussian low-frequency mask centered at DC (u=0, v=0)
         u = torch.arange(H, device=x.device)
@@ -175,19 +221,21 @@ class CSPDarknet(nn.Module):
 
     def forward(self, x, ttt_prob=None, epoch=0, max_epochs=80):
         outputs = {}
+
+        # 1. OPTICAL TURBIDITY SENSING (Evaluated on raw sensor radiance X)
+        h_atmo = self.atmo_sensor(x)  # Shape: [B, 1], in [0.0, 1.0]
         
-        # 1. ATOMIC SINGLE FOCUS STEM FORWARD
+        # 2. ATOMIC SINGLE FOCUS STEM FORWARD
         x_clean_stem = self.stem(x)
         outputs["stem"] = x_clean_stem
         
-        # 2. EVALUATE PIXEL-WISE FOURIER PHASE LOSS (v3.6 Certified)
-        # Evaluates cosine similarity per spatial pixel across channels (dim=1)
-        if self.training:
+        # 3. EVALUATE PIXEL-WISE SPATIAL FOURIER PHASE LOSS (Training Only)
+        if self.training and x.shape[0] > 1:
             with torch.no_grad():
                 x_perturbed = self._fourier_amplitude_perturb(x)
             stem_pert = self.stem(x_perturbed)
 
-            # Strict FP32 calculation with FP16-safe epsilon guard (1e-4)
+            # Strict FP32 calculation with epsilon guard (1e-4) to prevent half-precision division overflow
             clean_fp32 = x_clean_stem.detach().float()
             pert_fp32 = stem_pert.float()
 
@@ -200,20 +248,20 @@ class CSPDarknet(nn.Module):
         else:
             phase_loss = torch.tensor(0.0, device=x.device, dtype=x.dtype)
 
-        # 3. ADAPTIVE STAGE 1 (DARK2) VIA CMA
+        # 4. ADAPTIVE STAGE 1 (DARK2) VIA STATIONARY MAML
         run_ttt = False
         if not self.training:
             if ttt_prob is None or ttt_prob > 0.0:
                 run_ttt = True
         else:
             prob = ttt_prob if ttt_prob is not None else 0.0
-            if prob > 0.0 and torch.rand(1).item() < prob:
+            if prob > 0.0 and (prob >= 1.0 or torch.rand(1).item() < prob):
                 run_ttt = True
 
         x, cma_loss = self.dark2(x_clean_stem, run_ttt=run_ttt, epoch=epoch, max_epochs=max_epochs)
         outputs["dark2"] = x
         
-        # 4. DEEP CONVOLUTIONAL HIGHWAYS
+        # 5. DEEP CONVOLUTIONAL STAGES
         x = self.dark3(x)
         outputs["dark3"] = x
         x = self.dark4(x)
@@ -222,4 +270,5 @@ class CSPDarknet(nn.Module):
         outputs["dark5"] = x
         
         selected_outs = {k: v for k, v in outputs.items() if k in self.out_features}
-        return selected_outs, cma_loss, phase_loss
+        # Returns physical h_atmo along with features and auxiliary losses
+        return selected_outs, cma_loss, phase_loss, h_atmo

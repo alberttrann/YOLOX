@@ -110,12 +110,12 @@ class YOLOX(nn.Module):
             # 2. Forward through Decoupled Engram Head with Unified Single Dispatch
             (
                 total_det_loss, loss_iou, loss_nwd, loss_obj, loss_cls, loss_l1,
-                num_fg_ratio, aux_mem_logits, cls_targets_concat, fg_masks_concat
+                num_fg_ratio, aux_mem_logits, cls_targets_concat, fg_masks_concat, expanded_strides
             ) = self.head(neck_output, targets, x)
 
-            # 3. Supervised Memory Anchor Loss normalized in FP32
+            # 3. Supervised Memory Anchor Loss Level-Normalized across P3, P4, P5
             memory_anchor_loss = self._calculate_supervised_memory_loss(
-                aux_mem_logits, cls_targets_concat, fg_masks_concat
+                aux_mem_logits, cls_targets_concat, fg_masks_concat, expanded_strides
             )
 
             # 4. Prototype Margin Repulsion Loss on S^127
@@ -139,7 +139,7 @@ class YOLOX(nn.Module):
                 raw_sem_loss = torch.tensor(0.0, device=x.device)
 
             # Master Multi-Task Loss Synthesis with Auxiliary Curriculum Decay
-            lambda_idx = self._get_indexer_loss_weight()
+            lambda_idx_base = self._get_indexer_loss_weight()  # Dynamic curriculum: 0.10 -> 0.01
             aux_mult = self._get_aux_multiplier()
             cma_ramp = min(1.0, float(self.current_epoch) / 10.0)
 
@@ -148,8 +148,8 @@ class YOLOX(nn.Module):
             lambda_cma = 0.050 * cma_ramp * aux_mult
             lambda_rep = 0.030 * aux_mult
             lambda_phase = 0.030 * min(1.0, float(self.current_epoch) / 5.0) * aux_mult
-            lambda_sem = 0.015 * aux_mult # Prevents macro vehicle segmentation from dominating
-            lambda_idx = 0.050 * aux_mult
+            lambda_sem = 0.015 * aux_mult
+            lambda_idx = lambda_idx_base * aux_mult  # PROPERLY SCALED (Removes L129 static override!)
 
             total_loss = (
                 total_det_loss
@@ -181,28 +181,64 @@ class YOLOX(nn.Module):
         else:
             return self.head(neck_output)
 
-    def _calculate_supervised_memory_loss(self, aux_mem_logits, cls_targets, fg_masks):
+    def _calculate_supervised_memory_loss(self, aux_mem_logits, cls_targets, fg_masks, expanded_strides=None):
         """
-        Supervised Identity Anchor Loss.
-        Directly supervises hyperspherical prototype cosine similarities with GT labels.
-        Normalized by both foreground anchors and class count.
+        LEVEL-NORMALIZED SUPERVISED MEMORY LOSS (Fix 8):
+        Supervises P3, P4, and P5 prototypes with equal task gradient strength.
+        Safe against tensor/list variations with zero memory allocation.
         """
-        all_logits_per_image = torch.cat(aux_mem_logits, dim=1)
-        flat_logits_fp32 = all_logits_per_image.view(-1, self.num_classes).float()
-        flat_mask = fg_masks.view(-1)
-        
-        fg_logits = flat_logits_fp32[flat_mask]
-        
-        if fg_logits.shape[0] > 0 and cls_targets.shape[0] > 0:
-            min_len = min(fg_logits.shape[0], cls_targets.shape[0])
-            num_fg_actual = max(1.0, float(min_len))
+        if len(aux_mem_logits) == 0 or cls_targets.shape[0] == 0:
+            return torch.tensor(0.0, device=cls_targets.device if cls_targets.is_cuda else "cpu")
+
+        strides = [8.0, 16.0, 32.0]
+        level_losses = []
+
+        flat_mask = fg_masks.view(-1)       # [B * total_anchors]
+        flat_targets = cls_targets.float()  # [N_fg_total, num_classes]
+
+        if expanded_strides is not None:
+            # 1. Safely concatenate list of stride tensors across pyramid levels
+            if isinstance(expanded_strides, (list, tuple)):
+                cat_strides = torch.cat(expanded_strides, dim=1)  # Shape: [1, total_anchors]
+            else:
+                cat_strides = expanded_strides.view(1, -1)
+
+            B = aux_mem_logits[0].shape[0]
+            # 2. Dimension-safe stride expansion across the batch: [B * total_anchors]
+            strides_all = cat_strides.expand(B, -1).reshape(-1)
+            fg_strides = strides_all[flat_mask]                   # [N_fg_total]
+
+            # 3. Concatenate and flatten memory logits across pyramid levels
+            all_logits = torch.cat(aux_mem_logits, dim=1).view(-1, self.num_classes).float()
+            fg_logits = all_logits[flat_mask]                     # [N_fg_total, num_classes]
+
+            min_len = min(fg_logits.shape[0], flat_targets.shape[0], fg_strides.shape[0])
+            fg_logits = fg_logits[:min_len]
+            flat_targets = flat_targets[:min_len]
+            fg_strides = fg_strides[:min_len]
+
+            # 4. Level-normalized loss calculation
+            for s in strides:
+                s_mask = (fg_strides == s)
+                if s_mask.any():
+                    logits_s = fg_logits[s_mask]
+                    targets_s = flat_targets[s_mask]
+                    bce_s = F.binary_cross_entropy_with_logits(logits_s, targets_s, reduction="sum")
+                    n_fg_s = max(1.0, float(s_mask.sum().item()))
+                    level_losses.append(bce_s / (n_fg_s * float(self.num_classes)))
+        else:
+            # Fallback uniform normalization
+            all_logits = torch.cat(aux_mem_logits, dim=1).view(-1, self.num_classes).float()
+            fg_logits = all_logits[flat_mask]
+            min_len = min(fg_logits.shape[0], flat_targets.shape[0])
             bce_sum = F.binary_cross_entropy_with_logits(
-                fg_logits[:min_len], cls_targets[:min_len].float(), reduction="sum"
+                fg_logits[:min_len], flat_targets[:min_len], reduction="sum"
             )
-            # Divide by num_classes to normalize into standard [0.2, 2.5] range!
-            return bce_sum / (num_fg_actual * float(self.num_classes))
-            
-        return flat_logits_fp32.sum() * 0.0
+            return bce_sum / (max(1.0, float(min_len)) * float(self.num_classes))
+
+        if len(level_losses) > 0:
+            return sum(level_losses) / float(len(level_losses))
+        return torch.tensor(0.0, device=flat_targets.device)
 
     def visualize(self, x, targets, save_prefix="assign_vis_"):
         # FRICTION FIX: Unpack safely using *_ to prevent unpack errors
