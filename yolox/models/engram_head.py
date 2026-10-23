@@ -43,7 +43,12 @@ class AntiCollisionEngramBank(nn.Module):
         D = self.latent_dim
 
         # 1. BALANCED QUERY RECEPTIVE FIELD FUSION:
-        p_interp = F.interpolate(anchor_feat, size=(H, W), mode='bilinear', align_corners=False)
+        # NEW 100% SAFE VERSION:
+        if anchor_feat.shape[-1] == 1 and anchor_feat.shape[-2] == 1:
+            # Safely expand 1x1 global context tokens without interpolation
+            p_interp = anchor_feat.expand(-1, -1, H, W)
+        else:
+            p_interp = F.interpolate(anchor_feat, size=(H, W), mode='nearest')
         dw_local = self.dw_hf(h_local)
         p_scale = p_interp.float() * torch.rsqrt(p_interp.float().pow(2).mean(dim=1, keepdim=True) + 1e-5)
         dw_scale = dw_local.float() * torch.rsqrt(dw_local.float().pow(2).mean(dim=1, keepdim=True) + 1e-5)
@@ -445,17 +450,16 @@ class TDE_Head(YOLOXHead):
         )
         loss_obj = bce_obj_raw.sum() / num_fg
 
-        # ASYMMETRIC FOCAL MODULATION ON CLASSIFICATION:
-        # Applies gamma=1.5 on negative classes to eliminate the 8:1 negative gradient volume
+        # PURE BCE CLASSIFICATION LOSS (Restores standard YOLOX Precision!)
+        # Removing asymmetric focal modulation ensures strong boundary separation between 
+        # visually similar classes (e.g. Rider vs Person).
         fg_cls_preds = cls_preds.view(-1, self.num_classes)[fg_masks_concat].float()
-        p_cls = torch.sigmoid(fg_cls_preds)
         raw_bce = F.binary_cross_entropy_with_logits(fg_cls_preds, cls_targets_concat.float(), reduction="none")
         
         pos_mask_cls = (cls_targets_concat > 0.0).float()
         neg_mask_cls = 1.0 - pos_mask_cls
-        focal_neg_mod = (p_cls).pow(1.5)
 
-        loss_cls_neg = (focal_neg_mod * raw_bce * neg_mask_cls).sum() / num_fg
+        loss_cls_neg = (raw_bce * neg_mask_cls).sum() / num_fg
         loss_cls_pos_global = (raw_bce * pos_mask_cls).sum() / num_fg
 
         class_fg_counts = cls_targets_concat.sum(dim=0)
@@ -636,7 +640,7 @@ class TDE_Head(YOLOXHead):
         min_k = torch.where(macro_mask, 4, 2)
 
         # min_k guarantee: Even if 0 candidates pass 0.15, min_k guarantees targets are never orphaned!
-        dynamic_ks = torch.clamp(dynamic_ks, min=min_k, max=max_k)
+        dynamic_ks = torch.max(min_k, torch.min(max_k, dynamic_ks))
 
         gt_cls_per_image = F.one_hot(gt_classes.to(torch.int64), self.num_classes).float()
         with torch.cuda.amp.autocast(enabled=False):

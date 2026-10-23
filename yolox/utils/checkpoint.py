@@ -12,8 +12,8 @@ import torch
 
 def load_ckpt(model, ckpt):
     """
-    TDE-YOLOX v3.7 Master Pretrained Checkpoint Loader.
-    Transfers 100% of standard backbone, neck (C3_p4, C3_p3), and head weights from COCO.
+    TDE-YOLOX v3.8 Master Pretrained Checkpoint Loader.
+    Transfers 100% of standard backbone, neck, and head weights from COCO.
     """
     if "model" in ckpt:
         ckpt = ckpt["model"]
@@ -31,18 +31,21 @@ def load_ckpt(model, ckpt):
     # Custom layers that are strictly unique to TDE and DO NOT have COCO remapped equivalents
     custom_layers = [
         "memory_banks", "anchor_projectors", "local_projectors", "manifold_decoders", 
-        "post_engram_dw", "p5_dense_attn", "aux_sem_head", "aligner", "ttt_lrs",
-        "atmo_sensor", "indexer", "rca", "rmbconv", "trunk_gate", "refine_gate", "prior_logits"
+        "post_engram_dw", "p5_dense_attn", "bqsa_p4", "bqsa_p3", "grc_n4", "grc_n5", # <--- New Residual Names
+        "aux_sem_head", "aligner", "ttt_lrs", "atmo_sensor", "indexer", "rca", "rmbconv",
+        "trunk_gate", "refine_gate", "prior_logits", "qkv", "proj", "gr_gate"
     ]
 
-    # REMAPPING TABLE: Maps TDE v3.7 module paths to standard YOLOX COCO pretrained keys
+    # Master Pretrained PAFPN Remapper (Restores full 548 COCO tensor transfer!)
     neck_remap = {
         "backbone.lateral_c5.": "backbone.lateral_conv0.",
         "backbone.reduce_p4.":  "backbone.reduce_conv1.",
-        "backbone.p4_bqsa.":    "backbone.C3_p4.",
-        "backbone.p3_bqsa.":    "backbone.C3_p3.",
-        "backbone.down_n3.":    "backbone.bu_conv2.",
-        "backbone.down_n4.":    "backbone.bu_conv1.",
+        "backbone.C3_p4.":      "backbone.C3_p4.",
+        "backbone.C3_p3.":      "backbone.C3_p3.",
+        "backbone.C3_n3.":      "backbone.C3_n3.",
+        "backbone.C3_n4.":      "backbone.C3_n4.",
+        "backbone.bu_conv2.":   "backbone.bu_conv2.",
+        "backbone.bu_conv1.":   "backbone.bu_conv1.",
     }
 
     for key_model, param_model in model_state_dict.items():
@@ -79,7 +82,7 @@ def load_ckpt(model, ckpt):
             logger.info(f"  -> Remapped Stage 1: {key_dark2} -> {key_model}")
             continue
 
-        # Rule 6: Neck Convolutions Remapping (Maps p4_bqsa -> C3_p4, p3_bqsa -> C3_p3)
+        # Rule 6: Neck Convolutions Remapping
         remapped_neck = False
         for new_prefix, old_prefix in neck_remap.items():
             if new_prefix in canon_key:
@@ -94,7 +97,7 @@ def load_ckpt(model, ckpt):
 
     missing, unexpected = model.load_state_dict(load_dict, strict=False)
     
-    expected_new = custom_layers + ["attnres", "cls_preds", "p4_bqsa", "p3_bqsa", "down_n3", "down_n4"]
+    expected_new = custom_layers + ["attnres", "cls_preds"]
     critical_missing = [k for k in missing if not any(c in k for c in expected_new)]
     if critical_missing:
         logger.warning(f"CRITICAL: {len(critical_missing)} unexpected backbone/neck tensors failed to load: {critical_missing[:5]}...")

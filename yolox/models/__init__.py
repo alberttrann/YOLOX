@@ -12,8 +12,8 @@ from .yolox import YOLOX
 from .engram_head import TDE_Head
 from .tribrid_neck import (
     P5ExclusiveDenseAttention,
-    C2f_BQSA_P4,
-    C2f_BQSA_P3,
+    BQSA_P4_Assist,    
+    BQSA_P3_Assist,    
     ScaleAttnRes,
     RotaryEmbedding2D,
     RMSNorm,
