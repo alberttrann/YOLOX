@@ -272,3 +272,40 @@ class CSPDarknet(nn.Module):
         selected_outs = {k: v for k, v in outputs.items() if k in self.out_features}
         # Returns physical h_atmo along with features and auxiliary losses
         return selected_outs, cma_loss, phase_loss, h_atmo
+    
+class DarkChannelTurbiditySensor(nn.Module):
+    def __init__(self, patch_size=16, tau_clean=0.10, tau_fog=0.38):
+        super().__init__()
+        self.patch_size = patch_size
+        self.tau_clean = float(tau_clean)
+        self.tau_fog = float(tau_fog)
+
+    @torch.no_grad()
+    def forward(self, x):
+        max_val = x.max()
+        scale = 255.0 if max_val > 2.0 else 1.0
+        x_norm = x.float() / scale
+
+        min_rgb = torch.min(x_norm, dim=1, keepdim=True).values
+
+        dark_patch = -F.max_pool2d(
+            -min_rgb,
+            kernel_size=self.patch_size,
+            stride=self.patch_size,
+            padding=0
+        )
+
+        # HORIZON-AWARE ROI CROPPING:
+        # The upper 35% of a dashcam frame is sky/clouds (which violates Dark Channel Prior).
+        # We compute atmospheric turbidity strictly over the lower 65% ground traffic plane:
+        h_start = int(dark_patch.shape[-2] * 0.35)
+        ground_dark = dark_patch[:, :, h_start:, :]
+
+        mu_dark = ground_dark.mean(dim=[-2, -1])  # Shape: [B, 1]
+
+        h_atmo = torch.clamp(
+            (mu_dark - self.tau_clean) / (self.tau_fog - self.tau_clean),
+            min=0.0,
+            max=1.0
+        )
+        return h_atmo.to(x.dtype)

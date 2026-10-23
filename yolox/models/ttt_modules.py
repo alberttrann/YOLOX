@@ -137,14 +137,10 @@ class TTTAdaptiveStage(nn.Module):
             # Positivity Guard: Prevents feature sign inversion
             gamma_adapted = torch.clamp(gamma_adapted, min=0.10, max=3.00)
 
-        # PROGRESSIVE MODULATION WARMUP (Criterion 5 / Zone 5 Fix):
-        # On Day 1 clean training, ttt_ramp = 0.20 => 80% identity preservation.
-        # At inference/testing, ttt_ramp === 1.00000 => 100% adaptation on adverse weather!
-        if self.training:
-            current_ep = float(epoch) if epoch > 0 else 1.0
-            ttt_ramp = min(1.0, max(0.0, current_ep / 5.0))
-        else:
-            ttt_ramp = 1.0
+        # TRAIN-VS-VAL SYMMETRY (Bottleneck 6 Fix):
+        # Deterministic function of epoch in BOTH training and validation!
+        current_ep = float(epoch) if epoch > 0 else 1.0
+        ttt_ramp = min(1.0, max(0.0, current_ep / 5.0))
 
         gamma_eff = 1.0 + ttt_ramp * (gamma_adapted - 1.0)
         beta_eff = ttt_ramp * beta_adapted

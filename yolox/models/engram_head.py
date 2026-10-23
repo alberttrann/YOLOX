@@ -53,13 +53,12 @@ class AntiCollisionEngramBank(nn.Module):
         p_scale = p_interp.float() * torch.rsqrt(p_interp.float().pow(2).mean(dim=1, keepdim=True) + 1e-5)
         dw_scale = dw_local.float() * torch.rsqrt(dw_local.float().pow(2).mean(dim=1, keepdim=True) + 1e-5)
 
+        # LOCAL-DOMINANT P5 QUERY REBALANCING (Bottleneck 8 Fix):
         if is_p3:
-            # P3 remains local-dominated to protect micro targets (Traffic Signs, Lights, Bikes)
             q = (0.25 * p_scale + dw_scale).to(h_local.dtype)
         else:
-            # P4 and P5 use balanced 50/50 anchor context and local texture weighting
-            w_loc = torch.clamp(self.w_hf.float(), min=0.20, max=1.0)
-            q = (0.50 * p_scale + w_loc * 0.50 * dw_scale).to(h_local.dtype)
+            w_loc = torch.clamp(self.w_hf.float(), min=0.50, max=1.0)
+            q = (0.25 * p_scale + w_loc * 0.75 * dw_scale).to(h_local.dtype)
 
         q_norm = F.normalize(q.float().permute(0, 2, 3, 1).reshape(B, H * W, D), p=2, dim=-1, eps=1e-5)
         p_norm = F.normalize(self.prototypes.float(), p=2, dim=-1, eps=1e-5)
@@ -105,14 +104,10 @@ class AntiCollisionEngramBank(nn.Module):
         # Calibrated turbidity severity: 0.0 on clean daylight (mu_dark <= 0.10)
         atmo_severity = torch.clamp((h_ratio - 0.10) / 0.30, min=0.0, max=1.0).to(q.dtype)
 
-        # ZONE 1 FIX: Clean-Daylight Memory Maturity Schedule
-        # Locked to 0.000 during Epochs 1-3 clean daylight; adverse weather bypasses maturity instantly!
-        if self.training:
-            current_ep = float(epoch) if epoch > 0 else 1.0
-            maturity = min(1.0, max(0.0, (current_ep - 3.0) / 12.0))
-        else:
-            maturity = 1.0  # Full maturity during evaluation
-
+        # TRAIN-VS-VAL SYMMETRY (Bottleneck 6 Fix):
+        # Deterministic function of epoch in BOTH training and validation!
+        current_ep = float(epoch) if epoch > 0 else 1.0
+        maturity = min(1.0, max(0.0, (current_ep - 3.0) / 12.0))
         intervention_scale = torch.max(atmo_severity, maturity * (1.0 - certainty) * 0.50)
 
         # 7. STRICT MULTIPLICATIVE OBJECTNESS ENVELOPE:
@@ -440,7 +435,14 @@ class TDE_Head(YOLOXHead):
             nwd_weight, loss_l1_weight = 0.25, 1.00
 
         loss_giou = (self.iou_loss(bbox_preds.view(-1, 4)[fg_masks_concat], reg_targets_concat)).sum() / num_fg
-        loss_nwd = (self.nwd_loss(bbox_preds.view(-1, 4)[fg_masks_concat], reg_targets_concat)).sum() / num_fg
+        # SCALE-GATED NWD REGRESSION LOSS (Bottleneck 7 Fix):
+        # Vanishes on macro targets (Area > 96^2), allowing pure GIoU to enforce sharp corners
+        # CORRECT 1D ELEMENT-WISE VERSION:
+        area_targets = reg_targets_concat[:, 2] * reg_targets_concat[:, 3]
+        gamma_targets = torch.exp(-torch.clamp(area_targets, min=1.0) / 1000.0)  # Shape: [N_fg] (No unsqueeze!)
+
+        raw_nwd = self.nwd_loss(bbox_preds.view(-1, 4)[fg_masks_concat], reg_targets_concat)
+        loss_nwd = (gamma_targets * raw_nwd).sum() / num_fg  # Clean 1D dot-product!
 
         # CANONICAL YOLOX OBJECTNESS LOSS (Fix A):
         # Un-focal BCE provides strong downward pressure on all background anchors
@@ -467,7 +469,8 @@ class TDE_Head(YOLOXHead):
         pos_bce_per_class = (raw_bce * pos_mask_cls).sum(dim=0)
         loss_cls_pos_equal = (pos_bce_per_class[active_mask] / torch.clamp(class_fg_counts[active_mask], min=1.0)).mean() if active_mask.any() else 0.0
 
-        loss_cls = (0.50 * loss_cls_pos_global + 0.50 * loss_cls_pos_equal) + loss_cls_neg
+        # 75/25 BALANCED HYBRID CLASSIFICATION (Bottleneck 3 Fix):
+        loss_cls = (0.75 * loss_cls_pos_global + 0.25 * loss_cls_pos_equal) + loss_cls_neg
 
         loss_l1 = 0.0
         if self.use_l1:
@@ -621,25 +624,25 @@ class TDE_Head(YOLOXHead):
         diag_gt_safe = torch.clamp(torch.sqrt(g_s.pow(2).sum(-1) + 1e-7).unsqueeze(1) + 1e-5, min=8.0)
         pair_wise_nwd = torch.exp(-2.0 * (torch.sqrt(w2_sq) / diag_gt_safe))
 
-        hybrid_overlap = 0.5 * (pair_wise_ious + pair_wise_nwd)
+        # SCALE-GATED NWD OVERLAP (Bottleneck 7 Fix):
+        # Macro targets rely purely on IoU to preserve sharp 90-degree corners
+        macro_mask = is_macro.squeeze(-1)
+        hybrid_overlap = torch.where(
+            macro_mask.unsqueeze(1),
+            pair_wise_ious,
+            0.5 * (pair_wise_ious + pair_wise_nwd)
+        )
 
-        # FOOTPRINT-AWARE THRESHOLDED DYNAMIC-K ALLOCATION (Fix 21 & TDE 2.0.4 Safe Recovery):
-        n_cand = min(36, hybrid_overlap.size(1))
+        # CALIBRATED MACRO SIMOTA BOUNDS (Bottlenecks 2 & 9 Fix):
+        n_cand = min(20, hybrid_overlap.size(1))
         topk_overlap, _ = torch.topk(hybrid_overlap, n_cand, dim=1)
 
-        # Rejects low-quality background anchors (overlap < 0.15) from inflating k_dynamic
         tau_overlap = 0.15
         cand_mask = (topk_overlap >= tau_overlap).float()
         dynamic_ks = (topk_overlap * cand_mask).sum(dim=1).round().int()
 
-        # Footprint bounds: Micro in [2, 10]; Macro in [4, 36]
-        n_cells_footprint = (gt_w * gt_h) / (16.0 * 16.0)
-        macro_mask = is_macro.squeeze(-1)
-        k_max_macro = torch.clamp((0.35 * n_cells_footprint.squeeze(-1)).round().int(), min=12, max=36)
-        max_k = torch.where(macro_mask, k_max_macro, 10)
-        min_k = torch.where(macro_mask, 4, 2)
-
-        # min_k guarantee: Even if 0 candidates pass 0.15, min_k guarantees targets are never orphaned!
+        max_k = torch.where(macro_mask, 16, 10)
+        min_k = torch.where(macro_mask, 3, 2)
         dynamic_ks = torch.max(min_k, torch.min(max_k, dynamic_ks))
 
         gt_cls_per_image = F.one_hot(gt_classes.to(torch.int64), self.num_classes).float()
@@ -667,9 +670,10 @@ class TDE_Head(YOLOXHead):
         else:
             current_nwd_weight = 0.25
 
+        # HARMONIZED MATCHING COST:
         area_gt = torch.clamp(gt_w * gt_h, min=1.0)
         gamma_scale_gt = torch.exp(-area_gt / 1000.0)
-        cost_nwd_w = current_nwd_weight * (1.0 + gamma_scale_gt)
+        cost_nwd_w = current_nwd_weight * gamma_scale_gt  # Matches loss_nwd directly!
 
         cost = (
             pair_wise_cls_loss

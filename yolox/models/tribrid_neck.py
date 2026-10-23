@@ -334,7 +334,8 @@ class BQSA_P3_Assist(nn.Module):
 
 class ScaleAttnRes(nn.Module):
     """
-    Hybrid GRC Highway: Multi-Scale Attention Routing + Pretrained CSPLayer Refinement.
+    Hybrid GRC Highway: True Zero-Centered Residual Delta (Bottleneck 1 Fix).
+    Eliminates the 2.0x activation explosion entering head.stems.
     """
     def __init__(self, dim, num_sources=3, **kwargs):
         super().__init__()
@@ -346,21 +347,21 @@ class ScaleAttnRes(nn.Module):
         self.norm = RMSNorm(dim, eps=1e-5)
         
         prior_logits = torch.zeros(num_sources)
-        prior_logits[0] = 4.0
+        prior_logits[-1] = 4.0  # Base trunk is the last source
         self.register_buffer("prior_logits", prior_logits.view(-1, 1, 1, 1, 1))
 
         self.refine = CSPLayer(dim, dim, n=1, shortcut=True, expansion=0.5, depthwise=False, act="silu")
-        
-        # STEP-0 QUAD-ZERO IDENTITY GUARD:
         nn.init.zeros_(self.refine.conv3.conv.weight)
         if self.refine.conv3.conv.bias is not None:
             nn.init.zeros_(self.refine.conv3.conv.bias)
         nn.init.zeros_(self.refine.conv3.bn.weight)
         nn.init.zeros_(self.refine.conv3.bn.bias)
         
+        self.gr_gate = nn.Parameter(torch.full((1, dim, 1, 1), -4.0))
         self.refine_gate = nn.Parameter(torch.full((1, dim, 1, 1), -4.0))
 
     def forward(self, sources):
+        base_k = sources[-1]
         V = torch.stack(sources, dim=0)
         K = torch.stack([self.norm(s) for s in sources], dim=0)
         
@@ -371,7 +372,13 @@ class ScaleAttnRes(nn.Module):
         weights = F.softmax(logits_biased.float(), dim=0).to(V.dtype)
         
         out_routed = torch.sum(weights * V, dim=0)
-        delta_csp = self.refine(out_routed)
+        
+        # ZERO-CENTERED DELTA: On Step 0, out_routed ≈ base_k => delta ≈ 0.00000
+        routing_delta = out_routed - base_k
+        gate_routing = torch.sigmoid(self.gr_gate)
+        
+        delta_csp = self.refine(base_k)
         gate_refine = torch.sigmoid(self.refine_gate)
         
-        return out_routed + gate_refine * delta_csp
+        total_delta = gate_routing * routing_delta + gate_refine * delta_csp
+        return total_delta
