@@ -260,7 +260,7 @@ class Focus(nn.Module):
     def __init__(self, in_channels, out_channels, ksize=1, stride=1, act="silu"):
         super().__init__()
         # Input has in_channels * 4 after space-to-depth slicing (e.g. 12 channels)
-        self.conv = BaseConvGN(in_channels * 4, out_channels, ksize, stride, act=act)
+        self.conv = BaseConv(in_channels * 4, out_channels, ksize, stride, act=act)
 
     def forward(self, x):
         patch_top_left = x[..., ::2, ::2]

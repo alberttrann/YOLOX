@@ -13,7 +13,53 @@ from .yolo_head import YOLOXHead
 from .yolo_pafpn import YOLOPAFPN
 from .aux_semantic_head import BoxOccupancyTargetGenerator, ActiveClassFocalDiceLoss
 
+@torch.no_grad()
+def build_dam_block_targets_untruncated(fg_masks, hw_list, strides, num_h, num_w, block_px):
+    """
+    Untruncated Binary DAM Target Generator (Solution A).
+    - Zero label noise: Every block containing a positive anchor is labeled 1.0 deterministically.
+    - Scorer learns true probability P(object present | features).
+    - Selection is TopK(s, k) based on learned confidence s_b.
+    """
+    B = fg_masks.shape[0]
+    N = num_h * num_w
 
+    expected_anchors = sum(h * w for h, w in hw_list)
+    assert fg_masks.dim() == 2, f"fg_masks must be [B, A], got shape {fg_masks.shape}"
+    assert fg_masks.shape[1] == expected_anchors, (
+        f"fg_masks anchor count mismatch: {fg_masks.shape[1]} vs expected {expected_anchors}"
+    )
+
+    level_presences = []
+    off = 0
+    for (h, w), s in zip(hw_list, strides):
+        n = h * w
+        m = fg_masks[:, off:off + n].float().view(B, 1, h, w)
+        off += n
+        r = block_px // s  # 8 for P3, 4 for P4, 2 for P5
+
+        has_pos = (F.max_pool2d(m, kernel_size=r, stride=r) > 0).float()
+        level_presences.append(has_pos.flatten(1))
+
+    # Binary presence across ANY level: shape [B, N], values strictly in {0.0, 1.0}
+    target = torch.stack(level_presences, dim=1).max(dim=1).values
+    return target
+
+
+def dam_indexer_loss(block_scores, fg_masks, hw_list, bqsa, strides=(8, 16, 32)):
+    """Computes BCE loss against the Untruncated DAM target and tracks diagnostic recall."""
+    H4, W4 = hw_list[1]
+    num_h, num_w = bqsa.block_grid(H4, W4)
+    k = bqsa.num_selected(num_h * num_w)
+    
+    target = build_dam_block_targets_untruncated(fg_masks, hw_list, strides, num_h, num_w, bqsa.block_px)
+    loss = F.binary_cross_entropy_with_logits(block_scores.float(), target)
+    
+    with torch.no_grad():
+        sel = torch.zeros_like(target).scatter_(1, torch.topk(block_scores.detach(), k, dim=1).indices, 1.0)
+        recall = (sel * target).sum() / target.sum().clamp(min=1.0)
+        
+    return loss, recall
 class YOLOX(nn.Module):
     """
     TDE-YOLOX v3.7 Master Architecture Host.
@@ -33,13 +79,7 @@ class YOLOX(nn.Module):
         self.head = head
         self.num_classes = head.num_classes
 
-        # Welch-Bound Aligned Margins with Directed Rider-Motor Separation
-        self.repulse_loss = PrototypeRepulsionLoss(
-            num_classes=self.num_classes,
-            num_modes=64,
-            m_intra=0.25,
-            m_inter=0.15
-        )
+        
 
         self.sem_loss_fn = ActiveClassFocalDiceLoss()
 
@@ -64,8 +104,8 @@ class YOLOX(nn.Module):
         current_tau = tau_min + 0.5 * (tau_max - tau_min) * (1.0 + math.cos(progress * math.pi))
 
         neck_ref = self.backbone.module if hasattr(self.backbone, "module") else self.backbone
-        if hasattr(neck_ref, "p4_bqsa") and hasattr(neck_ref.p4_bqsa, "set_tau"):
-            neck_ref.p4_bqsa.set_tau(current_tau)
+        if hasattr(neck_ref, "bqsa_p4") and hasattr(neck_ref.bqsa_p4, "set_tau"):
+            neck_ref.bqsa_p4.set_tau(current_tau)
 
     def _get_ttt_probability(self):
         return 1.0
@@ -90,7 +130,7 @@ class YOLOX(nn.Module):
         current_ttt_prob = self._get_ttt_probability()
 
         # 1. Forward through Backbone & BQSA Neck
-        neck_output, cma_loss, phase_loss, indexer_loss, sem_pred = self.backbone(
+        neck_output, cma_loss, phase_loss, p4_block_scores, sem_pred = self.backbone(
             x, targets=targets, ttt_prob=current_ttt_prob,
             epoch=self.current_epoch, max_epochs=self.max_epochs
         )
@@ -107,13 +147,17 @@ class YOLOX(nn.Module):
                 aux_mem_logits, cls_targets_concat, fg_masks_concat, expanded_strides
             )
 
-            # 4. Prototype Margin Repulsion Loss on S^127
+            # 4. Canonical Prototype Orthogonal Separation on S^127 (9 Classes)
             head_ref = self.head.module if hasattr(self.head, "module") else self.head
             if hasattr(head_ref, "memory_banks"):
-                repulse_losses = [
-                    self.repulse_loss(bank.prototypes) for bank in head_ref.memory_banks
-                ]
-                total_repulse_loss = sum(repulse_losses) / float(len(repulse_losses))
+                rep_losses = []
+                for bank in head_ref.memory_banks:
+                    p = F.normalize(bank.prototypes.float(), p=2, dim=-1)
+                    sim = torch.matmul(p, p.t())  # Shape [9, 9]
+                    # Penalize positive dot-product overlap between different classes
+                    off_diag = sim * (1.0 - torch.eye(self.num_classes, device=x.device))
+                    rep_losses.append(torch.clamp(off_diag, min=0.0).pow(2).mean())
+                total_repulse_loss = sum(rep_losses) / float(len(rep_losses))
             else:
                 total_repulse_loss = torch.tensor(0.0, device=x.device)
 
@@ -127,26 +171,29 @@ class YOLOX(nn.Module):
             else:
                 raw_sem_loss = torch.tensor(0.0, device=x.device)
 
+            # 6. DOWNSTREAM SIMOTA DAM INDEXER LOSS (Sparse-DETR) - PLACED HERE IN FORWARD!
+            neck_ref = self.backbone.module if hasattr(self.backbone, "module") else self.backbone
+            hw_list = [tuple(f.shape[-2:]) for f in neck_output[0]]
+            indexer_loss, idx_recall = dam_indexer_loss(
+                p4_block_scores, fg_masks_concat, hw_list, neck_ref.bqsa_p4
+            )
+
             # -------------------------------------------------------------
-            # MASTER "EARN-YOUR-INFLUENCE" CURRICULUM SYNTHESIS (v3.7)
+            # MASTER "EARN-YOUR-INFLUENCE" CURRICULUM SYNTHESIS
             # -------------------------------------------------------------
             aux_mult = self._get_aux_multiplier()
             current_ep = float(self.current_epoch) if self.current_epoch > 0 else 1.0
 
-            # Early Warmup Schedules:
-            # Epochs 1-3 hold auxiliary gradient pressure at ~0 to let pre-trained YOLOX adapt cleanly
-            aux_ramp_10 = min(1.0, max(0.0, (current_ep - 3.0) / 10.0))  # Ramps 0.0 -> 1.0 (E4 to E13)
-            cma_ramp = min(1.0, current_ep / 10.0)                         # CMA loss ramp
-            phase_ramp = min(1.0, current_ep / 5.0)                       # Fourier phase ramp
-            lambda_idx_base = self._get_indexer_loss_weight()              # Indexer schedule (0.10 -> 0.01)
+            aux_ramp_10 = min(1.0, max(0.0, (current_ep - 3.0) / 10.0))
+            cma_ramp = min(1.0, current_ep / 10.0)
+            phase_ramp = min(1.0, current_ep / 5.0)
 
-            # Calibrated Auxiliary Loss Multipliers:
-            lambda_sem   = 0.015 * aux_ramp_10 * aux_mult  # Zone 6 Fix: Zero on Day 1!
-            lambda_mem   = 0.040 * aux_ramp_10 * aux_mult  # Zone 7 Fix: Zero on Day 1!
+            lambda_sem   = 0.015 * aux_ramp_10 * aux_mult
+            lambda_mem   = 0.040 * aux_ramp_10 * aux_mult
             lambda_cma   = 0.050 * cma_ramp * aux_mult
             lambda_phase = 0.030 * phase_ramp * aux_mult
             lambda_rep   = 0.030 * aux_mult
-            lambda_idx   = lambda_idx_base * aux_mult
+            lambda_idx   = 1.000  # Fixed weight independent of aux_mult so scorer trains continuously
 
             total_loss = (
                 total_det_loss
@@ -170,6 +217,7 @@ class YOLOX(nn.Module):
                 "proj_loss": cma_loss,
                 "phase_loss": phase_loss,
                 "idx_loss": indexer_loss,
+                "idx_recall": idx_recall.detach(),
                 "rep_loss": total_repulse_loss,
                 "sem_loss": raw_sem_loss,
                 "num_fg": num_fg_ratio,

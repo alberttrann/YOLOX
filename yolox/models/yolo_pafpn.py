@@ -85,15 +85,16 @@ class YOLOPAFPN(nn.Module):
         # P5 Dense Attention Residual
         p5_feat, p5_saliency, h_ratio = self.p5_dense_attn(c5, h_atmo=h_atmo)
 
-        # Top-Down P4
-        p5_lat = self.lateral_c5(p5_feat)  # Dimension-reduced C5 -> C4
+        # Top-Down P4: Clean BQSA Assist
+        p5_lat = self.lateral_c5(p5_feat)
         p5_up = F.interpolate(p5_lat, size=c4.shape[-2:], mode="nearest")
         p4_base = self.C3_p4(torch.cat([p5_up, c4], dim=1))
-        p4_delta, p4_indices, indexer_loss = self.bqsa_p4(p4_base, p5_saliency=p5_saliency, h_s=h_ratio, targets=targets)
+        
+        p4_delta, p4_indices, p4_block_scores = self.bqsa_p4(p4_base)
         p4_out = p4_base + p4_delta
 
         # Top-Down P3
-        p4_lat = self.reduce_p4(p4_out)  # Dimension-reduced C4 -> C3
+        p4_lat = self.reduce_p4(p4_out)
         p4_up = F.interpolate(p4_lat, size=c3.shape[-2:], mode="nearest")
         p3_base = self.C3_p3(torch.cat([p4_up, c3], dim=1))
         p3_delta, _ = self.bqsa_p3(p3_base, inherited_topk_idx=p4_indices)
@@ -119,4 +120,4 @@ class YOLOPAFPN(nn.Module):
         else:
             sem_pred = None
 
-        return ((n3_out, n4_out, n5_out), (p3_out, p4_out, p5_feat), h_ratio), cma_loss, phase_loss, indexer_loss, sem_pred
+        return ((n3_out, n4_out, n5_out), (p3_out, p4_out, p5_feat), h_ratio), cma_loss, phase_loss, p4_block_scores, sem_pred

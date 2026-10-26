@@ -13,48 +13,58 @@ from .ttt_modules import TTTAdaptiveStage
 
 class DarkChannelTurbiditySensor(nn.Module):
     """
-    Physical Dark Channel Atmospheric Turbidity Estimator (Koschmieder Law).
-    Computes optical airlight extinction directly from unnormalized input photons:
-      - Clean daylight & clear nights: h_atmo = 0.00000 (Memory Gate remains closed).
-      - Dense fog, blizzards, rain mist: h_atmo in [0.65, 1.00] (Engages Memory Gate).
-    Invariant to scene texture density; immune to Softmax concentration of measure.
+    Physical Dual-Mode Adverse Condition Sensor:
+      1. Atmospheric Extinction (Fog/Snow): Evaluated via Dark Channel on lower 65% ground ROI.
+      2. Photon Starvation (Night/Tunnels): Evaluated via scene luminance over ground plane.
+      - Clean daylight: atmo_severity = 0.0, night_severity = 0.0 => adverse = 0.00000!
+      - Fog / Snow: atmo_severity in [0.65, 1.00] => adverse in [0.65, 1.00]!
+      - Night: atmo_severity = 0.0, night_severity in [0.65, 1.00] => adverse in [0.65, 1.00]!
     """
-    def __init__(self, patch_size=16, tau_clean=0.10, tau_fog=0.38):
+    def __init__(self, patch_size=16, tau_clean=0.10, tau_fog=0.38, tau_night=0.18):
         super().__init__()
         self.patch_size = patch_size
         self.tau_clean = float(tau_clean)
         self.tau_fog = float(tau_fog)
+        self.tau_night = float(tau_night)
 
     @torch.no_grad()
     def forward(self, x):
-        # 1. Scale-Invariant Radiance Normalization to [0.0, 1.0]
-        # Prevents discrepancy between uint8 [0, 255] and float [0, 1] evaluation pipelines
         max_val = x.max()
         scale = 255.0 if max_val > 2.0 else 1.0
         x_norm = x.float() / scale
 
-        # 2. Channel-Wise Minimum Radiance: shape [B, 1, H, W]
-        min_rgb = torch.min(x_norm, dim=1, keepdim=True).values
+        # Ground-Plane Cropping (Lower 65% removes sky and clouds)
+        h_cutoff = int(x_norm.shape[-2] * 0.35)
+        x_ground = x_norm[:, :, h_cutoff:, :]
 
-        # 3. Spatial Patch-Level Minimum Pooling via Inverted MaxPool
-        # Equivalent to min_{(u,v) in Omega} I_c(u,v) over 16x16 local receptive field
+        # 1. Atmospheric Turbidity (Koschmieder Law)
+        min_rgb = torch.min(x_ground, dim=1, keepdim=True).values
         dark_patch = -F.max_pool2d(
             -min_rgb,
             kernel_size=self.patch_size,
             stride=self.patch_size,
             padding=0
-        )  # Output: [B, 1, H//16, W//16]
-
-        # 4. Scene-Wide Airlight Extinction Metric: Mean across all patches
+        )
         mu_dark = dark_patch.mean(dim=[-2, -1])  # Shape: [B, 1]
-
-        # 5. Calibrated Linear Turbidity Ramp
-        h_atmo = torch.clamp(
+        atmo_severity = torch.clamp(
             (mu_dark - self.tau_clean) / (self.tau_fog - self.tau_clean),
             min=0.0,
             max=1.0
         )
-        return h_atmo.to(x.dtype)
+
+        # 2. Low-Light Photon Starvation (Night / Tunnels)
+        # Rec. 601 luma: Y = 0.299R + 0.587G + 0.114B
+        luma = (0.299 * x_ground[:, 0:1] + 0.587 * x_ground[:, 1:2] + 0.114 * x_ground[:, 2:3])
+        mu_luma = luma.mean(dim=[-2, -1])  # Shape: [B, 1]
+        night_severity = torch.clamp(
+            (self.tau_night - mu_luma) / (self.tau_night - 0.05),
+            min=0.0,
+            max=1.0
+        )
+
+        # Unified Adverse Severity Metric
+        adverse_severity = torch.max(atmo_severity, night_severity)
+        return adverse_severity.to(x.dtype)
 
 
 class Darknet(nn.Module):
@@ -141,8 +151,9 @@ class CSPDarknet(nn.Module):
         # 0. PHYSICAL OPTICAL TURBIDITY SENSOR
         self.atmo_sensor = DarkChannelTurbiditySensor(patch_size=16, tau_clean=0.10, tau_fog=0.38)
 
-        # 1. THE GROUPNORM STEM
-        # Instance-level centering on raw pixels cancels uniform airlight shifts
+        # 1. THE PRETRAINED STEM (BaseConv with BatchNorm2d)
+        # Preserves absolute scene luminance (crucial for traffic lights, signs, and night driving)
+        # and matches COCO pre-trained weight distribution.
         self.stem = Focus(3, base_channels, ksize=3, act=act)
 
         # 2. ADAPTIVE STAGE 1 (DARK2) VIA CMA
@@ -273,39 +284,3 @@ class CSPDarknet(nn.Module):
         # Returns physical h_atmo along with features and auxiliary losses
         return selected_outs, cma_loss, phase_loss, h_atmo
     
-class DarkChannelTurbiditySensor(nn.Module):
-    def __init__(self, patch_size=16, tau_clean=0.10, tau_fog=0.38):
-        super().__init__()
-        self.patch_size = patch_size
-        self.tau_clean = float(tau_clean)
-        self.tau_fog = float(tau_fog)
-
-    @torch.no_grad()
-    def forward(self, x):
-        max_val = x.max()
-        scale = 255.0 if max_val > 2.0 else 1.0
-        x_norm = x.float() / scale
-
-        min_rgb = torch.min(x_norm, dim=1, keepdim=True).values
-
-        dark_patch = -F.max_pool2d(
-            -min_rgb,
-            kernel_size=self.patch_size,
-            stride=self.patch_size,
-            padding=0
-        )
-
-        # HORIZON-AWARE ROI CROPPING:
-        # The upper 35% of a dashcam frame is sky/clouds (which violates Dark Channel Prior).
-        # We compute atmospheric turbidity strictly over the lower 65% ground traffic plane:
-        h_start = int(dark_patch.shape[-2] * 0.35)
-        ground_dark = dark_patch[:, :, h_start:, :]
-
-        mu_dark = ground_dark.mean(dim=[-2, -1])  # Shape: [B, 1]
-
-        h_atmo = torch.clamp(
-            (mu_dark - self.tau_clean) / (self.tau_fog - self.tau_clean),
-            min=0.0,
-            max=1.0
-        )
-        return h_atmo.to(x.dtype)

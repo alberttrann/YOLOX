@@ -126,155 +126,119 @@ class P5ExclusiveDenseAttention(nn.Module):
 
 class BQSA_P4_Assist(nn.Module):
     """
-    P4 Dense-to-Sparse Attention Residual Assist.
-    Computes delta on top of pretrained C3_p4 features and evaluates dynamic indexer loss.
+    Sparse-DETR Aligned Block-Queried Attention Residual Assist (v3.8 Final).
+    Features:
+      - Kaiming Proj + Gate (-4.0) Breaks the double-zero deadlock while preserving Step-0 identity (98.2%).
+      - 100% Deterministic Top-K selection in Train & Eval (Zero Gumbel/STE mismatch!).
+      - Detached Scorer Input: Indexer loss trains ONLY the scorer; zero distortion of P4 features.
+      - Global Context Scorer: Global average-pooled channels provide scene-aware block ranking.
     """
-    def __init__(self, c, block_size=4, sparsity_ratio=0.35):
+    def __init__(self, c, block_size=4, sparsity_ratio=0.35, stride=16, detach_scorer_input=True):
         super().__init__()
         self.c = c
         self.block_size = block_size
         self.sparsity_ratio = sparsity_ratio
-        self.tau = 1.0
+        self.block_px = block_size * stride  # 64 px for P4 (bs=4, stride=16)
+        self.detach_scorer_input = detach_scorer_input
 
-        self.rca = UnifiedRCA(self.c)
-        self.rmbconv = UnifiedRMBConv(self.c)
-        self.indexer_norm = RMSNorm(self.c, eps=1e-5)
-        self.indexer = nn.Sequential(
-            nn.Conv2d(self.c, self.c, 3, padding=1, groups=self.c),
-            nn.Conv2d(self.c, 1, 1)
+        self.rca = UnifiedRCA(c)
+        self.rmbconv = UnifiedRMBConv(c)
+
+        # Global-Context Scorer Network
+        self.indexer_norm = RMSNorm(c, eps=1e-5)
+        self.indexer_local = nn.Conv2d(c, c // 2, kernel_size=3, padding=1, groups=c // 2)
+        self.indexer_global = nn.Conv2d(c, c // 2, kernel_size=1)
+        self.indexer_fuse = nn.Sequential(
+            nn.SiLU(),
+            nn.Conv2d(c, 1, kernel_size=1)
         )
         self.pool_alpha = nn.Parameter(torch.tensor(0.0))
-        self.qkv = nn.Conv2d(self.c, self.c * 3, 1)
 
-        # Step-0 Identity Guards
-        self.proj = nn.Conv2d(self.c, self.c, 1, bias=False)
-        nn.init.zeros_(self.proj.weight)
-        self.gr_gate = nn.Parameter(torch.full((1, self.c, 1, 1), -4.0))
+        self.qkv = nn.Conv2d(c, c * 3, 1)
 
-    def set_tau(self, tau):
-        self.tau = tau
+        # BREAKING THE DEADLOCK:
+        # Kaiming uniform on proj ensure dL/d(gr_gate) is non-zero from Iteration 0!
+        # gr_gate = -4.0 alone provides 98.2% Step-0 identity protection.
+        self.proj = nn.Conv2d(c, c, 1, bias=False)
+        nn.init.kaiming_uniform_(self.proj.weight, a=1.0)
+        self.gr_gate = nn.Parameter(torch.full((1, c, 1, 1), -4.0))
 
-    def _rasterize_gt_blocks(self, targets, batch_size, num_h, num_w, device):
-        if targets is None or targets.shape[0] == 0:
-            return torch.zeros(batch_size, num_h * num_w, device=device)
+    def block_grid(self, H, W):
+        bs = min(self.block_size, H, W)
+        return H // bs, W // bs
 
-        valid = (targets[:, :, 3] > 0) & (targets[:, :, 4] > 0)
-        x1 = targets[:, :, 1] - targets[:, :, 3] / 2.0
-        y1 = targets[:, :, 2] - targets[:, :, 4] / 2.0
-        x2 = targets[:, :, 1] + targets[:, :, 3] / 2.0
-        y2 = targets[:, :, 2] + targets[:, :, 4] / 2.0
+    def num_selected(self, total_blocks):
+        k_target = int(round(self.sparsity_ratio * float(total_blocks)))
+        return max(24, min(48, k_target)) if total_blocks >= 24 else max(1, total_blocks)
 
-        c_min = (x1 / 64.0).floor().clamp(0, num_w - 1).long()
-        c_max = ((x2 - 1e-4) / 64.0).floor().clamp(0, num_w - 1).long()
-        r_min = (y1 / 64.0).floor().clamp(0, num_h - 1).long()
-        r_max = ((y2 - 1e-4) / 64.0).floor().clamp(0, num_h - 1).long()
-
-        gy, gx = torch.meshgrid(torch.arange(num_h, device=device), torch.arange(num_w, device=device), indexing="ij")
-        gx = gx.view(1, 1, num_h, num_w)
-        gy = gy.view(1, 1, num_h, num_w)
-
-        in_x = (gx >= c_min.unsqueeze(-1).unsqueeze(-1)) & (gx <= c_max.unsqueeze(-1).unsqueeze(-1))
-        in_y = (gy >= r_min.unsqueeze(-1).unsqueeze(-1)) & (gy <= r_max.unsqueeze(-1).unsqueeze(-1))
-        
-        in_box = in_x & in_y & valid.unsqueeze(-1).unsqueeze(-1)
-        return in_box.any(dim=1).float().view(batch_size, -1)
-
-    def forward(self, x, p5_saliency, h_s, targets=None):
+    def forward(self, x):
         B, C, H, W = x.shape
         bs = min(self.block_size, H, W)
-        num_h, num_w = H // bs, W // bs
+        num_h, num_w = self.block_grid(H, W)
         total_blocks = num_h * num_w
         tokens_per_b = bs * bs
-
-        k_target = int(round(self.sparsity_ratio * float(total_blocks)))
-        k_actual = max(24, min(48, k_target)) if total_blocks >= 24 else max(1, total_blocks)
+        k_actual = self.num_selected(total_blocks)
 
         feat_cond = self.rca(self.rmbconv(x))
-        s_up = F.interpolate(p5_saliency.float(), size=(H, W), mode='nearest')
-        block_saliency = F.avg_pool2d(s_up, kernel_size=bs, stride=bs).view(B, -1)
 
-        var_saliency = torch.var(block_saliency, dim=-1, keepdim=True, unbiased=False)
-        p5_macro = (block_saliency - block_saliency.mean(dim=-1, keepdim=True)) / \
-                   torch.sqrt(torch.clamp(var_saliency, min=1e-8)) if total_blocks > 1 else torch.zeros_like(block_saliency)
+        # 1. SCORER (Detached from detection trunk to preserve P4 representation)
+        s_in = feat_cond.detach() if self.detach_scorer_input else feat_cond
+        s_in = self.indexer_norm(s_in)
+        f_loc = self.indexer_local(s_in)
+        f_glo = self.indexer_global(F.adaptive_avg_pool2d(s_in, (1, 1))).expand(-1, -1, H, W)
+        scores = self.indexer_fuse(torch.cat([f_loc, f_glo], dim=1)).float()
 
-        scores = self.indexer(self.indexer_norm(feat_cond))
-        scores_avg = F.avg_pool2d(scores, kernel_size=bs, stride=bs).view(B, -1)
-        scores_max = F.max_pool2d(scores, kernel_size=bs, stride=bs).view(B, -1)
-        alpha = torch.sigmoid(self.pool_alpha)
-        block_scores = alpha * scores_max + (1.0 - alpha) * scores_avg
+        s_avg = F.avg_pool2d(scores, kernel_size=bs, stride=bs).view(B, -1)
+        s_max = F.max_pool2d(scores, kernel_size=bs, stride=bs).view(B, -1)
+        alpha = torch.sigmoid(self.pool_alpha.float())
+        block_scores = alpha * s_max + (1.0 - alpha) * s_avg  # [B, N] fp32 logits
 
-        var_bs = torch.var(block_scores, dim=-1, keepdim=True, unbiased=False)
-        bs_norm = (block_scores - block_scores.mean(dim=-1, keepdim=True)) / \
-                  torch.sqrt(torch.clamp(var_bs, min=1e-6)) if total_blocks > 1 else torch.zeros_like(block_scores)
+        # 2. 100% DETERMINISTIC TOP-K SELECTION (Train & Eval Identical)
+        topk_idx = torch.topk(block_scores.detach(), k_actual, dim=-1).indices
 
-        candidate_scores_fp32 = bs_norm.float() + 0.15 * p5_macro
-
-        if self.training:
-            h_stat = h_s.float().view(B, -1)[:, :1].clamp(0.0, 1.0) if torch.is_tensor(h_s) and h_s.numel() >= B else torch.tensor(float(h_s), device=x.device).view(1, 1).clamp(0.0, 1.0)
-            tau_adaptive = torch.clamp(self.tau * (1.0 - 0.35 * h_stat), min=0.10)
-            u1, u2 = torch.rand_like(candidate_scores_fp32), torch.rand_like(candidate_scores_fp32)
-            gumbel = torch.log(u1 + 1e-7) - torch.log(u2 + 1e-7)
-            soft_scores = torch.sigmoid((candidate_scores_fp32 + gumbel) / tau_adaptive).to(x.dtype)
-            
-            _, topk_idx = torch.topk(soft_scores, k_actual, dim=-1)
-            hard_mask = torch.zeros_like(soft_scores).scatter_(-1, topk_idx, 1.0)
-            ste_mask = (hard_mask - soft_scores).detach() + soft_scores
-            ste_weights = torch.gather(ste_mask, -1, topk_idx).unsqueeze(-1).unsqueeze(-1)
-        else:
-            _, topk_idx = torch.topk(candidate_scores_fp32, k_actual, dim=-1)
-            ste_weights = 1.0
-
+        # 3. DENSE Q, SPARSE K/V WITH AMBIENT QUAD TOKENS
         qkv = self.qkv(feat_cond).view(B, 3, C, H, W)
         q, k, v = qkv[:, 0], qkv[:, 1], qkv[:, 2]
 
-        k_b = k.view(B, C, num_h, bs, num_w, bs).permute(0, 2, 4, 1, 3, 5).reshape(B, total_blocks, C, tokens_per_b)
-        v_b = v.view(B, C, num_h, bs, num_w, bs).permute(0, 2, 4, 1, 3, 5).reshape(B, total_blocks, C, tokens_per_b)
+        def to_blocks(t):
+            return (t.reshape(B, C, num_h, bs, num_w, bs)
+                     .permute(0, 2, 4, 1, 3, 5).reshape(B, total_blocks, C, tokens_per_b))
 
-        idx_exp = topk_idx.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, C, tokens_per_b)
-        
-        # FIXED RESHAPES (Guarantees shape [B, C, K * tokens] for both k_sel and v_sel)
-        k_sel = torch.gather(k_b, 1, idx_exp).permute(0, 2, 1, 3).reshape(B, C, k_actual * tokens_per_b)
-        v_sel = (torch.gather(v_b, 1, idx_exp) * ste_weights).permute(0, 2, 1, 3).reshape(B, C, k_actual * tokens_per_b)
+        idx = topk_idx[:, :, None, None].expand(-1, -1, C, tokens_per_b)
+        k_sel = torch.gather(to_blocks(k), 1, idx).permute(0, 2, 1, 3).reshape(B, C, k_actual * tokens_per_b)
+        v_sel = torch.gather(to_blocks(v), 1, idx).permute(0, 2, 1, 3).reshape(B, C, k_actual * tokens_per_b)
 
         k_quad = F.adaptive_avg_pool2d(k, (2, 2)).view(B, C, 4)
         v_quad = F.adaptive_avg_pool2d(v, (2, 2)).view(B, C, 4)
-        
-        rms_k_loc = torch.sqrt(k_sel.float().pow(2).mean(dim=[1, 2], keepdim=True) + 1e-5)
-        rms_k_amb = torch.sqrt(k_quad.float().pow(2).mean(dim=[1, 2], keepdim=True) + 1e-5)
-        k_quad_scaled = (k_quad.float() * torch.clamp(rms_k_loc / rms_k_amb, 0.1, 10.0)).to(k.dtype)
 
-        rms_v_loc = torch.sqrt(v_sel.float().pow(2).mean(dim=[1, 2], keepdim=True) + 1e-5)
-        rms_v_amb = torch.sqrt(v_quad.float().pow(2).mean(dim=[1, 2], keepdim=True) + 1e-5)
-        v_quad_scaled = (v_quad.float() * torch.clamp(rms_v_loc / rms_v_amb, 0.1, 10.0)).to(v.dtype)
+        # Clamped RMS matching
+        rms_k_loc = torch.sqrt(k_sel.float().pow(2).mean(dim=(1, 2), keepdim=True) + 1e-5)
+        rms_k_amb = torch.sqrt(k_quad.float().pow(2).mean(dim=(1, 2), keepdim=True) + 1e-5)
+        k_quad = (k_quad.float() * torch.clamp(rms_k_loc / rms_k_amb, min=0.10, max=10.0)).to(k.dtype)
 
-        k_all = torch.cat([k_sel, k_quad_scaled], dim=-1)
-        v_all = torch.cat([v_sel, v_quad_scaled], dim=-1)
+        rms_v_loc = torch.sqrt(v_sel.float().pow(2).mean(dim=(1, 2), keepdim=True) + 1e-5)
+        rms_v_amb = torch.sqrt(v_quad.float().pow(2).mean(dim=(1, 2), keepdim=True) + 1e-5)
+        v_quad = (v_quad.float() * torch.clamp(rms_v_loc / rms_v_amb, min=0.10, max=10.0)).to(v.dtype)
 
-        # Dense-to-Sparse Query Execution
+        k_all = torch.cat([k_sel, k_quad], dim=-1)
+        v_all = torch.cat([v_sel, v_quad], dim=-1)
+
         q_flat = q.reshape(B, C, H * W).transpose(-2, -1).float()
-        ambient_bias = torch.zeros(1, 1, k_all.shape[-1], device=x.device, dtype=torch.float32)
-        ambient_bias[..., -4:] = 0.50
-        logits_fp32 = torch.matmul(q_flat, k_all.float()) * (C ** -0.5) + ambient_bias
-        attn_fp32 = F.softmax(logits_fp32, dim=-1)
+        logits = torch.matmul(q_flat, k_all.float()) * (C ** -0.5)
+        bias = torch.zeros(k_all.shape[-1], device=logits.device, dtype=logits.dtype)
+        bias[-4:] = 0.50
+        attn = F.softmax(logits + bias, dim=-1)
 
-        context = torch.matmul(v_all.float(), attn_fp32.transpose(-2, -1)).to(v_all.dtype).reshape(B, C, H, W)
-        gate = torch.sigmoid(self.gr_gate)
+        context = torch.matmul(v_all.float(), attn.transpose(-2, -1)).to(v_all.dtype).reshape(B, C, H, W)
+        delta = torch.sigmoid(self.gr_gate) * self.proj(context)
         
-        indexer_loss = torch.tensor(0.0, device=x.device)
-        if self.training and targets is not None:
-            f_target = self._rasterize_gt_blocks(targets, B, num_h, num_w, x.device)
-            p_b = torch.sigmoid(block_scores.float())
-            p_t = p_b * f_target.float() + (1.0 - p_b) * (1.0 - f_target.float())
-            focal_weight = ((0.85 * f_target + 0.15 * (1.0 - f_target)) * (1.0 - p_t).pow(2.0)).detach()
-            indexer_loss = (focal_weight * F.binary_cross_entropy_with_logits(block_scores.float(), f_target, reduction="none")).mean()
-
-        return gate * self.proj(context), topk_idx, indexer_loss
+        return delta, topk_idx, block_scores
 
 
 class BQSA_P3_Assist(nn.Module):
     """
-    P3 Block-Local Attention Residual Assist.
-    Computes delta on top of pretrained C3_p3 features, inheriting P4 top-k indices.
+    P3 Block-Local Attention Residual Assist (v3.8 Final).
+    Consumes P4's top-k indices deterministically; initialized with Kaiming proj.
     """
     def __init__(self, c, block_size=8, sparsity_ratio=0.35):
         super().__init__()
@@ -286,9 +250,8 @@ class BQSA_P3_Assist(nn.Module):
         self.rmbconv = UnifiedRMBConv(self.c)
         self.qkv = nn.Conv2d(self.c, self.c * 3, 1)
 
-        # Step-0 Identity Guards
         self.proj = nn.Conv2d(self.c, self.c, 1, bias=False)
-        nn.init.zeros_(self.proj.weight)
+        nn.init.kaiming_uniform_(self.proj.weight, a=1.0)
         self.gr_gate = nn.Parameter(torch.full((1, self.c, 1, 1), -4.0))
 
     def forward(self, x, inherited_topk_idx):
@@ -311,16 +274,13 @@ class BQSA_P3_Assist(nn.Module):
         valid_idx = torch.clamp(inherited_topk_idx[:, :k_actual], 0, total_blocks - 1)
         idx_exp = valid_idx.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, C, tokens_per_b)
 
-        # FIXED RESHAPES: Ensure shapes are [B, C, K * tokens] before batch matrix multiply
         q_loc = torch.gather(q_b, 1, idx_exp).permute(0, 2, 1, 3).reshape(B, C, k_actual * tokens_per_b).transpose(-2, -1)
         k_loc = torch.gather(k_b, 1, idx_exp).permute(0, 2, 1, 3).reshape(B, C, k_actual * tokens_per_b)
         v_loc = torch.gather(v_b, 1, idx_exp).permute(0, 2, 1, 3).reshape(B, C, k_actual * tokens_per_b).transpose(-2, -1)
 
-        # Block-Local Sparse-to-Sparse Attention
         attn_fp32 = F.softmax(torch.bmm(q_loc.float(), k_loc.float()) * (C ** -0.5), dim=-1)
         ctx_loc = torch.bmm(attn_fp32, v_loc.float()).to(v.dtype).reshape(B, k_actual, tokens_per_b, C)
 
-        # Zero-Delta Bypass
         delta_flat = torch.zeros(B, total_blocks, C * tokens_per_b, device=x.device, dtype=ctx_loc.dtype)
         idx_flat = valid_idx.unsqueeze(-1).expand(-1, -1, C * tokens_per_b)
         ctx_flat = ctx_loc.permute(0, 1, 3, 2).reshape(B, k_actual, C * tokens_per_b)
@@ -351,10 +311,12 @@ class ScaleAttnRes(nn.Module):
         self.register_buffer("prior_logits", prior_logits.view(-1, 1, 1, 1, 1))
 
         self.refine = CSPLayer(dim, dim, n=1, shortcut=True, expansion=0.5, depthwise=False, act="silu")
+        # Step-0 Identity Guard: Zero the conv kernel so refine output === 0.00000 on Day 1!
         nn.init.zeros_(self.refine.conv3.conv.weight)
         if self.refine.conv3.conv.bias is not None:
             nn.init.zeros_(self.refine.conv3.conv.bias)
-        nn.init.zeros_(self.refine.conv3.bn.weight)
+        # Keep BatchNorm active so backward gradients flow smoothly through the block!
+        nn.init.ones_(self.refine.conv3.bn.weight)
         nn.init.zeros_(self.refine.conv3.bn.bias)
         
         self.gr_gate = nn.Parameter(torch.full((1, dim, 1, 1), -4.0))

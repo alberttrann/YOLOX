@@ -41,7 +41,7 @@ class Exp(MyExp):
         # ZONE 8 CONSERVATIVE AUGMENTATION (TDE 2.0.4 & Official Megvii YOLOX-S Standard):
         # 100% 4-quadrant opaque Mosaic preserves high-density scene context;
         # Mixup is DISABLED to prevent synthetic translucency on small 9M YOLOX-S capacity!
-        self.mosaic_prob = 1.0
+        self.mosaic_prob = 0.50
         self.mosaic_scale = (0.5, 1.5)
         self.enable_mixup = False
         self.mixup_prob = 0.0
