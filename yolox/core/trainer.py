@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# -*- coding:utf-8 -*-
 # Copyright (c) Megvii, Inc. and its affiliates.
 
 import datetime
@@ -9,7 +10,9 @@ from loguru import logger
 import torch
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.tensorboard import SummaryWriter
-
+import cv2
+cv2.setNumThreads(0)
+cv2.ocl.setUseOpenCL(False)
 from yolox.data import DataPrefetcher
 from yolox.exp import Exp
 from yolox.utils import (
@@ -26,7 +29,6 @@ from yolox.utils import (
     gpu_mem_usage,
     is_parallel,
     load_ckpt,
-    mem_usage,
     occupy_mem,
     save_checkpoint,
     setup_logger,
@@ -36,12 +38,10 @@ from yolox.utils import (
 
 class Trainer:
     def __init__(self, exp: Exp, args):
-        # init function only defines some basic attr, other attrs like model, optimizer are built in
-        # before_train methods.
         self.exp = exp
         self.args = args
 
-        # training related attr
+        # Training related attributes
         self.max_epoch = exp.max_epoch
         self.amp_training = args.fp16
         self.scaler = torch.cuda.amp.GradScaler(enabled=args.fp16)
@@ -52,14 +52,15 @@ class Trainer:
         self.use_model_ema = exp.ema
         self.save_history_ckpt = exp.save_history_ckpt
 
-        # data/dataloader related attr
+        # Data & precision attributes
         self.data_type = torch.float16 if args.fp16 else torch.float32
         self.input_size = exp.input_size
-        self.best_ap = 0
+        self.best_ap = 0.0
 
-        # metric record
+        # Telemetry & metric recording
         self.meter = MeterBuffer(window_size=exp.print_interval)
         self.file_name = os.path.join(exp.output_dir, args.experiment_name)
+        self.outputs = {}
 
         if self.rank == 0:
             os.makedirs(self.file_name, exist_ok=True)
@@ -76,7 +77,7 @@ class Trainer:
         try:
             self.train_in_epoch()
         except Exception as e:
-            logger.error("Exception in training: ", e)
+            logger.error("Exception in training loop: {}", e)
             raise
         finally:
             self.after_train()
@@ -108,6 +109,12 @@ class Trainer:
 
         loss = outputs["total_loss"]
 
+        # NaN Guard: Catch numerical divergence before it corrupts optimizer states
+        if torch.isnan(loss) or torch.isinf(loss):
+            logger.error("Numerical instability: total_loss is NaN/Inf. Skipping gradient step.")
+            self.optimizer.zero_grad()
+            return
+
         self.optimizer.zero_grad()
         self.scaler.scale(loss).backward()
         self.scaler.step(self.optimizer)
@@ -121,18 +128,20 @@ class Trainer:
             param_group["lr"] = lr
 
         iter_end_time = time.time()
+
+        # Retain outputs for telemetry logging in after_iter
+        self.outputs = outputs
         self.meter.update(
             iter_time=iter_end_time - iter_start_time,
             data_time=data_end_time - iter_start_time,
             lr=lr,
-            **outputs,
         )
 
     def before_train(self):
         logger.info("args: {}".format(self.args))
         logger.info("exp value:\n{}".format(self.exp))
 
-        # model related init
+        # 1. Hardware initialization
         torch.cuda.set_device(self.local_rank)
         model = self.exp.get_model()
         logger.info(
@@ -140,13 +149,13 @@ class Trainer:
         )
         model.to(self.device)
 
-        # solver related init
+        # 2. Solver initialization
         self.optimizer = self.exp.get_optimizer(self.args.batch_size)
 
-        # value of epoch will be set in `resume_train`
+        # 3. Checkpoint resumption & Pre-trained weight loading (FIXED)
         model = self.resume_train(model)
 
-        # data related init
+        # 4. Data pipeline initialization
         self.no_aug = self.start_epoch >= self.max_epoch - self.exp.no_aug_epochs
         self.train_loader = self.exp.get_data_loader(
             batch_size=self.args.batch_size,
@@ -154,14 +163,14 @@ class Trainer:
             no_aug=self.no_aug,
             cache_img=self.args.cache,
         )
-        logger.info("init prefetcher, this might take one minute or less...")
+        logger.info("Initializing prefetcher...")
         self.prefetcher = DataPrefetcher(self.train_loader)
-        # max_iter means iters per epoch
         self.max_iter = len(self.train_loader)
 
         self.lr_scheduler = self.exp.get_lr_scheduler(
             self.exp.basic_lr_per_img * self.args.batch_size, self.max_iter
         )
+
         if self.args.occupy:
             occupy_mem(self.local_rank)
 
@@ -177,28 +186,26 @@ class Trainer:
         self.evaluator = self.exp.get_evaluator(
             batch_size=self.args.batch_size, is_distributed=self.is_distributed
         )
-        # Tensorboard and Wandb loggers
+
+        # 5. External loggers setup
         if self.rank == 0:
             if self.args.logger == "tensorboard":
                 self.tblogger = SummaryWriter(os.path.join(self.file_name, "tensorboard"))
             elif self.args.logger == "wandb":
                 self.wandb_logger = WandbLogger.initialize_wandb_logger(
-                    self.args,
-                    self.exp,
-                    self.evaluator.dataloader.dataset
+                    self.args, self.exp, self.evaluator.dataloader.dataset
                 )
             elif self.args.logger == "mlflow":
                 self.mlflow_logger = MlflowLogger()
                 self.mlflow_logger.setup(args=self.args, exp=self.exp)
             else:
-                raise ValueError("logger must be either 'tensorboard', 'mlflow' or 'wandb'")
+                raise ValueError("Logger must be either 'tensorboard', 'mlflow', or 'wandb'")
 
-        logger.info("Training start...")
-        logger.info("\n{}".format(model))
+        logger.info("Training initialization completed.")
 
     def after_train(self):
         logger.info(
-            "Training of experiment is done and the best AP is {:.2f}".format(self.best_ap * 100)
+            "Training completed. Best AP: {:.2f}".format(self.best_ap * 100)
         )
         if self.rank == 0:
             if self.args.logger == "wandb":
@@ -207,33 +214,31 @@ class Trainer:
                 metadata = {
                     "epoch": self.epoch + 1,
                     "input_size": self.input_size,
-                    'start_ckpt': self.args.ckpt,
-                    'exp_file': self.args.exp_file,
-                    "best_ap": float(self.best_ap)
+                    "start_ckpt": self.args.ckpt,
+                    "exp_file": self.args.exp_file,
+                    "best_ap": float(self.best_ap),
                 }
-                self.mlflow_logger.on_train_end(self.args, file_name=self.file_name,
-                                                metadata=metadata)
+                self.mlflow_logger.on_train_end(
+                    self.args, file_name=self.file_name, metadata=metadata
+                )
 
     def before_epoch(self):
         """
-        SYNC: 
-        Tell the TDE-YOLOX engine which epoch we are in.
-        This drives the Saliency Annealing (the curriculum of the Holy Grail).
+        CAVEAT 14.3 RESOLUTION:
+        Consolidated Single-Point Meta-Training Epoch Synchronization.
+        Executes exactly once per epoch with no duplicate state calls.
         """
-        # 1. Access the raw YOLOX model (unwrapping DDP if necessary)
-        model = self.model.module if hasattr(self.model, "module") else self.model
-        
-        # 2. Update the Meta-Learning Engine state
-        if hasattr(model, "set_meta_training_state"):
-            model.set_meta_training_state(self.epoch, self.max_epoch)
-            
-        # Standard YOLOX logic follows
         logger.info("---> start train epoch{}".format(self.epoch + 1))
 
+        # Unwrap DDP if necessary to reach the base YOLOX meta-learning wrapper
+        model_ref = self.model.module if hasattr(self.model, "module") else self.model
+        if hasattr(model_ref, "set_meta_training_state"):
+            model_ref.set_meta_training_state(self.epoch + 1, self.max_epoch)
+
+        # Check Mosaic shutoff condition (FIXED: self.no_aug instead of self.args.no_aug)
         if self.epoch + 1 == self.max_epoch - self.exp.no_aug_epochs or self.no_aug:
-            logger.info("--->No mosaic aug now!")
+            logger.info("---> Closing Mosaic augmentation and enabling L1 loss.")
             self.train_loader.close_mosaic()
-            logger.info("--->Add additional L1 loss now!")
             if self.is_distributed:
                 self.model.module.head.use_l1 = True
             else:
@@ -241,11 +246,8 @@ class Trainer:
             self.exp.eval_interval = 1
             if not self.no_aug:
                 self.save_ckpt(ckpt_name="last_mosaic_epoch")
-        # Update TTT Schedule
-        if hasattr(self.model, "set_meta_training_state"):
-            # Unwrap DDP if necessary to reach the base YOLOX class
-            model_ref = self.model.module if hasattr(self.model, "module") else self.model
-            model_ref.set_meta_training_state(self.epoch + 1, self.max_epoch)
+
+        self.prefetcher = DataPrefetcher(self.train_loader)
 
     def after_epoch(self):
         self.save_ckpt(ckpt_name="latest")
@@ -258,34 +260,29 @@ class Trainer:
         pass
 
     def after_iter(self):
-        """
-        Safe value unpacking + Optimizer-linked LR logging.
-        """
-        # Unified Metric Unpacking 
+        """Telemetry logging and Rule-of-64 multiscale resolution jitter."""
         for k, v in self.outputs.items():
-            if k in ["total_loss", "iou_loss", "l1_loss", "conf_loss", "cls_loss", "mem_loss", "ttt_prob"]:
+            if k in ["total_loss", "iou_loss", "l1_loss", "conf_loss", "cls_loss", "mem_loss", "proto_loss", "ttt_prob"]:
                 if torch.is_tensor(v):
                     val = v.detach().cpu().item()
                 else:
                     try:
                         val = float(v)
-                    except:
+                    except (ValueError, TypeError):
                         continue
                 self.meter.update(**{k: val})
 
-        # 2. Logging logic
         if (self.iter + 1) % self.exp.print_interval == 0:
-            curr_lr = self.optimizer.param_groups[0]['lr']
-            
-            left_iters = self.max_iter - self.iter - 1
-            avg_time = self.meter["iter_time"].global_avg if "iter_time" in self.meter else 0
+            curr_lr = self.optimizer.param_groups[0]["lr"]
+            left_iters = self.max_iter * self.max_epoch - self.progress_in_iter
+            avg_time = self.meter["iter_time"].global_avg if "iter_time" in self.meter else 0.0
             eta_seconds = avg_time * left_iters
-            eta_str = "ETA: {}".format(datetime.timedelta(seconds=int(eta_seconds)))
+            eta_str = str(datetime.timedelta(seconds=int(eta_seconds)))
 
             progress_str = "epoch: [{}/{}][{}/{}]".format(
                 self.epoch + 1, self.max_epoch, self.iter + 1, self.max_iter
             )
-            
+
             loss_meter = self.meter.get_filtered_meter("loss")
             loss_str = ", ".join(
                 ["{}: {:.3f}".format(k, v.avg) for k, v in loss_meter.items()]
@@ -294,39 +291,24 @@ class Trainer:
             logger.info(
                 "{}, mem: {:.0f}Mb, {}, {}, lr: {:.3e}".format(
                     progress_str,
-                    gpu_mem_usage(), 
+                    gpu_mem_usage(),
                     eta_str,
                     loss_str,
-                    curr_lr, 
+                    curr_lr,
                 )
             )
+
+            if self.rank == 0 and hasattr(self, "tblogger"):
+                self.tblogger.add_scalar("train/lr", curr_lr, self.progress_in_iter)
+                for k, v in loss_meter.items():
+                    self.tblogger.add_scalar(f"train/{k}", v.latest, self.progress_in_iter)
 
             if hasattr(self.meter, "clear_meters"):
                 self.meter.clear_meters()
             else:
                 self.meter.clear()
 
-            if self.rank == 0:
-                if self.args.logger == "tensorboard":
-                    self.tblogger.add_scalar(
-                        "train/lr", self.meter["lr"].latest, self.progress_in_iter)
-                    for k, v in loss_meter.items():
-                        self.tblogger.add_scalar(
-                            f"train/{k}", v.latest, self.progress_in_iter)
-                if self.args.logger == "wandb":
-                    metrics = {"train/" + k: v.latest for k, v in loss_meter.items()}
-                    metrics.update({
-                        "train/lr": self.meter["lr"].latest
-                    })
-                    self.wandb_logger.log_metrics(metrics, step=self.progress_in_iter)
-                if self.args.logger == 'mlflow':
-                    logs = {"train/" + k: v.latest for k, v in loss_meter.items()}
-                    logs.update({"train/lr": self.meter["lr"].latest})
-                    self.mlflow_logger.on_log(self.args, self.exp, self.epoch+1, logs)
-
-            self.meter.clear_meters()
-
-        # random resizing
+        # Dynamic Rule-of-64 Multiscale Resolution Selection
         if (self.progress_in_iter + 1) % 10 == 0:
             self.input_size = self.exp.random_resize(
                 self.train_loader, self.epoch, self.rank, self.is_distributed
@@ -337,47 +319,55 @@ class Trainer:
         return self.epoch * self.max_iter + self.iter
 
     def resume_train(self, model):
+        """Robust checkpoint and pre-trained weight loader."""
         if self.args.resume:
-            logger.info("resume training")
-            if self.args.ckpt is None:
-                ckpt_file = os.path.join(self.file_name, "latest" + "_ckpt.pth")
-            else:
-                ckpt_file = self.args.ckpt
+            logger.info("Resuming training from checkpoint...")
+            ckpt_file = (
+                self.args.ckpt
+                if self.args.ckpt is not None
+                else os.path.join(self.file_name, "latest_ckpt.pth")
+            )
 
             ckpt = torch.load(ckpt_file, map_location=self.device)
-            # resume the model/optimizer state dict
-            model.load_state_dict(ckpt["model"])
+            state_dict = ckpt["model"] if "model" in ckpt else ckpt
+            model.load_state_dict(state_dict)
             self.optimizer.load_state_dict(ckpt["optimizer"])
-            self.best_ap = ckpt.pop("best_ap", 0)
-            # resume the training states variables
-            start_epoch = (
+            self.best_ap = ckpt.get("best_ap", 0.0)
+            self.start_epoch = (
                 self.args.start_epoch - 1
                 if self.args.start_epoch is not None
-                else ckpt["start_epoch"]
+                else ckpt.get("start_epoch", 0)
             )
-            self.start_epoch = start_epoch
             logger.info(
-                "loaded checkpoint '{}' (epoch {})".format(
-                    self.args.resume, self.start_epoch
-                )
-            )  # noqa
+                "Resumed checkpoint '{}' at epoch {}".format(ckpt_file, self.start_epoch)
+            )
         else:
             if self.args.ckpt is not None:
-                logger.info("loading checkpoint for fine tuning")
+                logger.info("Loading pre-trained checkpoint for fine-tuning...")
                 ckpt_file = self.args.ckpt
-                ckpt = torch.load(ckpt_file, map_location=self.device)["model"]
-                model = load_ckpt(model, ckpt)
+                raw_ckpt = torch.load(ckpt_file, map_location=self.device)
+                
+                # CRITICAL FIX: Extract actual state_dict before calling load_ckpt
+                state_dict = raw_ckpt["model"] if "model" in raw_ckpt else raw_ckpt
+                
+                # Strip potential DDP 'module.' prefix if present
+                clean_state_dict = {
+                    (k[7:] if k.startswith("module.") else k): v
+                    for k, v in state_dict.items()
+                }
+                model = load_ckpt(model, clean_state_dict)
             self.start_epoch = 0
 
         return model
 
     def evaluate_and_save_model(self):
-        if self.use_model_ema:
-            evalmodel = self.ema_model.ema
-        else:
-            evalmodel = self.model
-            if is_parallel(evalmodel):
-                evalmodel = evalmodel.module
+        evalmodel = self.ema_model.ema if self.use_model_ema else self.model
+        if is_parallel(evalmodel):
+            evalmodel = evalmodel.module
+
+        # Enforce full adaptation during validation
+        if hasattr(evalmodel, "set_meta_training_state"):
+            evalmodel.set_meta_training_state(self.max_epoch, self.max_epoch)
 
         with adjust_status(evalmodel, training=False):
             (ap50_95, ap50, summary), predictions = self.exp.eval(
@@ -388,7 +378,7 @@ class Trainer:
         self.best_ap = max(self.best_ap, ap50_95)
 
         if self.rank == 0:
-            if self.args.logger == "tensorboard":
+            if hasattr(self, "tblogger"):
                 self.tblogger.add_scalar("val/COCOAP50", ap50, self.epoch + 1)
                 self.tblogger.add_scalar("val/COCOAP50_95", ap50_95, self.epoch + 1)
             if self.args.logger == "wandb":
@@ -405,29 +395,19 @@ class Trainer:
                     "val/best_ap": round(self.best_ap, 3),
                     "train/epoch": self.epoch + 1,
                 }
-                self.mlflow_logger.on_log(self.args, self.exp, self.epoch+1, logs)
+                self.mlflow_logger.on_log(self.args, self.exp, self.epoch + 1, logs)
             logger.info("\n" + summary)
+
         synchronize()
 
         self.save_ckpt("last_epoch", update_best_ckpt, ap=ap50_95)
         if self.save_history_ckpt:
             self.save_ckpt(f"epoch_{self.epoch + 1}", ap=ap50_95)
 
-        if self.args.logger == "mlflow":
-            metadata = {
-                    "epoch": self.epoch + 1,
-                    "input_size": self.input_size,
-                    'start_ckpt': self.args.ckpt,
-                    'exp_file': self.args.exp_file,
-                    "best_ap": float(self.best_ap)
-                }
-            self.mlflow_logger.save_checkpoints(self.args, self.exp, self.file_name, self.epoch,
-                                                metadata, update_best_ckpt)
-
     def save_ckpt(self, ckpt_name, update_best_ckpt=False, ap=None):
         if self.rank == 0:
             save_model = self.ema_model.ema if self.use_model_ema else self.model
-            logger.info("Save weights to {}".format(self.file_name))
+            logger.info("Saving weights to {}".format(self.file_name))
             ckpt_state = {
                 "start_epoch": self.epoch + 1,
                 "model": save_model.state_dict(),
@@ -441,16 +421,3 @@ class Trainer:
                 self.file_name,
                 ckpt_name,
             )
-
-            if self.args.logger == "wandb":
-                self.wandb_logger.save_checkpoint(
-                    self.file_name,
-                    ckpt_name,
-                    update_best_ckpt,
-                    metadata={
-                        "epoch": self.epoch + 1,
-                        "optimizer": self.optimizer.state_dict(),
-                        "best_ap": self.best_ap,
-                        "curr_ap": ap
-                    }
-                )

@@ -148,7 +148,7 @@ class MeterBuffer(defaultdict):
             """
             Handles YOLOX versions where MeterBuffer is a dict subclass.
             """
-            tde_metrics = ["mem_loss", "ttt_prob"]
+            tde_metrics = ["mem_loss", "proto_loss", "ttt_prob"]
             filtered_dict = {}
             
             source = getattr(self, "meters", self)
