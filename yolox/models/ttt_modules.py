@@ -138,8 +138,16 @@ class TTTAdaptiveStage(nn.Module):
 
         # Joint Spatial MSE + Directional Cosine Similarity
         mse_loss = F.mse_loss(rec, clean_target)
-        cos_sim = F.cosine_similarity(rec, clean_target, dim=1).mean()
-        return mse_loss + 0.1 * (1.0 - cos_sim)
+        # SAFE EPSILON-GUARDED COSINE SIMILARITY (Prevents 1/||x|| division by zero)
+        rec_f32 = rec.float()
+        target_f32 = clean_target.float()
+        rec_norm = F.normalize(rec_f32, p=2, dim=1, eps=1e-3)
+        target_norm = F.normalize(target_f32, p=2, dim=1, eps=1e-3)
+        
+        cos_sim = (rec_norm * target_norm).sum(dim=1).mean()
+        cos_loss = 1.0 - cos_sim
+
+        return mse_loss + 0.1 * cos_loss
 
     def forward(self, x_in, run_ttt=True):
         # Profiler Bypass (Protects thop/fvcore operational count)

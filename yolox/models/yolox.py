@@ -55,14 +55,10 @@ class YOLOX(nn.Module):
         return self.prob_start + (self.prob_end - self.prob_start) * progress
 
     def _calculate_orthogonal_prototype_loss(self):
-        """
-        FIX 2: Forces class prototypes apart in latent space to prevent collisions.
-        Penalizes any pairwise cosine similarity above margin m = 0.10.
-        """
         all_prototypes = []
         if hasattr(self.head, "memory_banks"):
             for bank in self.head.memory_banks:
-                p_norm = F.normalize(bank.prototypes, p=2, dim=-1)
+                p_norm = F.normalize(bank.prototypes, p=2, dim=-1, eps=1e-3)
                 all_prototypes.append(p_norm)
 
         if not all_prototypes:
@@ -70,11 +66,9 @@ class YOLOX(nn.Module):
 
         proto_loss = 0.0
         for p in all_prototypes:
-            # Pairwise cosine similarity matrix: [num_classes, num_classes]
-            sim_matrix = torch.matmul(p, p.t())
+            sim_matrix = torch.matmul(p, p.t()).clamp(-1.0, 1.0)
             eye = torch.eye(self.num_classes, device=p.device)
             off_diag_sim = sim_matrix * (1.0 - eye)
-            # Quadratic margin penalty for similarity above 0.10
             penalty = F.relu(off_diag_sim - 0.10) ** 2
             proto_loss += penalty.mean()
 

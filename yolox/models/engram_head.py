@@ -98,7 +98,7 @@ class TDE_Head(YOLOXHead):
             memory_normed = self.memory_norms[k](memory_inflated)
 
             # Un-mute memory signal by scaling LayerNorm output to match cls_feat dynamic range
-            cls_std = cls_feat_flat.std(dim=-1, keepdim=True).detach()  # [B, H*W, 1]
+            cls_std = cls_feat_flat.std(dim=-1, keepdim=True).detach().clamp(min=1e-3, max=100.0)  # [B, H*W, 1]
             memory_scaled = memory_normed * cls_std
 
             gate_spatial = uncertainty.view(B, H, W, 1).permute(0, 3, 1, 2)
