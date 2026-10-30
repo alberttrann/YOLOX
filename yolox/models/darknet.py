@@ -8,6 +8,7 @@ from torch import nn
 from .network_blocks import (
     BaseConv,
     BaseConvGN,
+    C2fA,
     CSPLayer,
     DWConv,
     DWConvGN,
@@ -19,6 +20,7 @@ from .ttt_modules import TTTAdaptiveStage
 
 
 class Darknet(nn.Module):
+    # Number of blocks from dark2 to dark5.
     depth2blocks = {21: [1, 2, 2, 1], 53: [2, 8, 8, 4]}
 
     def __init__(
@@ -95,17 +97,19 @@ class Darknet(nn.Module):
 
 class CSPDarknet(nn.Module):
     """
-    TDE-YOLOX CSPDarknet Backbone:
-      - Stage 0 (Focus): Standard BatchNorm2d (normalizes raw input pixels).
-      - Stage 1 (dark2): GroupNorm-isolated functional meta-adaptive stage (TTTAdaptiveStage).
-      - Stages 2-4 (dark3, dark4, dark5): Standard pre-trained BatchNorm2d CSP layers.
+    TDE-YOLOX Multi-Scale Backbone:
+      - Stage 0 (Focus): Standard BatchNorm2d (normalizes raw input pixel distribution).
+      - Stage 1 (dark2, Stride 4): Stateless GroupNorm + Functional TTT meta-learning stage.
+      - Stage 2 (dark3, Stride 8): Standard CSP block.
+      - Stage 3 (dark4, Stride 16): C2fA module (EMA cross-spatial attention, YOLO-UTD [13]).
+      - Stage 4 (dark5, Stride 32): C2fA module + SPPBottleneck.
     """
 
     def __init__(
         self,
         dep_mul,
         wid_mul,
-        out_features=("dark3", "dark4", "dark5"),
+        out_features=("dark2", "dark3", "dark4", "dark5"),
         depthwise=False,
         act="silu",
         ttt_lr=0.02,
@@ -118,13 +122,13 @@ class CSPDarknet(nn.Module):
         Conv = DWConv if depthwise else BaseConv
         ConvGN = DWConvGN if depthwise else BaseConvGN
 
-        base_channels = int(wid_mul * 64)
-        base_depth = max(round(dep_mul * 3), 1)
+        base_channels = int(wid_mul * 64)  # 32 for YOLOX-S
+        base_depth = max(round(dep_mul * 3), 1)  # 1 for YOLOX-S
 
         # 0. The Static Stem (Focus Layer)
         self.stem = Focus(3, base_channels, ksize=3, act=act)
 
-        # 1. Stage 1 (dark2): Stateless GroupNorm Base wrapped in TTTAdaptiveStage
+        # 1. Stage 1 (dark2, Stride 4): Stateless GroupNorm Base wrapped in TTTAdaptiveStage
         dark2_base = nn.Sequential(
             ConvGN(base_channels, base_channels * 2, 3, 2, act=act),
             CSPLayer(
@@ -133,7 +137,7 @@ class CSPDarknet(nn.Module):
                 n=base_depth,
                 depthwise=depthwise,
                 act=act,
-                use_gn=True,
+                use_gn=True,  # GroupNorm enabled across all dark2 bottlenecks
             ),
         )
 
@@ -145,7 +149,7 @@ class CSPDarknet(nn.Module):
             mask_ratio=ttt_mask_ratio,
         )
 
-        # 2. Stage 2 (dark3): Deep Backbone (Standard BatchNorm2d)
+        # 2. Stage 2 (dark3, Stride 8): Standard BatchNorm2d CSP Layer
         self.dark3 = nn.Sequential(
             Conv(base_channels * 2, base_channels * 4, 3, 2, act=act),
             CSPLayer(
@@ -158,31 +162,31 @@ class CSPDarknet(nn.Module):
             ),
         )
 
-        # 3. Stage 3 (dark4): Deep Backbone (Standard BatchNorm2d)
+        # 3. Stage 3 (dark4, Stride 16): C2fA Block (YOLO-UTD EMA Attention [13])
+        # Preserves spatial centroid representation for small targets prior to Neck aggregation
         self.dark4 = nn.Sequential(
             Conv(base_channels * 4, base_channels * 8, 3, 2, act=act),
-            CSPLayer(
+            C2fA(
                 base_channels * 8,
                 base_channels * 8,
                 n=base_depth * 3,
+                shortcut=True,
                 depthwise=depthwise,
                 act=act,
-                use_gn=False,
             ),
         )
 
-        # 4. Stage 4 (dark5): Deep Backbone + SPP (Standard BatchNorm2d)
+        # 4. Stage 4 (dark5, Stride 32): SPPBottleneck + C2fA Block
         self.dark5 = nn.Sequential(
             Conv(base_channels * 8, base_channels * 16, 3, 2, act=act),
             SPPBottleneck(base_channels * 16, base_channels * 16, activation=act),
-            CSPLayer(
+            C2fA(
                 base_channels * 16,
                 base_channels * 16,
                 n=base_depth,
                 shortcut=False,
                 depthwise=depthwise,
                 act=act,
-                use_gn=False,
             ),
         )
 
@@ -193,7 +197,7 @@ class CSPDarknet(nn.Module):
         x = self.stem(x)
         outputs["stem"] = x
 
-        # Step 1: Stochastic Meta-Learning Decision for Stage 1
+        # Step 1: Stochastic Meta-Learning Gating for Stage 1
         run_ttt = False
         if not self.training:
             if ttt_prob is None or ttt_prob > 0.0:
@@ -204,7 +208,7 @@ class CSPDarknet(nn.Module):
                 run_ttt = True
 
         x = self.dark2(x, run_ttt=run_ttt)
-        outputs["dark2"] = x
+        outputs["dark2"] = x  # Expose dark2 for the SPI Highway
 
         # Steps 2-4: Deep Backbone Forwarding
         x = self.dark3(x)

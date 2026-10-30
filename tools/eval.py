@@ -20,14 +20,14 @@ from yolox.utils import (
     configure_nccl,
     get_local_rank,
     get_model_info,
-    setup_logger
+    setup_logger,
 )
 
 
 def fuse_conv_bn(conv, bn):
     """
     Mathematically folds Conv2d and BatchNorm2d weights into a single Conv2d layer.
-    Pure PyTorch tensor implementation.
+    Pure PyTorch tensor implementation (zero NumPy syntax, zero AttributeError).
     """
     fused_conv = nn.Conv2d(
         conv.in_channels,
@@ -162,9 +162,14 @@ def main(exp, args, num_gpu):
         logger.info("TDE-YOLOX: Enforcing Test-Time Adaptation Mode (ttt_prob = 1.0)...")
         model_ref.set_meta_training_state(exp.max_epoch, exp.max_epoch)
 
+    # 3. Trigger Structural Re-Parameterization Deployment Folding (RepDWConv -> 3x3 DWConv)
+    if hasattr(model_ref, "backbone") and hasattr(model_ref.backbone, "switch_to_deploy"):
+        logger.info("TDE-YOLOX: Folding RepDWConv branches into single 3x3 convs for deployment...")
+        model_ref.backbone.switch_to_deploy()
+
     logger.info("Model Summary: {}".format(get_model_info(model, exp.test_size)))
 
-    # 3. Setup COCO Evaluator with Per-Class Metrics Output
+    # 4. Setup COCO Evaluator with Per-Class Metrics Output
     evaluator = exp.get_evaluator(args.batch_size, is_distributed, args.test, args.legacy)
     evaluator.per_class_AP = True
     evaluator.per_class_AR = True
@@ -173,7 +178,7 @@ def main(exp, args, num_gpu):
     model.cuda(rank)
     model.eval()
 
-    # 4. Load Checkpoint Weights
+    # 5. Load Checkpoint Weights
     if not args.speed and not args.trt:
         ckpt_file = args.ckpt if args.ckpt is not None else os.path.join(file_name, "best_ckpt.pth")
         logger.info("Loading evaluation checkpoint from {}".format(ckpt_file))
@@ -189,7 +194,7 @@ def main(exp, args, num_gpu):
     if is_distributed:
         model = DDP(model, device_ids=[rank])
 
-    # 5. Execute Selective Fusion
+    # 6. Execute Selective Fusion
     if args.fuse:
         model = fuse_tde_model(model)
 
@@ -205,7 +210,7 @@ def main(exp, args, num_gpu):
         trt_file = None
         decoder = None
 
-    # 6. Execute Evaluation
+    # 7. Execute Evaluation
     logger.info("Starting TDE-YOLOX High-Fidelity OOD Evaluation...")
     *_, summary = evaluator.evaluate(
         model, is_distributed, args.fp16, trt_file, decoder, exp.test_size

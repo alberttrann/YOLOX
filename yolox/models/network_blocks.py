@@ -23,7 +23,7 @@ def get_activation(name="silu", inplace=True):
     elif name == "lrelu":
         module = nn.LeakyReLU(0.1, inplace=inplace)
     else:
-        raise AttributeError("Unsupported act type: {}".format(name))
+        raise AttributeError(f"Unsupported act type: {name}")
     return module
 
 
@@ -78,7 +78,6 @@ class BaseConvGN(nn.Module):
             bias=bias,
         )
 
-        # Dynamic Divisor Resolution Logic (Protects against odd channel multipliers)
         if out_channels % target_groups == 0:
             actual_groups = target_groups
         else:
@@ -96,7 +95,6 @@ class BaseConvGN(nn.Module):
         return self.act(self.gn(self.conv(x)))
 
     def fuseforward(self, x):
-        # GroupNorm is instance-dependent and cannot be statically folded into Conv weights
         return self.forward(x)
 
 
@@ -265,7 +263,6 @@ class Focus(nn.Module):
 
     def __init__(self, in_channels, out_channels, ksize=1, stride=1, act="silu"):
         super().__init__()
-        # Focus layer remains standard BatchNorm2d to normalize raw input pixel distributions
         self.conv = BaseConv(in_channels * 4, out_channels, ksize, stride, act=act)
 
     def forward(self, x):
@@ -283,3 +280,108 @@ class Focus(nn.Module):
             dim=1,
         )
         return self.conv(x)
+
+
+# =========================================================================
+# ADVANCED UAV/SCALE-PRESERVING BLOCKS (EMA & C2fA)
+# =========================================================================
+
+class EMA(nn.Module):
+    """
+    Efficient Multi-Scale Attention (Ouyang et al., ICASSP 2023).
+    
+    PATCH 2.1 APPLIED: Zero-Initialized Identity Residual (X + gamma * EMA(X)).
+    Eliminates the 0.50x initial feature magnitude shock in deep backbone stages (dark4, dark5).
+    At Step 0, gamma = 0.0 guarantees exact mathematical identity passthrough of pre-trained COCO features.
+    """
+
+    def __init__(self, channels, factor=8):
+        super().__init__()
+        if channels % factor == 0:
+            self.groups = factor
+        else:
+            self.groups = math.gcd(channels, factor)
+            if self.groups < 2:
+                self.groups = 1
+
+        self.channels_per_group = channels // self.groups
+        self.softmax = nn.Softmax(dim=-1)
+        self.agp = nn.AdaptiveAvgPool2d((1, 1))
+        self.pool_h = nn.AdaptiveAvgPool2d((None, 1))
+        self.pool_w = nn.AdaptiveAvgPool2d((1, None))
+
+        gn_groups = math.gcd(self.channels_per_group, 8)
+        self.gn = nn.GroupNorm(gn_groups, self.channels_per_group)
+
+        self.conv1x1 = nn.Conv2d(
+            self.channels_per_group, self.channels_per_group, kernel_size=1, stride=1, padding=0
+        )
+        self.conv3x3 = nn.Conv2d(
+            self.channels_per_group, self.channels_per_group, kernel_size=3, stride=1, padding=1
+        )
+
+        # PATCH 2.1: Zero-initialized learnable residual gating parameter
+        self.gamma = nn.Parameter(torch.zeros(1))
+
+    def forward(self, x):
+        b, c, h, w = x.shape
+        group_x = x.reshape(b * self.groups, self.channels_per_group, h, w)
+
+        # 1. 1D Directional Strip Encodings along H and W
+        x_h = self.pool_h(group_x)
+        x_w = self.pool_w(group_x).permute(0, 1, 3, 2)
+        hw = self.conv1x1(torch.cat([x_h, x_w], dim=2))
+        x_h, x_w = torch.split(hw, [h, w], dim=2)
+
+        # 2. Parallel 1x1 Semantic Attention and 3x3 Spatial Feature Extraction
+        x1 = self.gn(group_x * x_h.sigmoid() * x_w.permute(0, 1, 3, 2).sigmoid())
+        x2 = self.conv3x3(group_x)
+
+        # 3. Cross-Spatial Global Interaction
+        x11 = self.softmax(self.agp(x1).reshape(b * self.groups, -1, 1).permute(0, 2, 1))
+        x12 = x2.reshape(b * self.groups, self.channels_per_group, -1)
+        x21 = self.softmax(self.agp(x2).reshape(b * self.groups, -1, 1).permute(0, 2, 1))
+        x22 = x1.reshape(b * self.groups, self.channels_per_group, -1)
+
+        weights = (torch.matmul(x11, x12) + torch.matmul(x21, x22)).reshape(
+            b * self.groups, 1, h, w
+        )
+        ema_out = (group_x * weights.sigmoid()).reshape(b, c, h, w)
+
+        # PATCH 2.1 APPLIED: Non-destructive identity residual addition
+        return x + self.gamma * ema_out
+
+
+class C2fA(nn.Module):
+    """
+    YOLO-UTD C2fA Module (Sensors 2026).
+    
+    Integrates the EMA cross-spatial attention mechanism into standard C2f blocks.
+    Replaces standard CSPLayer in deep stages (dark4 stride-16, dark5 stride-32)
+    to maintain spatial centroids of distant and small objects prior to Neck aggregation.
+    """
+
+    def __init__(self, c1, c2, n=1, shortcut=False, depthwise=False, act="silu", e=0.5):
+        super().__init__()
+        self.c = int(c2 * e)
+        self.cv1 = BaseConv(c1, c2, 1, 1, act=act)
+        self.cv2 = BaseConv((2 + n) * self.c, c2, 1, 1, act=act)
+        self.m = nn.ModuleList(
+            Bottleneck(
+                self.c,
+                self.c,
+                shortcut=shortcut,
+                expansion=1.0,
+                depthwise=depthwise,
+                act=act,
+                use_gn=False,
+            )
+            for _ in range(n)
+        )
+        self.ema = EMA(c2)
+
+    def forward(self, x):
+        y = list(self.cv1(x).chunk(2, 1))
+        y.extend(m(y[-1]) for m in self.m)
+        out = self.cv2(torch.cat(y, 1))
+        return self.ema(out)

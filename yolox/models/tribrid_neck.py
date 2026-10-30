@@ -8,24 +8,35 @@ import torch.nn as nn
 from .network_blocks import BaseConv, Bottleneck
 from .ttt_modules import (
     ContinuousSaliencyAttention,
-    CoordinateAttention,
-    MBConvConditioner,
-    SimAM,
+    SafeSimAM,
+    UnifiedRCA,
+    UnifiedRMBConv,
 )
 
 
 class C2f_Tribrid(nn.Module):
     """
-    LW-DETR C2f Block + Paradigm 1 Linear Associative Attention Neck Block.
-    
-    Topology:
+    TDE-YOLOX C2f_Tribrid Block:
       - Branch A: Dense local convolutional bottlenecks (preserves high-frequency spatial gradients).
-      - Branch B: Continuous Global Context Mixer:
-          SimAM -> CoordinateAttention -> MBConvConditioner -> ContinuousSaliencyAttention.
-      - Gated Merge: Output = Branch A + tanh(gate) * Branch B (initialized to 0.01).
+      - Branch B: Multi-Scale Context Engine:
+          SafeSimAM (zero-centered identity)
+          -> UnifiedRCA (decoupled H/W dual Avg+Max pooling)
+          -> UnifiedRMBConv (split-dilation d=1,2 + RepDWConv + ContrastAwareSE)
+          -> ContinuousSaliencyAttention (Paradigm 1 linear attention).
+      - Gated Residual Merge: Y = Branch A + tanh(gate) * Branch B (Zero-Conv initialized).
     """
 
-    def __init__(self, c1, c2, n=1, shortcut=False, depthwise=False, act="silu", e=0.5):
+    def __init__(
+        self,
+        c1,
+        c2,
+        n=1,
+        shortcut=False,
+        depthwise=False,
+        act="silu",
+        e=0.5,
+        saliency_floor=0.05,
+    ):
         super().__init__()
         self.c = int(c2 * e)
         self.cv1 = BaseConv(c1, c2, 1, 1, act=act)
@@ -45,21 +56,20 @@ class C2f_Tribrid(nn.Module):
             for _ in range(n)
         )
 
-        # Branch B: Continuous Global Context Mixer (Paradigm 1)
+        # Branch B: Context & Structural Conditioning Engine
         self.global_mixer = nn.Sequential(
-            SimAM(),
-            CoordinateAttention(self.c),
-            MBConvConditioner(self.c),
-            ContinuousSaliencyAttention(self.c),
+            SafeSimAM(eps=1e-4),
+            UnifiedRCA(self.c, reduction=16),
+            UnifiedRMBConv(self.c),
+            ContinuousSaliencyAttention(self.c, num_heads=4, saliency_floor=saliency_floor),
         )
 
-        # Gated Skip Connection (Initialized to 0.05 for stable training warmup)
+        # Learnable Residual Gate (Initialized to 0.05; ContinuousSaliencyAttention.proj is zero-init)
         self.gate = nn.Parameter(torch.ones(1) * 0.05)
 
     def forward(self, x):
         # 1. Channel Split via 1x1 Projection
         y = list(self.cv1(x).chunk(2, dim=1))
-        # y[0] is clean dense bypass, y[1] is base for local bottlenecks
 
         # 2. Dense Local Path (Branch A)
         y.extend(m(y[-1]) for m in self.m)
@@ -73,3 +83,9 @@ class C2f_Tribrid(nn.Module):
 
         # 5. Cross-Stage Feature Aggregation
         return self.cv2(torch.cat(y, dim=1))
+
+    def switch_to_deploy(self):
+        """Recursively folds RepDWConv inside UnifiedRMBConv into standard 3x3 convolutions."""
+        for m in self.global_mixer:
+            if hasattr(m, "switch_to_deploy"):
+                m.switch_to_deploy()

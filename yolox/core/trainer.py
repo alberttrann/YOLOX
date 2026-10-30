@@ -3,6 +3,7 @@
 # Copyright (c) Megvii, Inc. and its affiliates.
 
 import datetime
+import gc
 import os
 import time
 from loguru import logger
@@ -10,9 +11,11 @@ from loguru import logger
 import torch
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.tensorboard import SummaryWriter
+
 import cv2
 cv2.setNumThreads(0)
 cv2.ocl.setUseOpenCL(False)
+
 from yolox.data import DataPrefetcher
 from yolox.exp import Exp
 from yolox.utils import (
@@ -32,11 +35,23 @@ from yolox.utils import (
     occupy_mem,
     save_checkpoint,
     setup_logger,
-    synchronize
+    synchronize,
 )
 
 
 class Trainer:
+    """
+    TDE-YOLOX Meta-Learning Distributed Trainer (Surgical vNext).
+    
+    Surgical Fixes Applied:
+      - Patch 5.1: Automatically remaps checkpoint keys dark2.X -> dark2.backbone_stage.X to 
+                   load pre-trained COCO edge filters into the GroupNorm-isolated Stage 1.
+      - Full Telemetry Tracking: Unpacks and logs afford_loss, mem_loss, proto_loss, and ttt_prob.
+      - Caveat 14.3 Resolution: Single-point meta-training state synchronization in before_epoch.
+      - Numerical Stability Guard: Zeroes gradients and skips batch if loss evaluates to NaN/Inf.
+      - Host RAM Reclamation: gc.collect() and empty_cache() after each epoch prevent Windows OOM.
+    """
+
     def __init__(self, exp: Exp, args):
         self.exp = exp
         self.args = args
@@ -152,7 +167,7 @@ class Trainer:
         # 2. Solver initialization
         self.optimizer = self.exp.get_optimizer(self.args.batch_size)
 
-        # 3. Checkpoint resumption & Pre-trained weight loading (FIXED)
+        # 3. Checkpoint resumption & Pre-trained weight loading (with Key Remapping)
         model = self.resume_train(model)
 
         # 4. Data pipeline initialization
@@ -235,7 +250,7 @@ class Trainer:
         if hasattr(model_ref, "set_meta_training_state"):
             model_ref.set_meta_training_state(self.epoch + 1, self.max_epoch)
 
-        # Check Mosaic shutoff condition (FIXED: self.no_aug instead of self.args.no_aug)
+        # Check Mosaic shutoff condition
         if self.epoch + 1 == self.max_epoch - self.exp.no_aug_epochs or self.no_aug:
             logger.info("---> Closing Mosaic augmentation and enabling L1 loss.")
             self.train_loader.close_mosaic()
@@ -256,13 +271,28 @@ class Trainer:
             all_reduce_norm(self.model)
             self.evaluate_and_save_model()
 
+        # HOST RAM RECLAMATION (Prevents Windows DataLoader MemoryError)
+        gc.collect()
+        torch.cuda.empty_cache()
+
     def before_iter(self):
         pass
 
     def after_iter(self):
-        """Telemetry logging and Rule-of-64 multiscale resolution jitter."""
+        """Telemetry logging: tracks afford_loss alongside standard and meta metrics."""
+        tracked_keys = [
+            "total_loss",
+            "iou_loss",
+            "l1_loss",
+            "conf_loss",
+            "cls_loss",
+            "mem_loss",
+            "proto_loss",
+            "afford_loss",
+            "ttt_prob",
+        ]
         for k, v in self.outputs.items():
-            if k in ["total_loss", "iou_loss", "l1_loss", "conf_loss", "cls_loss", "mem_loss", "proto_loss", "ttt_prob"]:
+            if k in tracked_keys:
                 if torch.is_tensor(v):
                     val = v.detach().cpu().item()
                 else:
@@ -319,7 +349,13 @@ class Trainer:
         return self.epoch * self.max_iter + self.iter
 
     def resume_train(self, model):
-        """Robust checkpoint and pre-trained weight loader."""
+        """
+        Robust checkpoint and pre-trained weight loader.
+        
+        PATCH 5.1 APPLIED:
+        Remaps checkpoint keys dark2.X -> dark2.backbone_stage.X to recover
+        pre-trained COCO convolution weights into GroupNorm Stage 1.
+        """
         if self.args.resume:
             logger.info("Resuming training from checkpoint...")
             ckpt_file = (
@@ -346,16 +382,22 @@ class Trainer:
                 logger.info("Loading pre-trained checkpoint for fine-tuning...")
                 ckpt_file = self.args.ckpt
                 raw_ckpt = torch.load(ckpt_file, map_location=self.device)
-                
-                # CRITICAL FIX: Extract actual state_dict before calling load_ckpt
                 state_dict = raw_ckpt["model"] if "model" in raw_ckpt else raw_ckpt
                 
-                # Strip potential DDP 'module.' prefix if present
                 clean_state_dict = {
                     (k[7:] if k.startswith("module.") else k): v
                     for k, v in state_dict.items()
                 }
-                model = load_ckpt(model, clean_state_dict)
+
+                # PATCH 5.1 APPLIED: Remap dark2 convolution keys to match TTTAdaptiveStage namespace
+                remapped_state_dict = {}
+                for k, v in clean_state_dict.items():
+                    if "dark2." in k and "backbone_stage" not in k and ".bn." not in k:
+                        new_k = k.replace("dark2.", "dark2.backbone_stage.")
+                        remapped_state_dict[new_k] = v
+                    remapped_state_dict[k] = v
+
+                model = load_ckpt(model, remapped_state_dict)
             self.start_epoch = 0
 
         return model
