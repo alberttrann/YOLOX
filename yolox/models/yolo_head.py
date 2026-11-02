@@ -129,15 +129,12 @@ class YOLOXHead(nn.Module):
         self.grids = [torch.zeros(1)] * len(in_channels)
 
     def initialize_biases(self, prior_prob):
+        b = float(-math.log((1 - prior_prob) / prior_prob))
         for conv in self.cls_preds:
-            b = conv.bias.view(1, -1)
-            b.data.fill_(-math.log((1 - prior_prob) / prior_prob))
-            conv.bias = torch.nn.Parameter(b.view(-1), requires_grad=True)
+            conv.bias.data.fill_(b)
 
         for conv in self.obj_preds:
-            b = conv.bias.view(1, -1)
-            b.data.fill_(-math.log((1 - prior_prob) / prior_prob))
-            conv.bias = torch.nn.Parameter(b.view(-1), requires_grad=True)
+            conv.bias.data.fill_(b)
 
     def forward(self, xin, labels=None, imgs=None):
         outputs = []

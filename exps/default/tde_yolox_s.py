@@ -10,15 +10,18 @@ import torch.nn as nn
 from yolox.exp import Exp as MyExp
 
 
+# GLOBAL LEVEL FUNCTION: Must reside at module scope to be picklable on Windows spawn
+def _yolo_worker_init_fn(worker_id):
+    import cv2
+    from yolox.data import worker_init_reset_seed
+    worker_init_reset_seed(worker_id)
+    cv2.setNumThreads(0)
+    cv2.ocl.setUseOpenCL(False)
+
+
 class Exp(MyExp):
     """
-    TDE-YOLOX Master Experiment Configuration (Surgical vNext).
-    
-    Surgical Fixes Applied:
-      - Patch 6.1: Expands TrainTransform max_labels from 120 to 160 (prevents annotation truncation in dense frames).
-      - Patch 6.2: Decouples prototypes, gates, and ttt_lrs from weight decay to protect hyperspherical geometry.
-      - Full Integration: Binds loss_type="oiou" to TDE_Head and afford_loss_weight=0.25 to YOLOX.
-      - Protocol Safety: Enforces strict ZSDA evaluation split paths (zero adverse data in training/val).
+    TDE-YOLOX Master Experiment Configuration (Hardened vFinal).
     """
 
     def __init__(self):
@@ -31,9 +34,9 @@ class Exp(MyExp):
 
         # --- TDE-YOLOX RESEARCH CONFIGURATION ---
         self.num_classes = 9           # BDD100K 9-class detection subset
-        self.init_ttt_lr = 0.02        # Aggressive start for GroupNorm instance adaptation
-        self.ttt_noise_std = 0.08      # Contrastive DINO-style denoising perturbation
-        self.ttt_mask_ratio = 0.20     # Exact 20% relative contrast Sobel masking (Fix 14.1)
+        self.init_ttt_lr = 0.02        # Calibrated initial step size (logit link)
+        self.ttt_noise_std = 0.08      # Denoising perturbation
+        self.ttt_mask_ratio = 0.20     # Exact 20% relative contrast Sobel masking
         self.afford_loss_weight = 0.25  # Training-only dense affordance supervision weight
 
         # --- NATIVE 16:9 RULE-OF-64 RESOLUTION PROTOCOL ---
@@ -59,8 +62,10 @@ class Exp(MyExp):
         self.test_ann = "D:/YOLOX-3RD/bdd100k/bdd100k/bdd100k/images/annotations/tde_test_adverse_coco.json"
 
         # --- TRAINING & CURRICULUM SCHEDULE ---
+        # --- TRAINING & CURRICULUM SCHEDULE (Calibrated for Pre-trained Fine-Tuning) ---
         self.max_epoch = 80
-        self.warmup_epochs = 10
+        # When fine-tuning from yolox_s.pth, 1-2 epochs of warmup is standard (10 epochs is for scratch)
+        self.warmup_epochs = 1
         self.no_aug_epochs = 15
         self.ramp_epochs = 50
         self.prob_start = 0.10
@@ -76,14 +81,12 @@ class Exp(MyExp):
 
         self.data_num_workers = 4
         self.batch_size = 16
-        self.test_conf = 0.001
-        self.nmsthre = 0.65
+
+        # Crowd-Safe Evaluation Thresholds
+        self.test_conf = 0.01
+        self.nmsthre = 0.60
 
     def random_resize(self, data_loader, epoch, rank, is_distributed):
-        """
-        Quantized 16:9 Rule-of-64 multiscale resizing.
-        Locks resolution to exact target (576, 1024) during the no_aug fine-tuning phase.
-        """
         tensor = torch.LongTensor(2).cuda()
         if rank == 0:
             if self.multiscale_range > 0 and epoch < (self.max_epoch - self.no_aug_epochs):
@@ -102,11 +105,6 @@ class Exp(MyExp):
         return (tensor[0].item(), tensor[1].item())
 
     def get_optimizer(self, batch_size):
-        """
-        PATCH 6.2 APPLIED:
-        Isolates biases, 1D norm parameters, gates, ttt_lrs, and prototypes from weight decay.
-        Protects hyperspherical prototype norms ||P||_2 from collapsing toward zero.
-        """
         if "optimizer" in self.__dict__:
             return self.optimizer
 
@@ -121,10 +119,10 @@ class Exp(MyExp):
                 or p.ndim <= 1
                 or "norm" in name
                 or "gn." in name
-                or "gate" in name
+                or "gamma" in name
                 or "ttt_lrs" in name
                 or "mask_token" in name
-                or "prototypes" in name  # PATCH 6.2: Prototype Weight Decay Immunity
+                or "prototypes" in name
             ):
                 pg_no_decay.append(p)
             else:
@@ -146,19 +144,23 @@ class Exp(MyExp):
     def get_dataset(self, cache=False, cache_type="ram"):
         from yolox.data import COCODataset, TrainTransform
 
-        return COCODataset(
+        dataset = COCODataset(
             data_dir=self.data_dir,
             json_file=self.train_ann,
-            name="",  # Prevents YOLOX from prepending 'train2017' into paths
+            name="",
             img_size=self.input_size,
             preproc=TrainTransform(
-                max_labels=160,  # PATCH 6.1 APPLIED: Expands label capacity from 120 to 160
+                max_labels=160,
                 flip_prob=self.flip_prob,
                 hsv_prob=self.hsv_prob,
             ),
             cache=cache,
             cache_type=cache_type,
         )
+        # Defense against CacheDataset.__del__ attribute error
+        dataset.cache = cache
+        dataset.cache_type = cache_type
+        return dataset
 
     def get_eval_dataset(self, **kwargs):
         from yolox.data import COCODataset, ValTransform
@@ -166,20 +168,23 @@ class Exp(MyExp):
         testdev = kwargs.get("testdev", False)
         target_ann = self.test_ann if testdev else self.val_ann
 
-        return COCODataset(
+        dataset = COCODataset(
             data_dir=self.data_dir,
             json_file=target_ann,
-            name="",  # Prevents YOLOX from prepending 'val2017' into paths
+            name="",
             img_size=self.test_size,
             preproc=ValTransform(legacy=kwargs.get("legacy", False)),
         )
+        dataset.cache = False
+        dataset.cache_type = "ram"
+        return dataset
 
     def get_eval_loader(self, batch_size, is_distributed, **kwargs):
         valdataset = self.get_eval_dataset(**kwargs)
         sampler = torch.utils.data.SequentialSampler(valdataset)
         return torch.utils.data.DataLoader(
             valdataset,
-            num_workers=0,  # Prevents Windows shared-memory allocation crashes
+            num_workers=0,
             pin_memory=True,
             sampler=sampler,
             batch_size=batch_size,
@@ -197,7 +202,6 @@ class Exp(MyExp):
                     m.momentum = 0.03
 
         if getattr(self, "model", None) is None:
-            # 1. Instantiate CSPDarknet with GroupNorm Stage 1 (dark2) and deep C2fA stages (dark4, dark5)
             backbone = CSPDarknet(
                 self.depth,
                 self.width,
@@ -208,7 +212,6 @@ class Exp(MyExp):
                 ttt_mask_ratio=self.ttt_mask_ratio,
             )
 
-            # 2. Instantiate YOLOPAFPN with integrated SPI Highway and C2f_Tribrid neck
             neck = YOLOPAFPN(
                 self.depth,
                 self.width,
@@ -220,7 +223,6 @@ class Exp(MyExp):
             )
             neck.backbone = backbone
 
-            # 3. Instantiate TDE_Head with OIoU loss and decoupled non-destructive FiLM Engram memory
             head = TDE_Head(
                 self.num_classes,
                 self.width,
@@ -229,7 +231,6 @@ class Exp(MyExp):
                 loss_type="oiou",
             )
 
-            # 4. Instantiate YOLOX Master Wrapper with Affordance Decoder
             self.model = YOLOX(
                 neck,
                 head,
@@ -239,7 +240,6 @@ class Exp(MyExp):
         self.model.apply(init_yolo)
         self.model.head.initialize_biases(1e-2)
 
-        # Synchronize dynamic curriculum parameters to the model
         self.model.max_epochs = self.max_epoch
         self.model.warmup_epochs = self.warmup_epochs
         self.model.ramp_epochs = self.ramp_epochs
@@ -247,3 +247,37 @@ class Exp(MyExp):
         self.model.prob_end = self.prob_end
 
         return self.model
+
+    def get_data_loader(self, batch_size, is_distributed, no_aug=False, cache_img=False):
+        from torch.utils.data import DistributedSampler, RandomSampler
+        from yolox.data import (
+            YoloBatchSampler,
+            DataLoader as YoloDataLoader,
+        )
+
+        dataset = self.get_dataset(cache=cache_img, cache_type="ram")
+
+        if is_distributed:
+            batch_size = batch_size // dist.get_world_size()
+            sampler = DistributedSampler(dataset)
+        else:
+            sampler = RandomSampler(dataset)
+
+        batch_sampler = YoloBatchSampler(
+            sampler=sampler,
+            batch_size=batch_size,
+            drop_last=False,
+            mosaic=not no_aug,
+        )
+
+        dataloader_kwargs = {
+            "num_workers": self.data_num_workers,
+            "pin_memory": True,
+            "batch_sampler": batch_sampler,
+            "worker_init_fn": _yolo_worker_init_fn,  # Uses picklable global function
+        }
+
+        if self.data_num_workers > 0:
+            dataloader_kwargs["persistent_workers"] = True
+
+        return YoloDataLoader(dataset, **dataloader_kwargs)

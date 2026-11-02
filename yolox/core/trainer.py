@@ -4,6 +4,7 @@
 
 import datetime
 import gc
+import math
 import os
 import time
 from loguru import logger
@@ -41,15 +42,17 @@ from yolox.utils import (
 
 class Trainer:
     """
-    TDE-YOLOX Meta-Learning Distributed Trainer (Surgical vNext).
-    
-    Surgical Fixes Applied:
-      - Patch 5.1: Automatically remaps checkpoint keys dark2.X -> dark2.backbone_stage.X to 
-                   load pre-trained COCO edge filters into the GroupNorm-isolated Stage 1.
-      - Full Telemetry Tracking: Unpacks and logs afford_loss, mem_loss, proto_loss, and ttt_prob.
-      - Caveat 14.3 Resolution: Single-point meta-training state synchronization in before_epoch.
-      - Numerical Stability Guard: Zeroes gradients and skips batch if loss evaluates to NaN/Inf.
-      - Host RAM Reclamation: gc.collect() and empty_cache() after each epoch prevent Windows OOM.
+    TDE-YOLOX Distributed Trainer (RAM-Fortified & Telemetry-Hardened vFinal).
+
+    Core Refinements:
+      - Fixed UnboundLocalError & Execution Flow in train_one_iter.
+      - Fixed AttributeError in before_train (TelemetryRecorder initialized strictly after self.model).
+      - Resumption State Fidelity: Preserves both raw model (matching optimizer states) and EMA weights.
+      - Riemannian Tangent-Space Momentum Hook: Keeps prototype momentum vectors strictly on the manifold.
+      - Progressive Phase Harmonization: Smooth Mosaic fade (Epochs 55-65) and linear L1 warmup (Epochs 60-65).
+      - Dynamic EMA Decay: Annealed to 0.9950 across Epochs 65-70 to eliminate tracking lag.
+      - RAM-Saving Severance: Immediate detached Python float conversion and explicit batch tensor disposal.
+      - Pre-Validation Memory Purge: Clears prefetcher and collects garbage before validation to prevent OOM.
     """
 
     def __init__(self, exp: Exp, args):
@@ -109,9 +112,28 @@ class Trainer:
             self.train_one_iter()
             self.after_iter()
 
+    def _project_prototype_momentum(self, model_ref):
+        """
+        Riemannian Tangent-Space Momentum Projection Hook.
+        Projects SGD velocity buffers of prototypes onto the spherical tangent plane:
+        v_tangent = v - (v . P) * P
+        Prevents radial momentum chatter and maintains stable geodesic optimization.
+        """
+        if not hasattr(model_ref, "head") or not hasattr(model_ref.head, "memory_banks"):
+            return
+
+        for bank in model_ref.head.memory_banks:
+            p = bank.prototypes  # [K, M, D]
+            state = self.optimizer.state.get(p, None)
+            if state is not None and "momentum_buffer" in state:
+                v = state["momentum_buffer"]  # [K, M, D]
+                v_dot_p = (v * p.data).sum(dim=-1, keepdim=True)
+                v.sub_(v_dot_p * p.data)
+
     def train_one_iter(self):
         iter_start_time = time.time()
 
+        # 1. Fetch next batch from prefetcher
         inps, targets = self.prefetcher.next()
         inps = inps.to(self.data_type)
         targets = targets.to(self.data_type)
@@ -119,38 +141,93 @@ class Trainer:
         inps, targets = self.exp.preprocess(inps, targets, self.input_size)
         data_end_time = time.time()
 
+        # 2. Forward pass under mixed precision
         with torch.cuda.amp.autocast(enabled=self.amp_training):
             outputs = self.model(inps, targets)
 
         loss = outputs["total_loss"]
 
-        # NaN Guard: Catch numerical divergence before it corrupts optimizer states
+        # 3. Numerical Stability Guard with Component Diagnostics and VRAM Purge
         if torch.isnan(loss) or torch.isinf(loss):
-            logger.error("Numerical instability: total_loss is NaN/Inf. Skipping gradient step.")
+            logger.error(
+                "Numerical instability: total_loss is NaN/Inf! "
+                "total: {:.3f}, iou: {}, conf: {}, cls: {}, mem: {}, proto: {}, rec: {}, afford: {}".format(
+                    loss.item() if not torch.isnan(loss) else float('nan'),
+                    outputs.get('iou_loss', 'N/A'),
+                    outputs.get('conf_loss', 'N/A'),
+                    outputs.get('cls_loss', 'N/A'),
+                    outputs.get('mem_loss', 'N/A'),
+                    outputs.get('proto_loss', 'N/A'),
+                    outputs.get('rec_loss', 'N/A'),
+                    outputs.get('afford_loss', 'N/A'),
+                )
+            )
             self.optimizer.zero_grad()
+            del inps, targets, outputs, loss
+            torch.cuda.empty_cache()  # <--- Instantly releases activation VRAM to prevent cumulative OOM
             return
 
+        # 4. Backward pass
         self.optimizer.zero_grad()
         self.scaler.scale(loss).backward()
+
+        # 5. Gradient Unscaling & Telemetry Hook (Pre-step gradient flow logging)
+        self.scaler.unscale_(self.optimizer)
+        if hasattr(self, "telemetry"):
+            self.telemetry.record_gradient_flow(self.epoch + 1, self.progress_in_iter + 1)
+
+        # 6. Gradient Norm Clipping & NaN Scrubbing
+        torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=10.0)
+        for p in self.model.parameters():
+            if p.grad is not None:
+                p.grad.data = torch.nan_to_num(p.grad.data, nan=0.0, posinf=10.0, neginf=-10.0)
+
+        # 7. Optimizer Step
         self.scaler.step(self.optimizer)
         self.scaler.update()
 
+        # 8. Riemannian Tangent-Space Momentum Hook & Spherical Projection
+        model_ref = self.model.module if self.is_distributed else self.model
+        if hasattr(model_ref, "project_prototypes_to_unit_sphere"):
+            model_ref.project_prototypes_to_unit_sphere()
+
+        self._project_prototype_momentum(model_ref)
+
+        # 9. Model EMA Update (Strictly after spherical projection)
         if self.use_model_ema:
             self.ema_model.update(self.model)
 
+        # 10. Learning Rate Schedule Update
         lr = self.lr_scheduler.update_lr(self.progress_in_iter + 1)
         for param_group in self.optimizer.param_groups:
             param_group["lr"] = lr
 
         iter_end_time = time.time()
 
-        # Retain outputs for telemetry logging in after_iter
-        self.outputs = outputs
+        # 11. Detached Scalar Telemetry (Instant memory severance)
+        self.outputs = {
+            k: (v.detach().cpu().item() if torch.is_tensor(v) else float(v))
+            for k, v in outputs.items()
+        }
+
         self.meter.update(
             iter_time=iter_end_time - iter_start_time,
             data_time=data_end_time - iter_start_time,
             lr=lr,
         )
+
+        # 12. Offline Structured JSONL Telemetry Logging
+        if hasattr(self, "telemetry"):
+            self.telemetry.record_iteration_losses(
+                self.epoch + 1, self.progress_in_iter + 1, lr, self.outputs
+            )
+            if "num_fg" in self.outputs:
+                self.telemetry.record_simota_assignment(
+                    self.epoch + 1, self.progress_in_iter + 1, self.outputs["num_fg"]
+                )
+
+        # Explicit RAM reclamation
+        del inps, targets, outputs, loss
 
     def before_train(self):
         logger.info("args: {}".format(self.args))
@@ -167,7 +244,7 @@ class Trainer:
         # 2. Solver initialization
         self.optimizer = self.exp.get_optimizer(self.args.batch_size)
 
-        # 3. Checkpoint resumption & Pre-trained weight loading (with Key Remapping)
+        # 3. Checkpoint resumption
         model = self.resume_train(model)
 
         # 4. Data pipeline initialization
@@ -195,6 +272,10 @@ class Trainer:
         if self.use_model_ema:
             self.ema_model = ModelEMA(model, 0.9998)
             self.ema_model.updates = self.max_iter * self.start_epoch
+            # Restore separate EMA weights if resuming from checkpoint
+            if hasattr(self, "_resume_ema_state_dict") and self._resume_ema_state_dict is not None:
+                self.ema_model.ema.load_state_dict(self._resume_ema_state_dict)
+                logger.info("Restored separate EMA model state from checkpoint.")
 
         self.model = model
 
@@ -202,7 +283,17 @@ class Trainer:
             batch_size=self.args.batch_size, is_distributed=self.is_distributed
         )
 
-        # 5. External loggers setup
+        # 5. Telemetry Engine Initialization (Rank 0 only, zero terminal clutter)
+        # Initialized strictly AFTER self.model and self.evaluator exist
+        from yolox.utils.telemetry import TelemetryRecorder
+        self.telemetry = TelemetryRecorder(
+            save_dir=self.file_name,
+            model=self.model,
+            record_interval=self.exp.print_interval,
+            rank=self.rank,
+        )
+
+        # 6. External loggers setup
         if self.rank == 0:
             if self.args.logger == "tensorboard":
                 self.tblogger = SummaryWriter(os.path.join(self.file_name, "tensorboard"))
@@ -219,6 +310,10 @@ class Trainer:
         logger.info("Training initialization completed.")
 
     def after_train(self):
+        # Flush and close all file pointers
+        if hasattr(self, "telemetry"):
+            self.telemetry.close()
+
         logger.info(
             "Training completed. Best AP: {:.2f}".format(self.best_ap * 100)
         )
@@ -238,40 +333,75 @@ class Trainer:
                 )
 
     def before_epoch(self):
-        """
-        CAVEAT 14.3 RESOLUTION:
-        Consolidated Single-Point Meta-Training Epoch Synchronization.
-        Executes exactly once per epoch with no duplicate state calls.
-        """
         logger.info("---> start train epoch{}".format(self.epoch + 1))
 
-        # Unwrap DDP if necessary to reach the base YOLOX meta-learning wrapper
+        # Synchronize epoch state across model, head, and dark2
         model_ref = self.model.module if hasattr(self.model, "module") else self.model
         if hasattr(model_ref, "set_meta_training_state"):
             model_ref.set_meta_training_state(self.epoch + 1, self.max_epoch)
 
-        # Check Mosaic shutoff condition
-        if self.epoch + 1 == self.max_epoch - self.exp.no_aug_epochs or self.no_aug:
-            logger.info("---> Closing Mosaic augmentation and enabling L1 loss.")
-            self.train_loader.close_mosaic()
-            if self.is_distributed:
-                self.model.module.head.use_l1 = True
-            else:
-                self.model.head.use_l1 = True
-            self.exp.eval_interval = 1
+        fade_start_epoch = self.max_epoch - self.exp.no_aug_epochs - 10  # Epoch 55
+        fade_end_epoch = self.max_epoch - self.exp.no_aug_epochs        # Epoch 65
+
+        # Progressive Mosaic Annealing (Epochs 55-65)
+        if self.epoch + 1 >= fade_end_epoch or self.no_aug:
             if not self.no_aug:
+                logger.info("---> Fully closing Mosaic augmentation and setting native resolution.")
+                self.train_loader.close_mosaic()
+                self.no_aug = True
+                self.exp.eval_interval = 1
                 self.save_ckpt(ckpt_name="last_mosaic_epoch")
+        elif self.epoch + 1 >= fade_start_epoch:
+            progress = (self.epoch + 1 - fade_start_epoch) / 10.0
+            current_mosaic_prob = max(0.0, self.exp.mosaic_prob * (1.0 - progress))
+            if hasattr(self.train_loader, "dataset") and hasattr(self.train_loader.dataset, "mosaic_prob"):
+                self.train_loader.dataset.mosaic_prob = current_mosaic_prob
+            logger.info(f"---> Mosaic probability linearly annealed to {current_mosaic_prob:.3f}")
+
+        # Progressive L1 Loss Ramp (Epochs 60-65)
+        l1_start_epoch = self.max_epoch - self.exp.no_aug_epochs - 5  # Epoch 60
+        if self.epoch + 1 >= l1_start_epoch:
+            l1_weight = min(1.0, (self.epoch + 1 - l1_start_epoch) / 5.0)
+            head_ref = self.model.module.head if self.is_distributed else self.model.head
+            head_ref.use_l1 = True
+            head_ref.l1_weight = l1_weight
+            logger.info(f"---> Progressive L1 loss active with weight: {l1_weight:.2f}")
+
+        # Dynamic EMA Momentum Annealing across post-Mosaic transition (Epochs 65-70)
+        if self.use_model_ema:
+            if self.epoch + 1 == fade_end_epoch:
+                self.ema_model.decay = 0.9950
+                logger.info("---> Annealing EMA decay to 0.9950 for rapid post-mosaic synchronization.")
+            elif self.epoch + 1 == fade_end_epoch + 5:
+                self.ema_model.decay = 0.9990
+                logger.info("---> Restoring EMA decay to 0.9990 for final precision convergence.")
+
+        # RAM REFINEMENT: Explicitly delete previous prefetcher and clean garbage before instantiating
+        if hasattr(self, "prefetcher"):
+            del self.prefetcher
+        gc.collect()
+        torch.cuda.empty_cache()
 
         self.prefetcher = DataPrefetcher(self.train_loader)
 
     def after_epoch(self):
+        # Record epoch-level prototype manifold geometry
+        if hasattr(self, "telemetry"):
+            self.telemetry.record_prototype_geometry(self.epoch + 1)
+
         self.save_ckpt(ckpt_name="latest")
 
         if (self.epoch + 1) % self.exp.eval_interval == 0:
+            # RAM REFINEMENT: Pre-Validation Memory Purge
+            if hasattr(self, "prefetcher"):
+                del self.prefetcher
+            gc.collect()
+            torch.cuda.empty_cache()
+
             all_reduce_norm(self.model)
             self.evaluate_and_save_model()
 
-        # HOST RAM RECLAMATION (Prevents Windows DataLoader MemoryError)
+        # Post-epoch memory reclamation
         gc.collect()
         torch.cuda.empty_cache()
 
@@ -279,7 +409,6 @@ class Trainer:
         pass
 
     def after_iter(self):
-        """Telemetry logging: tracks afford_loss alongside standard and meta metrics."""
         tracked_keys = [
             "total_loss",
             "iou_loss",
@@ -288,19 +417,14 @@ class Trainer:
             "cls_loss",
             "mem_loss",
             "proto_loss",
+            "intra_loss",
+            "rec_loss",
             "afford_loss",
             "ttt_prob",
         ]
         for k, v in self.outputs.items():
             if k in tracked_keys:
-                if torch.is_tensor(v):
-                    val = v.detach().cpu().item()
-                else:
-                    try:
-                        val = float(v)
-                    except (ValueError, TypeError):
-                        continue
-                self.meter.update(**{k: val})
+                self.meter.update(**{k: v})
 
         if (self.iter + 1) % self.exp.print_interval == 0:
             curr_lr = self.optimizer.param_groups[0]["lr"]
@@ -338,6 +462,9 @@ class Trainer:
             else:
                 self.meter.clear()
 
+            # RAM REFINEMENT: Periodic cyclic garbage collection on Windows to flush worker IPC buffers
+            gc.collect()
+
         # Dynamic Rule-of-64 Multiscale Resolution Selection
         if (self.progress_in_iter + 1) % 10 == 0:
             self.input_size = self.exp.random_resize(
@@ -350,11 +477,8 @@ class Trainer:
 
     def resume_train(self, model):
         """
-        Robust checkpoint and pre-trained weight loader.
-        
-        PATCH 5.1 APPLIED:
-        Remaps checkpoint keys dark2.X -> dark2.backbone_stage.X to recover
-        pre-trained COCO convolution weights into GroupNorm Stage 1.
+        Checkpoints store raw model weights matching optimizer momentum states,
+        and store EMA weights under 'ema_model'.
         """
         if self.args.resume:
             logger.info("Resuming training from checkpoint...")
@@ -374,6 +498,8 @@ class Trainer:
                 if self.args.start_epoch is not None
                 else ckpt.get("start_epoch", 0)
             )
+            # Retain EMA dictionary for restoration after ModelEMA is created
+            self._resume_ema_state_dict = ckpt.get("ema_model", None)
             logger.info(
                 "Resumed checkpoint '{}' at epoch {}".format(ckpt_file, self.start_epoch)
             )
@@ -389,7 +515,8 @@ class Trainer:
                     for k, v in state_dict.items()
                 }
 
-                # PATCH 5.1 APPLIED: Remap dark2 convolution keys to match TTTAdaptiveStage namespace
+                # Safe Key Remapping: maps dark2 convolution filters to TTTAdaptiveStage
+                # Completely bypasses scalar num_batches_tracked to eliminate concatenation crashes
                 remapped_state_dict = {}
                 for k, v in clean_state_dict.items():
                     if "dark2." in k and "backbone_stage" not in k and ".bn." not in k:
@@ -447,12 +574,17 @@ class Trainer:
             self.save_ckpt(f"epoch_{self.epoch + 1}", ap=ap50_95)
 
     def save_ckpt(self, ckpt_name, update_best_ckpt=False, ap=None):
+        """
+        Saves raw model weights matching optimizer momentum states,
+        and separately preserves EMA weights to eliminate state-dict desynchronization.
+        """
         if self.rank == 0:
-            save_model = self.ema_model.ema if self.use_model_ema else self.model
+            raw_model = self.model.module if is_parallel(self.model) else self.model
             logger.info("Saving weights to {}".format(self.file_name))
             ckpt_state = {
                 "start_epoch": self.epoch + 1,
-                "model": save_model.state_dict(),
+                "model": raw_model.state_dict(),  # Raw model matching optimizer states!
+                "ema_model": self.ema_model.ema.state_dict() if self.use_model_ema else None,
                 "optimizer": self.optimizer.state_dict(),
                 "best_ap": self.best_ap,
                 "curr_ap": ap,

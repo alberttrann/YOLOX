@@ -12,23 +12,31 @@ import torch.nn.functional as F
 from yolox.utils import bboxes_iou, cxcywh2xyxy, meshgrid, visualize_assign
 from .losses import IOUloss
 from .network_blocks import BaseConv, DWConv
-from .ttt_modules import EngramMemoryBank, UncertaintyEstimator
+from .ttt_modules import EngramMemoryBank
 from .yolo_head import YOLOXHead
 
 
 class TDE_Head(YOLOXHead):
     """
-    TDE-YOLOX Decoupled Detection Head (Surgical vNext).
-    
-    Surgical Fixes Applied:
-      - Patch 3.1: SimOTA IoU matching cost weight increased from 3.0x to 5.0x (fixes halo drift).
-      - Patch 3.2: Micro-target dynamic-K floor set to min=2 (prevents micro-target K=1 anchor cliff).
-      - Patch 3.3: Zero-cost identity skip connection: reg_feat = reg_conv(x) + x (preserves SPI phase).
-      - Patch 3.4: Rescales conf_loss by resolution factor r_scale = max(1.0, HW / (640*640)) to prevent over-suppression.
-      - Patch 3.5: FP16 exponent bounding clamp([-5.0, 7.0]) & Task-aligned NMS score modulation.
-      - Caveat 14.5: Hyperspherical cosine matching with tau=0.10 (multiplier=10.0).
-      - Caveat 14.6: Detached presence gate obj_mask = sigmoid(obj_output).detach().
-      - Non-Destructive FiLM: Scale-matched additive residual modulation preserves macro-objects in fog.
+    TDE-YOLOX Decoupled Detection Head (Hardened vFinal).
+
+    Core Architectural Refinements:
+      - Purged Feature Sabotage: Clean convolutional features propagate uncorrupted;
+        15% Bernoulli spatial dropout and Gaussian noise are permanently deleted.
+      - Native 1x1 Conv2d Latent Projection: Operates directly on 2D feature maps,
+        eliminating 4 redundant flatten/permute tensor copies per level.
+      - Zero-Initialized Spatial Smoothers: Residual depthwise smoothing with zero weights
+        guarantees exact 1.0x identity at Step 0, eliminating Dirac amplitude inflation.
+      - Grounded Manifold Uncertainty: Uncertainty is derived from prototype distance
+        grounded by detached objectness; strictly zero on background, reactive in fog/night.
+      - LayerNorm-Safe Soft-Gated Hybrid FiLM: Multiplicative gating on background guarantees
+        zero empty-space hallucination, while smooth Sigmoid recovery restores fog targets.
+      - Monotonic Bayesian Joint Scoring: S = p_obj * p_cls purges false-positive rank inversion.
+      - SimOTA Boundary Zero-Candidate Guard: Prevents empty-tensor topk crashes on borders.
+      - Progressive Continuous Objectness Targets: Soft IoU targets ramped across Epochs 10-50
+        eliminate cold-start deadlock while permanently suppressing boundary halo duplicates.
+      - Direct Integer Label Passing: matched_classes_concat passes true integer classes.
+      - Balanced Loss Equilibrium: Rescaled reg_weight = 2.5; normalized strictly by N_fg.
     """
 
     def __init__(
@@ -44,24 +52,55 @@ class TDE_Head(YOLOXHead):
         super().__init__(num_classes, width, strides, in_channels, act, depthwise)
         self.width = width
 
-        # Upgrade IoU loss to OIoU (Exponential shape-calibrated regression)
+        # Upgrade IoU loss to Quadratic Smooth OIoU (theta=2.0)
         self.iou_loss = IOUloss(reduction="none", loss_type=loss_type)
 
         self.latent_dim = 128
         self.memory_banks = nn.ModuleList()
-        self.uncertainty_gates = nn.ModuleList()
         self.latent_projectors = nn.ModuleList()
+        self.spatial_smoothers = nn.ModuleList()
+        self.memory_proj_back = nn.ModuleList()
         self.memory_norms = nn.ModuleList()
+
+        # Zero-initialized regression residual: preserves 100% pre-trained COCO regression at Step 0
+        self.gamma_reg = nn.Parameter(torch.zeros(1))
+
+        # Zero-initialized memory gate: guarantees ZERO random prototype noise at Step 0
+        self.mem_gate = nn.Parameter(torch.zeros(1))
+
+        # Track external training epoch for progressive target schedule
+        self.current_epoch = 1
+        self.max_epochs = 80
 
         for i in range(len(in_channels)):
             feat_channels = int(256 * width)
-            self.latent_projectors.append(nn.Linear(feat_channels, self.latent_dim))
-            # Temperature = 10.0 enforces stable contrastive matching (tau = 0.10)
-            self.memory_banks.append(
-                EngramMemoryBank(num_classes, self.latent_dim, temperature=10.0)
+            
+            # Native 1x1 Conv2d projection operates directly on 2D spatial maps
+            self.latent_projectors.append(
+                nn.Conv2d(feat_channels, self.latent_dim, kernel_size=1, stride=1, padding=0)
             )
-            self.uncertainty_gates.append(UncertaintyEstimator(self.latent_dim))
+            
+            # Zero-initialized residual spatial smoother: z + DWConv(z) = z at Step 0
+            smoother = nn.Conv2d(
+                self.latent_dim, self.latent_dim, kernel_size=3, padding=1, groups=self.latent_dim, bias=False
+            )
+            nn.init.zeros_(smoother.weight)
+            self.spatial_smoothers.append(smoother)
+
+            # Multi-Centroid Memory Bank: 4 sub-centroids per class, tau = 0.25 (4.0x multiplier)
+            self.memory_banks.append(
+                EngramMemoryBank(num_classes, self.latent_dim, num_centroids=4, temperature=4.0)
+            )
+
+            # Projected memory expansion back to convolutional channel dimension
+            self.memory_proj_back.append(
+                nn.Conv2d(self.latent_dim, feat_channels, kernel_size=1, stride=1, padding=0)
+            )
             self.memory_norms.append(nn.LayerNorm(feat_channels))
+
+    def set_epoch_state(self, epoch, max_epochs):
+        self.current_epoch = epoch
+        self.max_epochs = max_epochs
 
     def forward(self, xin, labels=None, imgs=None):
         outputs = []
@@ -77,51 +116,66 @@ class TDE_Head(YOLOXHead):
             x = self.stems[k](x)
 
             # --- BRANCH 1: REGRESSION & OBJECTNESS (Translation-Covariant, Memory-Free) ---
-            # PATCH 3.3 APPLIED: Zero-cost identity skip preserves high-frequency SPI phase channels
-            reg_feat = reg_conv(x) + x
+            # Step-0 exact pre-trained regression mapping
+            reg_feat = reg_conv(x) + 0.20 * torch.tanh(self.gamma_reg) * x
             reg_output = self.reg_preds[k](reg_feat)
             obj_output = self.obj_preds[k](reg_feat)
 
-            # --- BRANCH 2: CLASSIFICATION (Engram-Augmented) ---
+            # --- BRANCH 2: CLASSIFICATION (Unshackled Spatial Representation & Multi-Centroid FiLM) ---
             cls_feat = cls_conv(x)
             B, C, H, W = cls_feat.shape
 
-            # Adversarial Regularization (Forces Memory Utilization on Clean Data)
-            if self.training:
-                f_mask = (torch.rand(B, 1, H, W, device=x.device) > 0.15).float()
-                cls_feat_mod = (cls_feat + torch.randn_like(cls_feat) * 0.05) * f_mask
-            else:
-                cls_feat_mod = cls_feat
+            # Purged feature sabotage: native clean convolutional features propagate uncorrupted
+            cls_feat_mod = cls_feat
 
-            cls_feat_flat = cls_feat_mod.permute(0, 2, 3, 1).reshape(B, H * W, C)
-            latent_vec = self.latent_projectors[k](cls_feat_flat)
+            # Native 1x1 Conv2d projection operates directly on 2D maps
+            latent_sp = self.latent_projectors[k](cls_feat_mod)  # [B, 128, H, W]
 
-            # Continuous Uncertainty Gate
-            uncertainty = self.uncertainty_gates[k](latent_vec)  # [B, H*W, 1]
+            # Zero-initialized residual spatial smoother (exact 1.0x identity at Step 0)
+            latent_smooth = latent_sp + self.spatial_smoothers[k](latent_sp)
 
-            # CAVEAT 14.6 RESOLUTION: Explicitly detach objectness mask to prevent gradient leakage
-            obj_mask = torch.sigmoid(obj_output.view(B, 1, -1).permute(0, 2, 1)).detach()
+            # Flatten to [B, H*W, 128] ONLY for memory bank prototype query
+            latent_flat = latent_smooth.permute(0, 2, 3, 1).reshape(B, H * W, self.latent_dim)
+            x_norm_latent = F.normalize(latent_flat, p=2, dim=-1)
 
-            # Hyperspherical Memory Retrieval (CAVEAT 14.5 RESOLUTION)
-            memory_gated, norm_cosine_logits = self.memory_banks[k](
-                latent_vec, uncertainty, obj_mask
+            # Grounded Manifold Uncertainty: 0 on background; reactive in fog/night
+            obj_prob_detached = torch.sigmoid(obj_output).detach()  # [B, 1, H, W]
+            obj_prob_flat = obj_prob_detached.view(B, 1, -1).permute(0, 2, 1)  # [B, H*W, 1]
+
+            p_flat = self.memory_banks[k].prototypes.view(
+                self.num_classes * self.memory_banks[k].num_centroids, self.latent_dim
             )
-            aux_memory_logits_list.append(norm_cosine_logits)
+            p_norm = F.normalize(p_flat, p=2, dim=-1)
+            max_align = torch.matmul(x_norm_latent, p_norm.t()).max(dim=-1, keepdim=True).values  # [B, H*W, 1]
 
-            # DYNAMIC SCALE-MATCHED FiLM INJECTION (Preserves Macro Buses and Trucks)
-            memory_inflated = F.linear(memory_gated, self.latent_projectors[k].weight.t())
-            memory_normed = self.memory_norms[k](memory_inflated)
+            uncertainty_flat = obj_prob_flat * torch.clamp(1.0 - max_align, min=0.0, max=1.0)
+            uncertainty_sp = uncertainty_flat.view(B, H, W, 1).permute(0, 3, 1, 2)  # [B, 1, H, W]
 
-            cls_std = cls_feat_flat.std(dim=-1, keepdim=True).detach().clamp(min=1e-3, max=100.0)
-            memory_scaled = memory_normed * cls_std
+            # Query Memory Bank: returns un-gated memory mixture and class-level logits
+            memory_retrieved_flat, class_logits_flat = self.memory_banks[k](latent_flat)
+            aux_memory_logits_list.append(class_logits_flat)
 
-            gate_spatial = uncertainty.view(B, H, W, 1).permute(0, 3, 1, 2)
-            mem_spatial = memory_scaled.view(B, H, W, C).permute(0, 3, 1, 2)
+            # Reconstruct 2D spatial memory map
+            # Reconstruct 2D spatial memory map in matching precision
+            mem_sp = memory_retrieved_flat.view(B, H, W, self.latent_dim).permute(0, 3, 1, 2).to(dtype=x.dtype)
+            mem_inflated = self.memory_proj_back[k](mem_sp)  # [B, C, H, W]
 
-            # Non-destructive FiLM residual: Base features are NEVER multiplied by (1 - G)
+            # LayerNorm on un-gated memory (Bug B6 Fix: no gate cancellation!)
+            mem_normed = self.memory_norms[k](mem_inflated.permute(0, 2, 3, 1)).permute(0, 3, 1, 2)
+
+            # Scale-matched FiLM modulation
+            cls_std = cls_feat.std(dim=1, keepdim=True).detach().clamp(min=1e-3, max=100.0)
+            mem_scaled = mem_normed * cls_std
+
+            # Zero-Gated FiLM Injection:
+            # mem_gate is initialized to 0.0 -> tanh(0) = 0.0 -> restored_cls_feat == cls_feat at Step 0!
+            # Zero random prototype noise can infect the classification head during early training
+            effective_gate = 0.20 * torch.tanh(self.mem_gate) * uncertainty_sp
+            soft_obj_gate = torch.sigmoid((obj_prob_detached - 0.15) / 0.05)
+            
             restored_cls_feat = (
-                cls_feat * (1.0 + torch.tanh(gate_spatial * mem_spatial))
-                + gate_spatial * mem_spatial
+                cls_feat * (1.0 + effective_gate * torch.tanh(mem_scaled))
+                + effective_gate * mem_scaled * soft_obj_gate
             )
 
             cls_output = self.cls_preds[k](restored_cls_feat)
@@ -160,6 +214,7 @@ class TDE_Head(YOLOXHead):
                 num_fg,
                 cls_targets,
                 fg_masks,
+                matched_classes_concat,
             ) = self.get_losses_with_targets(
                 imgs,
                 x_shifts,
@@ -180,6 +235,7 @@ class TDE_Head(YOLOXHead):
                 aux_memory_logits_list,
                 cls_targets,
                 fg_masks,
+                matched_classes_concat,
             )
         else:
             self.hw = [x.shape[-2:] for x in outputs]
@@ -204,11 +260,15 @@ class TDE_Head(YOLOXHead):
             batch_size, hsize * wsize, -1
         )
         grid = grid.view(1, -1, 2)
-        output[..., :2] = (output[..., :2] + grid) * stride
 
-        # PATCH 3.5 APPLIED: Clamped log-space box dimension pre-exp to eliminate FP16 overflow (>65,504)
+        # OUT-OF-PLACE RECONSTRUCTION:
+        # Replaces in-place slice mutation (output[..., :2] = ...) with torch.cat,
+        # completely eliminating AsStridedBackward0 version conflicts during backward()
+        xy = (output[..., :2] + grid) * stride
         clamped_dim = torch.clamp(output[..., 2:4], min=-5.0, max=7.0)
-        output[..., 2:4] = torch.exp(clamped_dim) * stride
+        wh = torch.exp(clamped_dim) * stride
+        
+        output = torch.cat([xy, wh, output[..., 4:]], dim=-1)
         return output, grid
 
     def decode_outputs(self, outputs, dtype):
@@ -224,18 +284,18 @@ class TDE_Head(YOLOXHead):
         grids = torch.cat(grids, dim=1).type(dtype)
         strides = torch.cat(strides, dim=1).type(dtype)
 
-        # PATCH 3.5 APPLIED: Clamped exponent range avoids +Inf coordinates in half-precision
+        # Clamped exponent range avoids +Inf coordinates in half-precision
         clamped_dim = torch.clamp(outputs[..., 2:4], min=-5.0, max=7.0)
 
-        # PATCH 3.5 APPLIED: Task-aligned NMS score modulation: Score = obj^0.2 * cls^0.8
-        obj_aligned = outputs[..., 4:5].clamp(min=1e-6).pow(0.2)
-        cls_aligned = outputs[..., 5:].clamp(min=1e-6).pow(0.8)
+        # Monotonic Bayesian Joint Scoring: purges low-objectness background false positives
+        obj_prob = outputs[..., 4:5]
+        cls_prob = outputs[..., 5:]
 
         outputs = torch.cat([
             (outputs[..., 0:2] + grids) * strides,
             torch.exp(clamped_dim) * strides,
-            obj_aligned,
-            cls_aligned,
+            obj_prob,
+            cls_prob,
         ], dim=-1)
         return outputs
 
@@ -269,10 +329,20 @@ class TDE_Head(YOLOXHead):
             y_shifts,
         )
 
+        num_in_boxes_anchor = fg_mask.sum().item()
+        # Empty-candidate early exit guard: prevents torch.topk crashes on image boundary boxes
+        if num_in_boxes_anchor == 0:
+            return (
+                gt_classes.new_zeros(0),
+                fg_mask,
+                gt_bboxes_per_image.new_zeros(0),
+                gt_classes.new_zeros(0, dtype=torch.int64),
+                0,
+            )
+
         bboxes_preds_per_image = bboxes_preds_per_image[fg_mask]
         cls_preds_ = cls_preds[batch_idx][fg_mask]
         obj_preds_ = obj_preds[batch_idx][fg_mask]
-        num_in_boxes_anchor = bboxes_preds_per_image.shape[0]
 
         if mode == "cpu":
             gt_bboxes_per_image = gt_bboxes_per_image.cpu()
@@ -285,22 +355,28 @@ class TDE_Head(YOLOXHead):
         if mode == "cpu":
             cls_preds_, obj_preds_ = cls_preds_.cpu(), obj_preds_.cpu()
 
+        # Convert logits to probabilities safely out-of-place
         with torch.cuda.amp.autocast(enabled=False):
-            cls_preds_ = (
-                cls_preds_.float().sigmoid_() * obj_preds_.float().sigmoid_()
-            ).sqrt()
+            cls_prob = torch.sigmoid(cls_preds_.float())
+            obj_prob = torch.sigmoid(obj_preds_.float())
+            
+            # Sqrt joint probability calculation with explicit bounding
+            # Clamping to [0.0, 1.0 - 1e-7] strictly prevents Loss.cu:103 assertion crashes
+            joint_prob = torch.sqrt(cls_prob * obj_prob)
+            joint_prob = torch.clamp(joint_prob, min=0.0, max=1.0 - 1e-7)
+            joint_prob = torch.nan_to_num(joint_prob, nan=0.0, posinf=1.0 - 1e-7, neginf=0.0)
+
             pair_wise_cls_loss = F.binary_cross_entropy(
-                cls_preds_.unsqueeze(0).repeat(num_gt, 1, 1),
+                joint_prob.unsqueeze(0).repeat(num_gt, 1, 1),
                 gt_cls_per_image.unsqueeze(1).repeat(1, num_in_boxes_anchor, 1),
                 reduction="none"
             ).sum(-1)
         del cls_preds_
 
-        # PATCH 3.1 APPLIED: Upgraded IoU matching cost multiplier from 3.0 to 5.0
-        # Prevents loose halo/reflection anchors from winning dynamic target assignment
+        # Rebalanced 3.0x IoU cost restores semantic compatibility over geometric coincidence
         cost = (
             pair_wise_cls_loss
-            + 5.0 * pair_wise_ious_loss
+            + 3.0 * pair_wise_ious_loss
             + float(1e6) * (~geometry_relation)
         )
 
@@ -332,11 +408,19 @@ class TDE_Head(YOLOXHead):
         n_candidate_k = min(10, pair_wise_ious.size(1))
         topk_ious, _ = torch.topk(pair_wise_ious, n_candidate_k, dim=1)
 
-        # PATCH 3.2 APPLIED: Minimum anchor floor min=2 prevents micro-target gradient instability
-        dynamic_ks = torch.clamp(topk_ious.sum(1).int(), min=2, max=10)
+        # IoU-Adaptive Dynamic-K Floor: allows k=1 for isolated micro targets, k>=2 for overlapped targets
+        iou_sums = topk_ious.sum(1)
+        dynamic_ks = torch.where(
+            iou_sums < 1.20,
+            torch.ones_like(iou_sums, dtype=torch.int32),
+            torch.clamp(iou_sums.int(), min=2, max=10)
+        )
+        # Ensure dynamic_ks never exceeds available candidate count
+        dynamic_ks = torch.clamp(dynamic_ks, min=1, max=n_candidate_k)
+
         for gt_idx in range(num_gt):
             _, pos_idx = torch.topk(
-                cost[gt_idx], k=dynamic_ks[gt_idx], largest=False
+                cost[gt_idx], k=dynamic_ks[gt_idx].item(), largest=False
             )
             matching_matrix[gt_idx][pos_idx] = 1
 
@@ -372,123 +456,137 @@ class TDE_Head(YOLOXHead):
         origin_preds,
         dtype,
     ):
-        bbox_preds = outputs[:, :, :4]
-        obj_preds = outputs[:, :, 4:5]
-        cls_preds = outputs[:, :, 5:]
+        # Enforce Float32 for all loss computations to eliminate FP16 accumulation overflow
+        with torch.cuda.amp.autocast(enabled=False):
+            bbox_preds = outputs[:, :, :4].float()
+            obj_preds = outputs[:, :, 4:5].float()
+            cls_preds = outputs[:, :, 5:].float()
 
-        nlabel = (labels.sum(dim=2) > 0).sum(dim=1)
-        total_num_anchors = outputs.shape[1]
-        x_shifts = torch.cat(x_shifts, 1)
-        y_shifts = torch.cat(y_shifts, 1)
-        expanded_strides = torch.cat(expanded_strides, 1)
-        if self.use_l1:
-            origin_preds = torch.cat(origin_preds, 1)
+            nlabel = (labels.sum(dim=2) > 0).sum(dim=1)
+            total_num_anchors = outputs.shape[1]
+            x_shifts = torch.cat(x_shifts, 1).float()
+            y_shifts = torch.cat(y_shifts, 1).float()
+            expanded_strides = torch.cat(expanded_strides, 1).float()
+            if self.use_l1:
+                origin_preds = torch.cat(origin_preds, 1).float()
 
-        cls_targets = []
-        reg_targets = []
-        l1_targets = []
-        obj_targets = []
-        fg_masks = []
+            cls_targets = []
+            reg_targets = []
+            l1_targets = []
+            obj_targets = []
+            fg_masks = []
+            matched_classes = []
 
-        num_fg = 0.0
-        num_gts = 0.0
+            num_fg = 0.0
+            num_gts = 0.0
 
-        for batch_idx in range(outputs.shape[0]):
-            num_gt = int(nlabel[batch_idx])
-            num_gts += num_gt
-            if num_gt == 0:
-                cls_target = outputs.new_zeros((0, self.num_classes))
-                reg_target = outputs.new_zeros((0, 4))
-                l1_target = outputs.new_zeros((0, 4))
-                obj_target = outputs.new_zeros((total_num_anchors, 1))
-                fg_mask = outputs.new_zeros(total_num_anchors).bool()
-            else:
-                gt_bboxes_per_image = labels[batch_idx, :num_gt, 1:5]
-                gt_classes = labels[batch_idx, :num_gt, 0]
-                bboxes_preds_per_image = bbox_preds[batch_idx]
+            lambda_soft = min(1.0, max(0.0, (self.current_epoch - 10) / 40.0))
 
-                (
-                    gt_matched_classes,
-                    fg_mask,
-                    pred_ious_this_matching,
-                    matched_gt_inds,
-                    num_fg_img,
-                ) = self.get_assignments(
-                    batch_idx,
-                    num_gt,
-                    gt_bboxes_per_image,
-                    gt_classes,
-                    bboxes_preds_per_image,
-                    expanded_strides,
-                    x_shifts,
-                    y_shifts,
-                    cls_preds,
-                    obj_preds,
-                )
+            for batch_idx in range(outputs.shape[0]):
+                num_gt = int(nlabel[batch_idx])
+                num_gts += num_gt
+                if num_gt == 0:
+                    cls_target = outputs.new_zeros((0, self.num_classes), dtype=torch.float32)
+                    reg_target = outputs.new_zeros((0, 4), dtype=torch.float32)
+                    l1_target = outputs.new_zeros((0, 4), dtype=torch.float32)
+                    obj_target = outputs.new_zeros((total_num_anchors, 1), dtype=torch.float32)
+                    fg_mask = outputs.new_zeros(total_num_anchors).bool()
+                    matched_class = outputs.new_zeros(0, dtype=torch.int64)
+                else:
+                    gt_bboxes_per_image = labels[batch_idx, :num_gt, 1:5].float()
+                    gt_classes = labels[batch_idx, :num_gt, 0]
+                    bboxes_preds_per_image = bbox_preds[batch_idx]
 
-                num_fg += num_fg_img
-
-                cls_target = F.one_hot(
-                    gt_matched_classes.to(torch.int64), self.num_classes
-                ) * pred_ious_this_matching.unsqueeze(-1)
-                obj_target = fg_mask.unsqueeze(-1)
-                reg_target = gt_bboxes_per_image[matched_gt_inds]
-                if self.use_l1:
-                    l1_target = self.get_l1_target(
-                        outputs.new_zeros((num_fg_img, 4)),
-                        gt_bboxes_per_image[matched_gt_inds],
-                        expanded_strides[0][fg_mask],
-                        x_shifts=x_shifts[0][fg_mask],
-                        y_shifts=y_shifts[0][fg_mask],
+                    (
+                        gt_matched_classes,
+                        fg_mask,
+                        pred_ious_this_matching,
+                        matched_gt_inds,
+                        num_fg_img,
+                    ) = self.get_assignments(
+                        batch_idx,
+                        num_gt,
+                        gt_bboxes_per_image,
+                        gt_classes,
+                        bboxes_preds_per_image,
+                        expanded_strides,
+                        x_shifts,
+                        y_shifts,
+                        cls_preds,
+                        obj_preds,
                     )
 
-            cls_targets.append(cls_target)
-            reg_targets.append(reg_target)
-            obj_targets.append(obj_target.to(dtype))
-            fg_masks.append(fg_mask)
-            if self.use_l1:
-                l1_targets.append(l1_target)
+                    num_fg += num_fg_img
 
-        cls_targets_concat = torch.cat(cls_targets, 0)
-        reg_targets_concat = torch.cat(reg_targets, 0)
-        obj_targets_concat = torch.cat(obj_targets, 0)
-        fg_masks_concat = torch.cat(fg_masks, 0)
+                    cls_target = F.one_hot(
+                        gt_matched_classes.to(torch.int64), self.num_classes
+                    ).float() * pred_ious_this_matching.unsqueeze(-1).float()
 
-        num_fg = max(num_fg, 1)
-        loss_iou = (
-            self.iou_loss(bbox_preds.view(-1, 4)[fg_masks_concat], reg_targets_concat)
-        ).sum() / num_fg
+                    obj_target = outputs.new_zeros((total_num_anchors, 1), dtype=torch.float32)
+                    if num_fg_img > 0:
+                        soft_iou = torch.clamp(pred_ious_this_matching.unsqueeze(-1).float(), min=0.10, max=1.0)
+                        target_val = (1.0 - lambda_soft) * 1.0 + lambda_soft * soft_iou
+                        obj_target[fg_mask] = target_val
 
-        # PATCH 3.4 APPLIED: High-resolution objectness loss normalization factor
-        # Eliminates the +44% background over-suppression penalty at 576x1024
-        r_scale = max(1.0, float(imgs.shape[-2] * imgs.shape[-1]) / (640.0 * 640.0))
-        loss_obj = (
-            self.bcewithlog_loss(obj_preds.view(-1, 1), obj_targets_concat)
-        ).sum() / (num_fg * r_scale)
+                    matched_class = gt_matched_classes.to(torch.int64)
+                    reg_target = gt_bboxes_per_image[matched_gt_inds]
+                    if self.use_l1:
+                        l1_target = self.get_l1_target(
+                            outputs.new_zeros((num_fg_img, 4), dtype=torch.float32),
+                            gt_bboxes_per_image[matched_gt_inds],
+                            expanded_strides[0][fg_mask],
+                            x_shifts=x_shifts[0][fg_mask],
+                            y_shifts=y_shifts[0][fg_mask],
+                        )
 
-        loss_cls = (
-            self.bcewithlog_loss(
-                cls_preds.view(-1, self.num_classes)[fg_masks_concat], cls_targets_concat
-            )
-        ).sum() / num_fg
+                cls_targets.append(cls_target)
+                reg_targets.append(reg_target)
+                obj_targets.append(obj_target)
+                fg_masks.append(fg_mask)
+                matched_classes.append(matched_class)
+                if self.use_l1:
+                    l1_targets.append(l1_target)
 
-        loss_l1 = 0.0
-        if self.use_l1:
-            l1_targets_concat = torch.cat(l1_targets, 0)
-            loss_l1 = (
-                self.l1_loss(origin_preds.view(-1, 4)[fg_masks_concat], l1_targets_concat)
+            cls_targets_concat = torch.cat(cls_targets, 0)
+            reg_targets_concat = torch.cat(reg_targets, 0)
+            obj_targets_concat = torch.cat(obj_targets, 0)
+            fg_masks_concat = torch.cat(fg_masks, 0)
+            matched_classes_concat = torch.cat(matched_classes, 0)
+
+            num_fg = max(num_fg, 1)
+            loss_iou = (
+                self.iou_loss(bbox_preds.view(-1, 4)[fg_masks_concat], reg_targets_concat)
             ).sum() / num_fg
 
-        reg_weight = 5.0
-        total_loss = reg_weight * loss_iou + loss_obj + loss_cls + loss_l1
+            loss_obj = (
+                self.bcewithlog_loss(obj_preds.view(-1, 1), obj_targets_concat)
+            ).sum() / num_fg
 
-        return (
-            total_loss,
-            reg_weight * loss_iou,
-            loss_obj,
-            loss_cls,
-            loss_l1,
-            num_fg / max(num_gts, 1),
-            cls_targets_concat,
-            fg_masks_concat,
-        )
+            loss_cls = (
+                self.bcewithlog_loss(
+                    cls_preds.view(-1, self.num_classes)[fg_masks_concat], cls_targets_concat
+                )
+            ).sum() / num_fg
+
+            loss_l1 = 0.0
+            if self.use_l1:
+                l1_targets_concat = torch.cat(l1_targets, 0)
+                l1_weight = getattr(self, "l1_weight", 1.0)
+                loss_l1 = (
+                    self.l1_loss(origin_preds.view(-1, 4)[fg_masks_concat], l1_targets_concat)
+                ).sum() / num_fg * l1_weight
+
+            reg_weight = 2.5
+            total_loss = reg_weight * loss_iou + loss_obj + loss_cls + loss_l1
+
+            return (
+                total_loss,
+                reg_weight * loss_iou,
+                loss_obj,
+                loss_cls,
+                loss_l1,
+                num_fg / max(num_gts, 1),
+                cls_targets_concat,
+                fg_masks_concat,
+                matched_classes_concat,
+            )

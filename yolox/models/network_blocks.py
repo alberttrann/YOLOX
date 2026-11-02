@@ -57,14 +57,14 @@ class BaseConv(nn.Module):
 class BaseConvGN(nn.Module):
     """
     TDE-YOLOX Stateless Normalization Primitive: Conv2d -> GroupNorm -> Activation.
-    
-    Dynamically computes the optimal group count (targeting 16 groups) while 
-    strictly guaranteeing out_channels % actual_groups == 0. Eliminates 
-    BatchNorm running_mean/running_var dependency for stateless meta-adaptation.
+
+    Rebalanced to target_groups=8 (previously 16).
+    On 64-channel stages (dark2), 8 groups yield 8 channels per group (up from 4),
+    preserving inter-channel covariance and filter diversity for edge detection.
     """
 
     def __init__(
-        self, in_channels, out_channels, ksize, stride, groups=1, bias=False, act="silu", target_groups=16
+        self, in_channels, out_channels, ksize, stride, groups=1, bias=False, act="silu", target_groups=8
     ):
         super().__init__()
         pad = (ksize - 1) // 2
@@ -132,9 +132,10 @@ class DWConvGN(nn.Module):
             stride=stride,
             groups=in_channels,
             act=act,
+            target_groups=8,
         )
         self.pconv = BaseConvGN(
-            in_channels, out_channels, ksize=1, stride=1, groups=1, act=act
+            in_channels, out_channels, ksize=1, stride=1, groups=1, act=act, target_groups=8
         )
 
     def forward(self, x):
@@ -282,17 +283,10 @@ class Focus(nn.Module):
         return self.conv(x)
 
 
-# =========================================================================
-# ADVANCED UAV/SCALE-PRESERVING BLOCKS (EMA & C2fA)
-# =========================================================================
-
 class EMA(nn.Module):
     """
     Efficient Multi-Scale Attention (Ouyang et al., ICASSP 2023).
-    
-    PATCH 2.1 APPLIED: Zero-Initialized Identity Residual (X + gamma * EMA(X)).
-    Eliminates the 0.50x initial feature magnitude shock in deep backbone stages (dark4, dark5).
-    At Step 0, gamma = 0.0 guarantees exact mathematical identity passthrough of pre-trained COCO features.
+    Zero-Initialized Identity Residual: X + gamma * EMA(X).
     """
 
     def __init__(self, channels, factor=8):
@@ -319,25 +313,21 @@ class EMA(nn.Module):
         self.conv3x3 = nn.Conv2d(
             self.channels_per_group, self.channels_per_group, kernel_size=3, stride=1, padding=1
         )
-
-        # PATCH 2.1: Zero-initialized learnable residual gating parameter
         self.gamma = nn.Parameter(torch.zeros(1))
 
     def forward(self, x):
         b, c, h, w = x.shape
         group_x = x.reshape(b * self.groups, self.channels_per_group, h, w)
 
-        # 1. 1D Directional Strip Encodings along H and W
         x_h = self.pool_h(group_x)
         x_w = self.pool_w(group_x).permute(0, 1, 3, 2)
         hw = self.conv1x1(torch.cat([x_h, x_w], dim=2))
         x_h, x_w = torch.split(hw, [h, w], dim=2)
+        x_w = x_w.permute(0, 1, 3, 2)
 
-        # 2. Parallel 1x1 Semantic Attention and 3x3 Spatial Feature Extraction
-        x1 = self.gn(group_x * x_h.sigmoid() * x_w.permute(0, 1, 3, 2).sigmoid())
+        x1 = self.gn(group_x * x_h.sigmoid() * x_w.sigmoid())
         x2 = self.conv3x3(group_x)
 
-        # 3. Cross-Spatial Global Interaction
         x11 = self.softmax(self.agp(x1).reshape(b * self.groups, -1, 1).permute(0, 2, 1))
         x12 = x2.reshape(b * self.groups, self.channels_per_group, -1)
         x21 = self.softmax(self.agp(x2).reshape(b * self.groups, -1, 1).permute(0, 2, 1))
@@ -347,18 +337,13 @@ class EMA(nn.Module):
             b * self.groups, 1, h, w
         )
         ema_out = (group_x * weights.sigmoid()).reshape(b, c, h, w)
-
-        # PATCH 2.1 APPLIED: Non-destructive identity residual addition
         return x + self.gamma * ema_out
 
 
 class C2fA(nn.Module):
     """
     YOLO-UTD C2fA Module (Sensors 2026).
-    
-    Integrates the EMA cross-spatial attention mechanism into standard C2f blocks.
-    Replaces standard CSPLayer in deep stages (dark4 stride-16, dark5 stride-32)
-    to maintain spatial centroids of distant and small objects prior to Neck aggregation.
+    Integrates EMA cross-spatial attention into standard C2f blocks.
     """
 
     def __init__(self, c1, c2, n=1, shortcut=False, depthwise=False, act="silu", e=0.5):

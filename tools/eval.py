@@ -153,32 +153,18 @@ def main(exp, args, num_gpu):
     if args.tsize is not None:
         exp.test_size = (args.tsize, args.tsize)
 
-    # 1. Instantiate Model Architecture
+    # 1. Instantiate Base Model Architecture
     model = exp.get_model()
-
-    # 2. Enforce Deterministic Full-Adaptation Mode for Zero-Shot OOD Testing
     model_ref = model.module if hasattr(model, "module") else model
-    if hasattr(model_ref, "set_meta_training_state"):
-        logger.info("TDE-YOLOX: Enforcing Test-Time Adaptation Mode (ttt_prob = 1.0)...")
-        model_ref.set_meta_training_state(exp.max_epoch, exp.max_epoch)
 
-    # 3. Trigger Structural Re-Parameterization Deployment Folding (RepDWConv -> 3x3 DWConv)
-    if hasattr(model_ref, "backbone") and hasattr(model_ref.backbone, "switch_to_deploy"):
-        logger.info("TDE-YOLOX: Folding RepDWConv branches into single 3x3 convs for deployment...")
-        model_ref.backbone.switch_to_deploy()
-
-    logger.info("Model Summary: {}".format(get_model_info(model, exp.test_size)))
-
-    # 4. Setup COCO Evaluator with Per-Class Metrics Output
-    evaluator = exp.get_evaluator(args.batch_size, is_distributed, args.test, args.legacy)
-    evaluator.per_class_AP = True
-    evaluator.per_class_AR = True
-
+    # 2. Setup Device and Evaluation Mode
     torch.cuda.set_device(rank)
     model.cuda(rank)
     model.eval()
 
-    # 5. Load Checkpoint Weights
+    # 3. LOAD CHECKPOINT WEIGHTS FIRST (Bug B3 Fix)
+    # Checkpoint contains multi-branch RepDWConv weights (dw_3x3, dw_1x1).
+    # Strict loading must execute BEFORE structural re-parameterization folding!
     if not args.speed and not args.trt:
         ckpt_file = args.ckpt if args.ckpt is not None else os.path.join(file_name, "best_ckpt.pth")
         logger.info("Loading evaluation checkpoint from {}".format(ckpt_file))
@@ -188,15 +174,40 @@ def main(exp, args, num_gpu):
         clean_state_dict = {
             (k[7:] if k.startswith("module.") else k): v for k, v in state_dict.items()
         }
-        model.load_state_dict(clean_state_dict)
-        logger.info("Loaded checkpoint weights successfully.")
+        
+        # Strict loading ensures 100% parameter coverage; zero silent missing weights
+        try:
+            model.load_state_dict(clean_state_dict, strict=True)
+            logger.info("Loaded checkpoint weights with strict=True successfully.")
+        except RuntimeError as e:
+            logger.warning(f"Strict load failed ({e}). Falling back to non-strict load with coverage logging.")
+            missing, unexpected = model.load_state_dict(clean_state_dict, strict=False)
+            logger.info(f"Missing keys: {len(missing)}, Unexpected keys: {len(unexpected)}")
+
+    # 4. Enforce Deterministic TTT Mode for Zero-Shot OOD Evaluation
+    if hasattr(model_ref, "set_meta_training_state"):
+        logger.info("TDE-YOLOX: Enforcing Test-Time Adaptation Mode (ttt_prob = 1.0)...")
+        model_ref.set_meta_training_state(exp.max_epoch, exp.max_epoch)
+
+    # 5. TRIGGER STRUCTURAL RE-PARAMETERIZATION DEPLOYMENT FOLDING SECOND (Bug B3 Fix)
+    # Folds loaded dw_3x3 and dw_1x1 weights into fused_conv for zero-overhead inference
+    if hasattr(model_ref, "backbone") and hasattr(model_ref.backbone, "switch_to_deploy"):
+        logger.info("TDE-YOLOX: Folding RepDWConv branches into single 3x3 convs for deployment...")
+        model_ref.backbone.switch_to_deploy()
+
+    # 6. Execute Selective Conv-BN Fusion
+    if args.fuse:
+        model = fuse_tde_model(model)
+
+    logger.info("Model Summary: {}".format(get_model_info(model, exp.test_size)))
+
+    # 7. Setup COCO Evaluator with Per-Class Metrics Output
+    evaluator = exp.get_evaluator(args.batch_size, is_distributed, args.test, args.legacy)
+    evaluator.per_class_AP = True
+    evaluator.per_class_AR = True
 
     if is_distributed:
         model = DDP(model, device_ids=[rank])
-
-    # 6. Execute Selective Fusion
-    if args.fuse:
-        model = fuse_tde_model(model)
 
     if args.trt:
         assert not args.fuse and not is_distributed and args.batch_size == 1, (
@@ -210,7 +221,7 @@ def main(exp, args, num_gpu):
         trt_file = None
         decoder = None
 
-    # 7. Execute Evaluation
+    # 8. Execute Benchmark Evaluation
     logger.info("Starting TDE-YOLOX High-Fidelity OOD Evaluation...")
     *_, summary = evaluator.evaluate(
         model, is_distributed, args.fp16, trt_file, decoder, exp.test_size

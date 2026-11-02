@@ -15,12 +15,15 @@ class YOLOPAFPN(nn.Module):
     """
     TDE-YOLOX Multi-Scale Path Aggregation Network (PAFPN).
     
-    Features:
+    Hardened vFinal Features:
       - Sub-Pixel Phase Injection (SPI) Highway: Routes folded stride-4 phase channels 
-        directly into Level P3 via mHC-AttnRes convex router, capturing sub-16px targets 
-        without adding an expensive P2 prediction head.
-      - Asymmetric Scale Sparsity: P3 (s_tilde=0.05), P4 (s_tilde=0.10), P5 (s_tilde=1.0 dense).
+        directly into Level P3 via a dense spatial depthwise router with Step-0 identity init.
+      - Scale-Proportional Saliency Floor Hierarchy:
+          Level P3 (s_floor = 0.15): Retains fine spatial resolution for micro targets.
+          Level P4 (s_floor = 0.35): Receptive-field matched (d=1) for medium targets (32-64px).
+          Level P5 (s_floor = 0.80): Multi-scale envelope ensures macro vehicles retain presence.
       - Full C2f_Tribrid integration across all multi-scale pyramid nodes.
+      - Preserves clean 3-tuple output (pan_out2, pan_out1, pan_out0) with zero interface breaking.
     """
 
     def __init__(
@@ -68,8 +71,8 @@ class YOLOPAFPN(nn.Module):
         self.bu_conv2 = BaseConv(c_p3, c_p3, 3, 2, act=act)
         self.bu_conv1 = BaseConv(c_p4, c_p4, 3, 2, act=act)
 
-        # 2. C2f_Tribrid Multi-Scale Fusion Blocks with Asymmetric Sparsity Allocation
-        # Top-down fusion: C3_p4 (P4 Level: moderate sparsity floor = 0.10)
+        # 2. C2f_Tribrid Multi-Scale Fusion Blocks with Scale-Proportional Floor Hierarchy
+        # Top-down fusion: C3_p4 (P4 Level: moderate floor = 0.35 retains medium-scale body features)
         self.C3_p4 = C2f_Tribrid(
             c_p4 * 2,
             c_p4,
@@ -77,10 +80,10 @@ class YOLOPAFPN(nn.Module):
             shortcut=False,
             depthwise=depthwise,
             act=act,
-            saliency_floor=0.10,
+            saliency_floor=0.35,
         )
 
-        # Top-down fusion: C3_p3 (P3 Level: high sparsity floor = 0.05)
+        # Top-down fusion: C3_p3 (P3 Level: floor = 0.15 provides high sparsity for micro targets)
         self.C3_p3 = C2f_Tribrid(
             c_p3 * 2,
             c_p3,
@@ -88,10 +91,10 @@ class YOLOPAFPN(nn.Module):
             shortcut=False,
             depthwise=depthwise,
             act=act,
-            saliency_floor=0.05,
+            saliency_floor=0.15,
         )
 
-        # Bottom-up fusion: C3_n3 (P4 Level: moderate sparsity floor = 0.10)
+        # Bottom-up fusion: C3_n3 (N4 Level: floor = 0.35 protects 32-64px vehicle semantics)
         self.C3_n3 = C2f_Tribrid(
             c_p3 * 2,
             c_p4,
@@ -99,10 +102,10 @@ class YOLOPAFPN(nn.Module):
             shortcut=False,
             depthwise=depthwise,
             act=act,
-            saliency_floor=0.10,
+            saliency_floor=0.35,
         )
 
-        # Bottom-up fusion: C3_n4 (P5 Level: dense associative binding = 1.0)
+        # Bottom-up fusion: C3_n4 (N5 Level: floor = 0.80 ensures macro trucks/buses retain presence)
         self.C3_n4 = C2f_Tribrid(
             c_p4 * 2,
             c_p5,
@@ -110,43 +113,41 @@ class YOLOPAFPN(nn.Module):
             shortcut=False,
             depthwise=depthwise,
             act=act,
-            saliency_floor=1.0,
+            saliency_floor=0.80,
         )
 
     def forward(self, input, ttt_prob=None):
         out_features = self.backbone(input, ttt_prob=ttt_prob)
 
-        # Extract TTT-adapted Stage 1 features and standard backbone levels
         dark2_feat = out_features["dark2"]  # [B, 64, H/4, W/4]
         x2 = out_features["dark3"]          # [B, 128, H/8, W/8] (P3)
         x1 = out_features["dark4"]          # [B, 256, H/16, W/16] (P4, C2fA)
         x0 = out_features["dark5"]          # [B, 512, H/32, W/32] (P5, C2fA+SPP)
 
-        # SPI Highway: Fold stride-4 phase channels and convex-route into P3
-        # Guarantees sub-pixel centroid retention without extra anchors or NMS boxes
+        # SPI Highway: Fold stride-4 phase channels and dense-route into P3
         x2_enriched = self.spi_highway(dark2_feat, x2)
 
         # Top-Down Pathway
-        fpn_out0 = self.lateral_conv0(x0)              # 512 -> 256 (P5 -> P4)
-        f_out0 = self.upsample(fpn_out0)               # [B, 256, H/16, W/16]
-        f_out0 = torch.cat([f_out0, x1], dim=1)        # [B, 512, H/16, W/16]
-        f_out0 = self.C3_p4(f_out0)                    # [B, 256, H/16, W/16]
+        fpn_out0 = self.lateral_conv0(x0)                # 512 -> 256 (P5 -> P4)
+        f_out0 = self.upsample(fpn_out0)                 # [B, 256, H/16, W/16]
+        f_out0 = torch.cat([f_out0, x1], dim=1)          # [B, 512, H/16, W/16]
+        f_out0 = self.C3_p4(f_out0)                      # [B, 256, H/16, W/16]
 
-        fpn_out1 = self.reduce_conv1(f_out0)           # 256 -> 128 (P4 -> P3)
-        f_out1 = self.upsample(fpn_out1)               # [B, 128, H/8, W/8]
+        fpn_out1 = self.reduce_conv1(f_out0)             # 256 -> 128 (P4 -> P3)
+        f_out1 = self.upsample(fpn_out1)                 # [B, 128, H/8, W/8]
         f_out1 = torch.cat([f_out1, x2_enriched], dim=1) # [B, 256, H/8, W/8] (SPI-Enriched)
-        pan_out2 = self.C3_p3(f_out1)                  # [B, 128, H/8, W/8] (N3)
+        pan_out2 = self.C3_p3(f_out1)                    # [B, 128, H/8, W/8] (N3)
 
         # Bottom-Up Pathway
-        p_out1 = self.bu_conv2(pan_out2)               # 128 -> 128 (N3 -> N4)
-        p_out1 = torch.cat([p_out1, fpn_out1], dim=1)  # [B, 256, H/16, W/16]
-        pan_out1 = self.C3_n3(p_out1)                  # [B, 256, H/16, W/16] (N4)
+        p_out1 = self.bu_conv2(pan_out2)                 # 128 -> 128 (N3 -> N4)
+        p_out1 = torch.cat([p_out1, fpn_out1], dim=1)    # [B, 256, H/16, W/16]
+        pan_out1 = self.C3_n3(p_out1)                    # [B, 256, H/16, W/16] (N4)
 
-        p_out0 = self.bu_conv1(pan_out1)               # 256 -> 256 (N4 -> N5)
-        p_out0 = torch.cat([p_out0, fpn_out0], dim=1)  # [B, 512, H/32, W/32]
-        pan_out0 = self.C3_n4(p_out0)                  # [B, 512, H/32, W/32] (N5)
+        p_out0 = self.bu_conv1(pan_out1)                 # 256 -> 256 (N4 -> N5)
+        p_out0 = torch.cat([p_out0, fpn_out0], dim=1)    # [B, 512, H/32, W/32]
+        pan_out0 = self.C3_n4(p_out0)                    # [B, 512, H/32, W/32] (N5)
 
-        # Output tuple (N3, N4, N5) feeds detection head and auxiliary affordance decoder
+        # Clean 3-tuple return feeds detection head and affordance decoder
         return (pan_out2, pan_out1, pan_out0)
 
     def switch_to_deploy(self):

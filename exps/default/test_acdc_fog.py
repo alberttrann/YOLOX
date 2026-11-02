@@ -8,18 +8,17 @@ from yolox.exp import Exp as MyExp
 class Exp(MyExp):
     def __init__(self):
         super(Exp, self).__init__()
-        # Model Scale: Small (Standard YOLOX-S)
         self.depth = 0.33  
         self.width = 0.50 
         self.exp_name = os.path.split(os.path.realpath(__file__))[1].split(".")[0]
         self.act = "silu"
         self.num_classes = 9
 
-        # --- MATCH BASELINE NATIVE 16:9 RESOLUTION (ZERO GRAY PADDING) ---
-        self.input_size = (576, 1024)  # (Height, Width)
+        # Native 16:9 Resolution
+        self.input_size = (576, 1024)
         self.test_size = (576, 1024)
 
-        # --- ACDC FOG DATASET PATHS ---
+        # ACDC Fog Dataset Paths
         self.data_dir = r"D:\ACDC\rgb_anon" 
         self.val_ann = r"D:\YOLOX-3rd\acdc_labels\acdc_fog_bdd.json"
         self.test_ann = r"D:\YOLOX-3rd\acdc_labels\acdc_fog_bdd.json"
@@ -29,16 +28,16 @@ class Exp(MyExp):
         self.ttt_noise_std = 0.08
         self.ttt_mask_ratio = 0.20
 
-        # Evaluation thresholds matching baseline
-        self.test_conf = 0.001
-        self.nmsthre = 0.65
+        # Crowd-safe calibrated evaluation thresholds
+        self.test_conf = 0.01
+        self.nmsthre = 0.60
 
     def get_eval_dataset(self, **kwargs):
         from yolox.data import COCODataset, ValTransform
         return COCODataset(
             data_dir=self.data_dir,
             json_file=self.test_ann,
-            name="",  # Prevents YOLOX from inserting "\val2017\" into the path
+            name="",
             img_size=self.test_size,
             preproc=ValTransform(legacy=kwargs.get("legacy", False)),
         )
@@ -58,7 +57,6 @@ class Exp(MyExp):
                     m.momentum = 0.03
 
         if getattr(self, "model", None) is None:
-            # 1. Instantiate Stage 1 TTT-Aware Backbone
             backbone = CSPDarknet(
                 self.depth, 
                 self.width, 
@@ -69,22 +67,23 @@ class Exp(MyExp):
                 ttt_mask_ratio=self.ttt_mask_ratio
             )
             
-            # 2. Instantiate Tribrid Neck (C2f_Tribrid with Continuous Saliency Linear Attention)
             neck = YOLOPAFPN(
                 self.depth, 
                 self.width, 
                 in_channels=[256, 512, 1024],
                 act=self.act,
+                ttt_lr=self.ttt_lr,
+                ttt_noise_std=self.ttt_noise_std,
+                ttt_mask_ratio=self.ttt_mask_ratio,
             )
-            # Explicitly wire our custom adaptive backbone into the neck
             neck.backbone = backbone
             
-            # 3. Instantiate the Engram Head
             head = TDE_Head(
                 self.num_classes, 
                 self.width, 
                 in_channels=[256, 512, 1024], 
-                act=self.act
+                act=self.act,
+                loss_type="oiou",
             )
             
             self.model = YOLOX(neck, head)

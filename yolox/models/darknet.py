@@ -99,9 +99,11 @@ class CSPDarknet(nn.Module):
     """
     TDE-YOLOX Multi-Scale Backbone:
       - Stage 0 (Focus): Standard BatchNorm2d (normalizes raw input pixel distribution).
-      - Stage 1 (dark2, Stride 4): Stateless GroupNorm + Functional TTT meta-learning stage.
+      - Stage 1 (dark2, Stride 4): Stateless GroupNorm (8 ch/group) + TTT adaptive stage.
+        Features deterministic split-batch routing strictly inside dark2, preserving exact
+        BatchNorm statistics in Stages 3, 4, 5 and the neck without duplicate compute.
       - Stage 2 (dark3, Stride 8): Standard CSP block.
-      - Stage 3 (dark4, Stride 16): C2fA module (EMA cross-spatial attention, YOLO-UTD [13]).
+      - Stage 3 (dark4, Stride 16): C2fA module (EMA cross-spatial attention).
       - Stage 4 (dark5, Stride 32): C2fA module + SPPBottleneck.
     """
 
@@ -130,14 +132,14 @@ class CSPDarknet(nn.Module):
 
         # 1. Stage 1 (dark2, Stride 4): Stateless GroupNorm Base wrapped in TTTAdaptiveStage
         dark2_base = nn.Sequential(
-            ConvGN(base_channels, base_channels * 2, 3, 2, act=act),
+            ConvGN(base_channels, base_channels * 2, 3, 2, act=act, target_groups=8),
             CSPLayer(
                 base_channels * 2,
                 base_channels * 2,
                 n=base_depth,
                 depthwise=depthwise,
                 act=act,
-                use_gn=True,  # GroupNorm enabled across all dark2 bottlenecks
+                use_gn=True,
             ),
         )
 
@@ -162,8 +164,7 @@ class CSPDarknet(nn.Module):
             ),
         )
 
-        # 3. Stage 3 (dark4, Stride 16): C2fA Block (YOLO-UTD EMA Attention [13])
-        # Preserves spatial centroid representation for small targets prior to Neck aggregation
+        # 3. Stage 3 (dark4, Stride 16): C2fA Block (EMA Cross-Spatial Attention)
         self.dark4 = nn.Sequential(
             Conv(base_channels * 4, base_channels * 8, 3, 2, act=act),
             C2fA(
@@ -197,20 +198,26 @@ class CSPDarknet(nn.Module):
         x = self.stem(x)
         outputs["stem"] = x
 
-        # Step 1: Stochastic Meta-Learning Gating for Stage 1
-        run_ttt = False
+        # Step 1: Deterministic Sub-Batch Partitioning for Stage 1 (dark2)
+        # Slicing occurs strictly inside dark2; deeper stages receive full batch B
         if not self.training:
-            if ttt_prob is None or ttt_prob > 0.0:
-                run_ttt = True
+            x = self.dark2(x, run_ttt=True)
         else:
             prob = ttt_prob if ttt_prob is not None else 0.0
-            if prob > 0.0 and torch.rand(1).item() < prob:
-                run_ttt = True
+            b = x.shape[0]
+            if prob <= 0.0 or b <= 1:
+                run_ttt = (prob > 0.5) if b == 1 and prob > 0.0 else False
+                x = self.dark2(x, run_ttt=run_ttt)
+            else:
+                # Deterministic split: first b_meta samples adapt, rest remain static
+                b_meta = max(1, min(b - 1, int(round(b * prob))))
+                x_meta = self.dark2(x[:b_meta], run_ttt=True)
+                x_static = self.dark2(x[b_meta:], run_ttt=False)
+                x = torch.cat([x_meta, x_static], dim=0)
 
-        x = self.dark2(x, run_ttt=run_ttt)
         outputs["dark2"] = x  # Expose dark2 for the SPI Highway
 
-        # Steps 2-4: Deep Backbone Forwarding
+        # Steps 2-4: Deep Backbone Forwarding (Unified Batch B preserves BatchNorm statistics)
         x = self.dark3(x)
         outputs["dark3"] = x
 

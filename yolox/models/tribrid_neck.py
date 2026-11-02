@@ -19,11 +19,13 @@ class C2f_Tribrid(nn.Module):
     TDE-YOLOX C2f_Tribrid Block:
       - Branch A: Dense local convolutional bottlenecks (preserves high-frequency spatial gradients).
       - Branch B: Multi-Scale Context Engine:
-          SafeSimAM (zero-centered identity)
-          -> UnifiedRCA (decoupled H/W dual Avg+Max pooling)
-          -> UnifiedRMBConv (split-dilation d=1,2 + RepDWConv + ContrastAwareSE)
-          -> ContinuousSaliencyAttention (Paradigm 1 linear attention).
-      - Gated Residual Merge: Y = Branch A + tanh(gate) * Branch B (Zero-Conv initialized).
+          SafeSimAM (local 17x17 moving-window normalization)
+          -> UnifiedRCA (glare-clipped hybrid 1D-2D coordinate attention)
+          -> UnifiedRMBConv (receptive-adaptive split-dilation + RepDWConv + ContrastAwareSE)
+          -> ContinuousSaliencyAttention (high-rank linear attention with macro presence envelope).
+      - Bounded Residual Merge: Y = Branch A + 0.20 * tanh(gate) * Branch B.
+      - Exact Identity Initialization: gate is initialized to 0.0 at Step 0, computing
+        the exact mathematical forward pass of standard pre-trained CSPLayer.
     """
 
     def __init__(
@@ -35,7 +37,7 @@ class C2f_Tribrid(nn.Module):
         depthwise=False,
         act="silu",
         e=0.5,
-        saliency_floor=0.05,
+        saliency_floor=0.15,
     ):
         super().__init__()
         self.c = int(c2 * e)
@@ -56,16 +58,17 @@ class C2f_Tribrid(nn.Module):
             for _ in range(n)
         )
 
-        # Branch B: Context & Structural Conditioning Engine
+        # Branch B: Context & Structural Conditioning Engine (internal channel width = self.c)
         self.global_mixer = nn.Sequential(
             SafeSimAM(eps=1e-4),
             UnifiedRCA(self.c, reduction=16),
             UnifiedRMBConv(self.c),
-            ContinuousSaliencyAttention(self.c, num_heads=4, saliency_floor=saliency_floor),
+            ContinuousSaliencyAttention(self.c, num_heads=2, saliency_floor=saliency_floor),
         )
 
-        # Learnable Residual Gate (Initialized to 0.05; ContinuousSaliencyAttention.proj is zero-init)
-        self.gate = nn.Parameter(torch.ones(1) * 0.05)
+        # Step-0 Identity Initialization: gate = 0.0 -> tanh(0) = 0.0 -> 100% pre-trained CSPLayer pass
+        # The 0.20 scalar bound prevents unregularized gate drift from blowing up in late epochs
+        self.gate = nn.Parameter(torch.zeros(1))
 
     def forward(self, x):
         # 1. Channel Split via 1x1 Projection
@@ -75,11 +78,12 @@ class C2f_Tribrid(nn.Module):
         y.extend(m(y[-1]) for m in self.m)
 
         # 3. Continuous Global Context Path (Branch B)
-        # Applied to the deepest local bottleneck representation
         global_context = self.global_mixer(y[-1])
+        # Defensive immunity: prevents 0.0 * NaN from turning y[-1] into NaN
+        global_context = torch.nan_to_num(global_context, nan=0.0, posinf=0.0, neginf=0.0)
 
         # 4. Bounded Gated Residual Addition
-        y[-1] = y[-1] + torch.tanh(self.gate) * global_context
+        y[-1] = y[-1] + 0.20 * torch.tanh(self.gate) * global_context
 
         # 5. Cross-Stage Feature Aggregation
         return self.cv2(torch.cat(y, dim=1))
