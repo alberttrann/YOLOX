@@ -74,11 +74,11 @@ class IOUloss(nn.Module):
                 c_diag_sq = cw.pow(2) + ch.pow(2) + 1e-16
 
                 gamma_sq = (target_cx - pred_cx).pow(2) + (target_cy - pred_cy).pow(2)
-                gamma = torch.sqrt(gamma_sq + 1e-16)
+                # atan2 avoids the large asin derivative near ratio=1. The
+                # horizontal floor is in pixel units and prevents singularity.
+                dx_abs = torch.abs(target_cx - pred_cx)
                 dy = torch.abs(target_cy - pred_cy)
-
-                ratio_angle = torch.clamp(dy / (gamma + 1e-16), min=0.0, max=1.0 - 1e-7)
-                alpha_angle = torch.asin(ratio_angle)
+                alpha_angle = torch.atan2(dy, dx_abs + 1e-3)
                 delta = torch.cos(2.0 * alpha_angle - math.pi / 4.0)
 
                 mu = 2.0 - delta

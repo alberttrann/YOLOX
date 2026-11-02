@@ -37,6 +37,8 @@ class YOLOPAFPN(nn.Module):
         ttt_lr=0.02,
         ttt_noise_std=0.08,
         ttt_mask_ratio=0.20,
+        pretrained_compatible_dark2=False,
+        ttt_residual_adapter=False,
     ):
         super().__init__()
         # Backbone is configured to extract "dark2" in addition to standard pyramid levels
@@ -50,7 +52,10 @@ class YOLOPAFPN(nn.Module):
             ttt_lr=ttt_lr,
             ttt_noise_std=ttt_noise_std,
             ttt_mask_ratio=ttt_mask_ratio,
+            pretrained_compatible_dark2=pretrained_compatible_dark2,
+            ttt_residual_adapter=ttt_residual_adapter,
         )
+        self.enable_spi = True
         self.in_features = in_features
         self.in_channels = in_channels
 
@@ -125,7 +130,7 @@ class YOLOPAFPN(nn.Module):
         x0 = out_features["dark5"]          # [B, 512, H/32, W/32] (P5, C2fA+SPP)
 
         # SPI Highway: Fold stride-4 phase channels and dense-route into P3
-        x2_enriched = self.spi_highway(dark2_feat, x2)
+        x2_enriched = self.spi_highway(dark2_feat, x2) if self.enable_spi else x2
 
         # Top-Down Pathway
         fpn_out0 = self.lateral_conv0(x0)                # 512 -> 256 (P5 -> P4)

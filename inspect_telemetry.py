@@ -1,218 +1,216 @@
 #!/usr/bin/env python3
 # -*- coding:utf-8 -*-
+"""Human-readable live summary for tdevNext telemetry schema v3."""
+import argparse
 import json
 import math
-import os
-import sys
-
-TELEMETRY_DIR = os.path.join("YOLOX_outputs", "tde_yolox_s", "telemetry")
+from pathlib import Path
 
 
-def print_header(title):
-    print("\n" + "=" * 90)
-    print(f" {title}")
-    print("=" * 90)
-
-
-def analyze_weights_and_gradients():
-    grad_file = os.path.join(TELEMETRY_DIR, "gradient_flow_telemetry.jsonl")
-    if not os.path.exists(grad_file):
-        print(f"[!] File not found: {grad_file}")
-        return
-
-    print_header("1. EMPIRICAL CHECK: DID WEIGHTS ACTUALLY UPDATE? (WEIGHT NORMS)")
-
-    first_record = None
-    last_record = None
-    all_records = []
-
-    with open(grad_file, "r") as f:
-        for line in f:
-            if not line.strip():
-                continue
-            data = json.loads(line)
-            all_records.append(data)
-
-    if not all_records:
-        print("[!] No records found in gradient_flow_telemetry.jsonl")
-        return
-
-    first_record = all_records[0]
-    mid_record = all_records[len(all_records) // 2]
-    last_record = all_records[-1]
-
-    print(f"Total Logged Checkpoints: {len(all_records)}")
-    print(f"First Record: Epoch {first_record['epoch']}, Iter {first_record['iter']}")
-    print(f"Mid Record:   Epoch {mid_record['epoch']}, Iter {mid_record['iter']}")
-    print(f"Last Record:  Epoch {last_record['epoch']}, Iter {last_record['iter']}\n")
-
-    print(f"{'Subnet / Layer Group':<20} | {'Start ||W||':<12} | {'Mid ||W||':<12} | {'End ||W||':<12} | {'Net Change %':<12}")
-    print("-" * 75)
-
-    w_start = first_record.get("weight_norms", {})
-    w_mid = mid_record.get("weight_norms", {})
-    w_end = last_record.get("weight_norms", {})
-
-    frozen_subnets = []
-    active_subnets = []
-
-    for k in w_start.keys():
-        s = w_start.get(k, 0.0)
-        m = w_mid.get(k, 0.0)
-        e = w_end.get(k, 0.0)
-        pct_change = ((e - s) / (s + 1e-7)) * 100.0 if s > 0 else 0.0
-
-        if abs(pct_change) < 0.01:
-            frozen_subnets.append(k)
-        else:
-            active_subnets.append(k)
-
-        print(f"{k:<20} | {s:<12.4f} | {m:<12.4f} | {e:<12.4f} | {pct_change:>+10.2f}%")
-
-    print("\n[DIAGNOSTIC VERDICT - WEIGHT UPDATES]:")
-    if frozen_subnets:
-        print(f"  [!] FROZEN / UNCHANGED SUB-NETWORKS (Change < 0.01%): {frozen_subnets}")
-    if active_subnets:
-        print(f"  [+] ACTIVELY UPDATING SUB-NETWORKS: {active_subnets}")
-
-    # Gradient Magnitude Distribution
-    print_header("2. SUBNET GRADIENT ENERGY & STARVATION ANALYSIS (MEAN ||G||)")
-    print(f"{'Subnet':<20} | {'Mean ||G||':<12} | {'Max ||G||':<12} | {'Min ||G||':<12} | {'Status':<15}")
-    print("-" * 75)
-
-    subnet_grads = {k: [] for k in w_start.keys()}
-    for r in all_records:
-        g_dict = r.get("grad_norms", {})
-        for k, v in g_dict.items():
-            if k in subnet_grads:
-                subnet_grads[k].append(v)
-
-    for k, vals in subnet_grads.items():
-        if not vals:
-            continue
-        mean_g = sum(vals) / len(vals)
-        max_g = max(vals)
-        min_g = min(vals)
-
-        status = "HEALTHY"
-        if mean_g < 1e-5:
-            status = "STARVED / DEAD"
-        elif mean_g > 10.0:
-            status = "EXPLODING"
-
-        print(f"{k:<20} | {mean_g:<12.6f} | {max_g:<12.6f} | {min_g:<12.6f} | {status:<15}")
-
-
-def analyze_losses():
-    loss_file = os.path.join(TELEMETRY_DIR, "train_iter_telemetry.jsonl")
-    if not os.path.exists(loss_file):
-        print(f"[!] File not found: {loss_file}")
-        return
-
-    print_header("3. LOSS TRAJECTORIES (START VS MID VS END)")
-    records = []
-    with open(loss_file, "r") as f:
+def load_jsonl(path: Path, tail=None):
+    if not path.exists():
+        return []
+    rows = []
+    with path.open('r', encoding='utf-8') as f:
         for line in f:
             if line.strip():
-                records.append(json.loads(line))
+                try:
+                    rows.append(json.loads(line))
+                except json.JSONDecodeError:
+                    pass
+    return rows[-tail:] if tail and tail > 0 else rows
 
-    if not records:
+
+def header(title):
+    print('\n' + '=' * 105)
+    print(title)
+    print('=' * 105)
+
+
+def fmt(x, digits=4):
+    if x is None:
+        return 'N/A'
+    if isinstance(x, bool):
+        return str(x)
+    if isinstance(x, int):
+        return str(x)
+    try:
+        x = float(x)
+        if not math.isfinite(x):
+            return 'INVALID'
+        if abs(x) < 1e-3 and x != 0:
+            return f'{x:.3e}'
+        return f'{x:.{digits}f}'
+    except Exception:
+        return str(x)
+
+
+def analyze_runtime(tdir, tail):
+    rows = load_jsonl(tdir / 'train_iter_telemetry.jsonl', tail)
+    if not rows:
         return
+    header('1. TRAIN / AMP / LR STATE')
+    first, last = rows[0], rows[-1]
+    print(f"Window: {len(rows)} records | epoch {first.get('epoch')} iter {first.get('iter')} -> "
+          f"epoch {last.get('epoch')} iter {last.get('iter')}")
+    print(f"LR used: {fmt(last.get('lr_used'), 8)} | next LR: {fmt(last.get('lr_next'), 8)}")
+    print(f"AMP scale: {fmt(last.get('amp_scale_before'), 1)} -> {fmt(last.get('amp_scale_after'), 1)} | "
+          f"total skipped steps: {last.get('amp_skipped_steps_total', 0)}")
+    print(f"Pre-clip grad norm: {fmt(last.get('pre_clip_total_grad_norm'))} | "
+          f"clip coeff: {fmt(last.get('clip_coefficient'))} | clipped={last.get('was_clipped')}")
+    loss_keys = ('total_loss','det_loss','aux_total','iou_loss','conf_loss','cls_loss',
+                 'mem_loss','proto_loss','intra_loss','rec_loss','afford_loss')
+    print('\nLatest losses:')
+    for k in loss_keys:
+        if k in last:
+            print(f"  {k:<18} {fmt(last[k], 6)}")
+    contribs = ('mem_contrib','proto_contrib','intra_contrib','rec_contrib','afford_contrib')
+    if any(k in last for k in contribs):
+        print('\nActual weighted auxiliary contributions to total_loss:')
+        for k in contribs:
+            if k in last:
+                print(f"  {k:<18} {fmt(last[k], 7)}")
 
-    first = records[0]
-    mid = records[len(records) // 2]
-    last = records[-1]
 
-    keys = [k for k in first.keys() if "loss" in k or k in ["total_loss", "lr", "ttt_prob"]]
-
-    print(f"{'Metric / Loss':<18} | {'Epoch 1 (Start)':<15} | {'Epoch 7 (Mid)':<15} | {'Epoch 14 (End)':<15} | {'Delta':<12}")
-    print("-" * 80)
-    for k in keys:
-        s = first.get(k, 0.0)
-        m = mid.get(k, 0.0)
-        e = last.get(k, 0.0)
-        delta = e - s
-        print(f"{k:<18} | {s:<15.4f} | {m:<15.4f} | {e:<15.4f} | {delta:>+10.4f}")
-
-
-def analyze_simota():
-    assign_file = os.path.join(TELEMETRY_DIR, "simota_telemetry.jsonl")
-    if not os.path.exists(assign_file):
-        print(f"[!] File not found: {assign_file}")
+def analyze_gradients(tdir, tail):
+    rows = load_jsonl(tdir / 'gradient_flow_telemetry.jsonl', tail)
+    if not rows:
         return
+    header('2. PRE/POST-CLIP GRADIENT FLOW')
+    valid_coeff = [r.get('clip_coefficient') for r in rows if r.get('clip_coefficient') is not None]
+    clipped = [c for c in valid_coeff if c < 0.999999]
+    if valid_coeff:
+        print(f"Clipped records: {len(clipped)}/{len(valid_coeff)} ({100*len(clipped)/len(valid_coeff):.1f}%) | "
+              f"mean clip coeff={sum(valid_coeff)/len(valid_coeff):.4f} | min={min(valid_coeff):.4f}")
+    last = rows[-1]
+    print(f"Latest total ||g||: pre={fmt(last.get('pre_clip_total_grad_norm'))} "
+          f"post={fmt(last.get('post_clip_total_grad_norm'))}")
+    print(f"{'Group':<24} {'pre ||g||':>12} {'post ||g||':>12} {'energy %':>10} {'g/w':>12} {'NZ/grad':>10}")
+    print('-' * 86)
+    groups = last.get('groups', {})
+    ranked = sorted(groups.items(), key=lambda kv: (kv[1].get('grad_norm') or -1), reverse=True)
+    for name, g in ranked:
+        energy = g.get('gradient_energy_fraction')
+        energy = 100 * energy if energy is not None else None
+        nz = f"{g.get('nonzero_grad_tensors',0)}/{g.get('with_grad',0)}"
+        print(f"{name:<24} {fmt(g.get('grad_norm')):>12} {fmt(g.get('post_clip_grad_norm')):>12} "
+              f"{fmt(energy,2):>10} {fmt(g.get('gradient_to_weight_ratio'),6):>12} {nz:>10}")
 
-    print_header("4. SIMOTA MATCHING & ANCHOR ASSIGNMENT TELEMETRY")
-    records = []
-    with open(assign_file, "r") as f:
-        for line in f:
-            if line.strip():
-                records.append(json.loads(line))
 
-    if not records:
-        print("[!] No SimOTA records found.")
+def analyze_updates(tdir, tail):
+    rows = load_jsonl(tdir / 'parameter_update_telemetry.jsonl', tail)
+    if not rows:
         return
+    header('3. ACTUAL PARAMETER MOVEMENT')
+    last = rows[-1]
+    print(f"Latest mode={last.get('mode')} optimizer_step={last.get('optimizer_step')} "
+          f"lr_used={fmt(last.get('lr_used'),8)} clip_coeff={fmt(last.get('clip_coefficient'))}")
+    if last.get('groups'):
+        print('\nExact full-group update (heavy interval):')
+        print(f"{'Group':<24} {'rel delta':>13} {'delta L2':>13} {'RMS/elem':>13} {'changed':>11}")
+        for name, g in sorted(last['groups'].items(), key=lambda kv: kv[1].get('actual_relative_delta',0), reverse=True):
+            changed = f"{g.get('changed_tensors',0)}/{g.get('parameter_tensors',0)}"
+            print(f"{name:<24} {fmt(g.get('actual_relative_delta'),7):>13} {fmt(g.get('actual_delta_l2'),7):>13} "
+                  f"{fmt(g.get('update_rms_per_element'),7):>13} {changed:>11}")
+    print('\nSentinel/control updates:')
+    for name, g in last.get('sentinels', {}).items():
+        print(f"  {name:<58} relΔ={fmt(g.get('actual_relative_delta'),8)} "
+              f"ΔL2={fmt(g.get('actual_delta_l2'),8)} value={fmt(g.get('value_mean'),8)}")
 
-    num_fgs = [r["num_fg_total"] for r in records if "num_fg_total" in r]
-    ious = [r["matched_iou_mean"] for r in records if "matched_iou_mean" in r]
-    d_ks = [r["dynamic_k_mean"] for r in records if "dynamic_k_mean" in r]
 
-    if num_fgs:
-        print(f"Matched Foregrounds per Batch (num_fg): Mean = {sum(num_fgs)/len(num_fgs):.1f}, Min = {min(num_fgs)}, Max = {max(num_fgs)}")
-    if ious:
-        print(f"Matched Anchor Mean IoU with GT:        Mean = {sum(ious)/len(ious):.4f}, Min = {min(ious):.4f}, Max = {max(ious):.4f}")
-    if d_ks:
-        print(f"Dynamic-K Value per Target:             Mean = {sum(d_ks)/len(d_ks):.2f}, Min = {min(d_ks):.2f}, Max = {max(d_ks):.2f}")
-
-
-def analyze_prototypes():
-    proto_file = os.path.join(TELEMETRY_DIR, "prototype_geometry.jsonl")
-    if not os.path.exists(proto_file):
-        print(f"[!] File not found: {proto_file}")
+def analyze_assignments(tdir, tail):
+    rows = load_jsonl(tdir / 'simota_telemetry.jsonl', tail)
+    if not rows:
         return
+    header('4. SCALE-AWARE SIMOTA / FPN ASSIGNMENT HEALTH')
+    total_gt = sum(int(r.get('num_gt_total',0)) for r in rows)
+    total_fg = sum(int(r.get('num_fg_total',0)) for r in rows)
+    invalid_iou = sum(int((r.get('matched_iou') or {}).get('invalid_or_out_of_range',0)) for r in rows)
+    print(f"Window totals: GT={total_gt}, FG={total_fg}, FG/GT={total_fg/max(1,total_gt):.3f}, "
+          f"invalid matched IoU={invalid_iou}")
 
-    print_header("5. PROTOTYPE MANIFOLD GEOMETRY (EPOCH-LEVEL DRIFT)")
-    records = []
-    with open(proto_file, "r") as f:
-        for line in f:
-            if line.strip():
-                records.append(json.loads(line))
+    size_names = ('micro','medium','macro')
+    print('\nBy current augmented object scale (sqrt(box area), thresholds 32/96 px):')
+    print(f"{'Scale':<10} {'GT':>8} {'FG':>9} {'FG/GT':>9} {'coverage':>11} {'zero-GT':>9} {'mean IoU':>10}")
+    for name in size_names:
+        gt = fg = covered = zero = 0
+        iou_weighted = 0.0
+        iou_count = 0
+        for r in rows:
+            d = (r.get('by_size') or {}).get(name, {})
+            g = int(d.get('gt',0)); p = int(d.get('positive_anchors',0)); c = int(d.get('covered_gt',0)); z = int(d.get('zero_positive_gt',0))
+            gt += g; fg += p; covered += c; zero += z
+            miou = d.get('mean_matched_iou')
+            if miou is not None and p:
+                iou_weighted += float(miou) * p; iou_count += p
+        print(f"{name:<10} {gt:>8} {fg:>9} {fg/max(1,gt):>9.3f} {covered/max(1,gt):>10.2%} "
+              f"{zero:>9} {fmt(iou_weighted/max(1,iou_count) if iou_count else None):>10}")
 
-    if not records:
-        print("[!] No prototype records found.")
+    strides = sorted({k for r in rows for k in (r.get('by_fpn') or {}).keys()})
+    if strides:
+        print('\nFPN positive routing:')
+        for stride in strides:
+            positives = sum(int((r.get('by_fpn') or {}).get(stride,{}).get('positive_anchors',0)) for r in rows)
+            print(f"  {stride:<12} positives={positives:<8} fraction={positives/max(1,total_fg):.2%}")
+
+    requested = sum(int((r.get('dynamic_k') or {}).get('requested_positives_pre_conflict',0)) for r in rows)
+    conflicts = sum(int((r.get('dynamic_k') or {}).get('conflict_anchors',0)) for r in rows)
+    fallback = sum(int((r.get('geometry') or {}).get('fallback_gt',0)) for r in rows)
+    dyn_vals = [(r.get('dynamic_k') or {}).get('mean') for r in rows]
+    dyn_vals = [float(x) for x in dyn_vals if x is not None]
+    print('\nDynamic-K / geometry:')
+    print(f"  mean dynamic-k={fmt(sum(dyn_vals)/len(dyn_vals) if dyn_vals else None)} | "
+          f"requested positives={requested} | final={total_fg} | retention={total_fg/max(1,requested):.2%}")
+    print(f"  conflict anchors={conflicts} | nearest-anchor fallback GT={fallback} ({fallback/max(1,total_gt):.3%})")
+
+
+def analyze_architecture(tdir, tail):
+    rows = load_jsonl(tdir / 'architecture_state_telemetry.jsonl', tail)
+    if not rows:
         return
-
-    print(f"Total Logged Epochs: {len(records)}")
-    first_epoch = records[0]
-    last_epoch = records[-1]
-
-    print(f"Comparing Epoch {first_epoch['epoch']} vs Epoch {last_epoch['epoch']}:")
-    for lvl in first_epoch.get("levels", {}).keys():
-        s_norms = first_epoch["levels"][lvl]["raw_l2_norms"]
-        e_norms = last_epoch["levels"][lvl]["raw_l2_norms"]
-        
-        flat_s = [val for row in s_norms for val in row]
-        flat_e = [val for row in e_norms for val in row]
-        mean_s_norm = sum(flat_s) / len(flat_s)
-        mean_e_norm = sum(flat_e) / len(flat_e)
-
-        s_intra = first_epoch["levels"][lvl].get("intra_class_subcentroid_similarity", [])
-        e_intra = last_epoch["levels"][lvl].get("intra_class_subcentroid_similarity", [])
-        mean_s_intra = sum(s_intra) / len(s_intra) if s_intra else 0.0
-        mean_e_intra = sum(e_intra) / len(e_intra) if e_intra else 0.0
-
-        print(f"\n  [{lvl}]:")
-        print(f"    Prototype Norm ||P||:  Start = {mean_s_norm:.3f} ──► End = {mean_e_norm:.3f}")
-        print(f"    Intra-Class Cosine:    Start = {mean_s_intra:.3f} ──► End = {mean_e_intra:.3f}")
+    header('5. GATES / RESIDUAL CONTROLS / TTT META-LR')
+    first, last = rows[0], rows[-1]
+    controls = last.get('controls', {})
+    for name, d in controls.items():
+        start = (first.get('controls', {}).get(name) or {}).get('mean')
+        print(f"  {name:<62} value={fmt(d.get('mean'),8)} start={fmt(start,8)} absmax={fmt(d.get('abs_max'),8)}")
+    ttt = last.get('ttt_meta_lr') or {}
+    if ttt:
+        print(f"\n  TTT LR ceiling: {fmt(ttt.get('lr_ceiling'),8)}")
+        for name, d in (ttt.get('parameters') or {}).items():
+            print(f"    {name:<24} actual_inner_lr={fmt(d.get('actual_inner_lr'),8)} sigmoid={fmt(d.get('sigmoid_fraction'),6)}")
 
 
-if __name__ == "__main__":
-    if not os.path.exists(TELEMETRY_DIR):
-        print(f"[!] Telemetry folder not found at: {TELEMETRY_DIR}")
-        print("Please verify your path or current working directory.")
-        sys.exit(1)
+def analyze_prototypes(tdir):
+    rows = load_jsonl(tdir / 'prototype_geometry.jsonl')
+    if not rows:
+        return
+    header('6. PROTOTYPE GEOMETRY')
+    first, last = rows[0], rows[-1]
+    print(f"Epoch records: {len(rows)} | {first.get('epoch')} -> {last.get('epoch')}")
+    for lvl, d in last.get('levels', {}).items():
+        norms = [x for row in d.get('raw_l2_norms',[]) for x in row]
+        intra = d.get('intra_class_subcentroid_similarity',[])
+        print(f"  {lvl:<20} mean ||P||={fmt(sum(norms)/len(norms) if norms else None)} "
+              f"mean intra-cos={fmt(sum(intra)/len(intra) if intra else None)}")
 
-    analyze_weights_and_gradients()
-    analyze_losses()
-    analyze_simota()
-    analyze_prototypes()
-    print("\n" + "=" * 90 + "\n")
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument('--dir', default='YOLOX_outputs/tde_yolox_s_full_vnext2/telemetry')
+    ap.add_argument('--tail', type=int, default=100, help='recent telemetry records to summarize; 0=all')
+    args = ap.parse_args()
+    tdir = Path(args.dir)
+    if not tdir.exists():
+        raise SystemExit(f'Telemetry folder not found: {tdir}')
+    tail = None if args.tail == 0 else args.tail
+    analyze_runtime(tdir, tail)
+    analyze_gradients(tdir, tail)
+    analyze_updates(tdir, tail)
+    analyze_assignments(tdir, tail)
+    analyze_architecture(tdir, tail)
+    analyze_prototypes(tdir)
+
+
+if __name__ == '__main__':
+    main()

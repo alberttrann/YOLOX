@@ -340,33 +340,48 @@ class EMA(nn.Module):
         return x + self.gamma * ema_out
 
 
-class C2fA(nn.Module):
+class DenseC2fLocal(nn.Module):
+    """Original progressive C2f local feature aggregation, as an auxiliary
+    residual rather than a replacement for pretrained YOLOX CSP.
     """
-    YOLO-UTD C2fA Module (Sensors 2026).
-    Integrates EMA cross-spatial attention into standard C2f blocks.
-    """
-
     def __init__(self, c1, c2, n=1, shortcut=False, depthwise=False, act="silu", e=0.5):
         super().__init__()
         self.c = int(c2 * e)
-        self.cv1 = BaseConv(c1, c2, 1, 1, act=act)
+        self.cv1 = BaseConv(c1, 2 * self.c, 1, 1, act=act)
         self.cv2 = BaseConv((2 + n) * self.c, c2, 1, 1, act=act)
-        self.m = nn.ModuleList(
-            Bottleneck(
-                self.c,
-                self.c,
-                shortcut=shortcut,
-                expansion=1.0,
-                depthwise=depthwise,
-                act=act,
-                use_gn=False,
-            )
+        self.m = nn.ModuleList([
+            Bottleneck(self.c, self.c, shortcut=shortcut, expansion=1.0,
+                       depthwise=depthwise, act=act, use_gn=False)
             for _ in range(n)
-        )
-        self.ema = EMA(c2)
+        ])
 
     def forward(self, x):
-        y = list(self.cv1(x).chunk(2, 1))
-        y.extend(m(y[-1]) for m in self.m)
-        out = self.cv2(torch.cat(y, 1))
-        return self.ema(out)
+        parts = list(self.cv1(x).chunk(2, dim=1))
+        for block in self.m:
+            parts.append(block(parts[-1]))
+        return self.cv2(torch.cat(parts, dim=1))
+
+
+class C2fA(CSPLayer):
+    """Pretrained-compatible CSP with learnable EMA residual.
+
+    At EMA.gamma == 0, this is *exactly* the corresponding pretrained CSP.
+    Existing conv1/conv2/conv3/m state_dict keys are preserved.
+    """
+    def __init__(self, c1, c2, n=1, shortcut=False, depthwise=False, act="silu", e=0.5):
+        super().__init__(c1, c2, n=n, shortcut=shortcut, expansion=e,
+                         depthwise=depthwise, act=act, use_gn=False)
+        self.ema = EMA(c2)
+        self.enable_attention = True
+        self.enable_dense_local = True
+        self.dense_local = DenseC2fLocal(
+            c1, c2, n=n, shortcut=shortcut, depthwise=depthwise, act=act, e=e
+        )
+        # Only the residual gate begins at zero; dense branch is learnable.
+        self.dense_gate = nn.Parameter(torch.zeros(1))
+
+    def forward(self, x):
+        native = super().forward(x)
+        if self.enable_dense_local:
+            native = native + 0.10 * torch.tanh(self.dense_gate) * self.dense_local(x)
+        return self.ema(native) if self.enable_attention else native

@@ -62,7 +62,7 @@ class Trainer:
         # Training related attributes
         self.max_epoch = exp.max_epoch
         self.amp_training = args.fp16
-        self.scaler = torch.cuda.amp.GradScaler(enabled=args.fp16)
+        self.scaler = torch.cuda.amp.GradScaler(enabled=args.fp16, init_scale=1024.0, growth_interval=2000)
         self.is_distributed = get_world_size() > 1
         self.rank = get_rank()
         self.local_rank = get_local_rank()
@@ -71,7 +71,7 @@ class Trainer:
         self.save_history_ckpt = exp.save_history_ckpt
 
         # Data & precision attributes
-        self.data_type = torch.float16 if args.fp16 else torch.float32
+        self.data_type = torch.float32  # AMP autocast handles convs; targets/coordinates stay FP32
         self.input_size = exp.input_size
         self.best_ap = 0.0
 
@@ -79,6 +79,10 @@ class Trainer:
         self.meter = MeterBuffer(window_size=exp.print_interval)
         self.file_name = os.path.join(exp.output_dir, args.experiment_name)
         self.outputs = {}
+        self.successful_optimizer_steps = 0
+        self.amp_skipped_steps = 0
+        self.consecutive_amp_skips = 0
+        self.max_consecutive_amp_skips = 12
 
         if self.rank == 0:
             os.makedirs(self.file_name, exist_ok=True)
@@ -140,6 +144,19 @@ class Trainer:
         targets.requires_grad = False
         inps, targets = self.exp.preprocess(inps, targets, self.input_size)
         data_end_time = time.time()
+        # LR currently resident in the optimizer is the LR used by THIS step.
+        # YOLOX updates the scheduler after optimizer.step(), so the console LR is
+        # technically the next-step LR unless we record both explicitly.
+        lr_used = float(self.optimizer.param_groups[0]["lr"])
+        telemetry_iter = self.progress_in_iter + 1
+        # Rich assignment telemetry is expensive enough that we explicitly enable
+        # it only on telemetry iterations. Normal iterations keep the exact same
+        # matching algorithm but skip diagnostic reductions/histograms.
+        if hasattr(self, "telemetry"):
+            model_ref_for_telemetry = self.model.module if self.is_distributed else self.model
+            head_for_telemetry = getattr(model_ref_for_telemetry, "head", None)
+            if head_for_telemetry is not None and hasattr(head_for_telemetry, "collect_assignment_telemetry"):
+                head_for_telemetry.collect_assignment_telemetry = self.telemetry.should_record(telemetry_iter)
 
         # 2. Forward pass under mixed precision
         with torch.cuda.amp.autocast(enabled=self.amp_training):
@@ -162,45 +179,96 @@ class Trainer:
                     outputs.get('afford_loss', 'N/A'),
                 )
             )
-            self.optimizer.zero_grad()
-            del inps, targets, outputs, loss
-            torch.cuda.empty_cache()  # <--- Instantly releases activation VRAM to prevent cumulative OOM
-            return
+            self.optimizer.zero_grad(set_to_none=True)
+            raise FloatingPointError("Non-finite forward loss; optimizer update forbidden")
 
         # 4. Backward pass
         self.optimizer.zero_grad()
         self.scaler.scale(loss).backward()
 
-        # 5. Gradient Unscaling & Telemetry Hook (Pre-step gradient flow logging)
+        # 5. Gradient Unscaling & pre-clip telemetry capture.
         self.scaler.unscale_(self.optimizer)
+        pre_grad_state = (
+            self.telemetry.capture_gradient_state(telemetry_iter)
+            if hasattr(self, "telemetry") else None
+        )
+
+        # 6. Distinguish recoverable AMP LOSS-SCALE overflow from persistent
+        # FP32 backward failure. Never scrub or step with invalid gradients.
+        named_grads = [(n, p.grad) for n, p in self.model.named_parameters() if p.grad is not None]
+        invalid_names = [n for n, g in named_grads if not torch.isfinite(g).all().item()]
+        if invalid_names and not self.amp_training:
+            logger.error("FP32 backward invalid at epoch={} iter={}: {}",
+                         self.epoch + 1, self.iter + 1, invalid_names[:25])
+            raise FloatingPointError("Persistent FP32 backward failure")
+        clip_threshold = 10.0
+        grad_norm_value = None
+        clip_coefficient = None
+        post_grad_state = None
+        if not invalid_names:
+            grad_norm = torch.nn.utils.clip_grad_norm_(
+                self.model.parameters(), max_norm=clip_threshold, error_if_nonfinite=True
+            )
+            if not torch.isfinite(grad_norm):
+                raise FloatingPointError("Total gradient norm non-finite despite finite individual gradients")
+            grad_norm_value = float(grad_norm.detach().float().item())
+            clip_coefficient = min(1.0, clip_threshold / (grad_norm_value + 1e-12))
+            if hasattr(self, "telemetry"):
+                post_grad_state = self.telemetry.capture_gradient_state(telemetry_iter)
+
         if hasattr(self, "telemetry"):
-            self.telemetry.record_gradient_flow(self.epoch + 1, self.progress_in_iter + 1)
+            self.telemetry.record_gradient_flow(
+                self.epoch + 1, telemetry_iter,
+                pre_grad_state, post_grad_state,
+                clip_threshold=clip_threshold,
+                clip_norm_returned=grad_norm_value,
+            )
 
-        # 6. Gradient Norm Clipping & NaN Scrubbing
-        torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=10.0)
-        for p in self.model.parameters():
-            if p.grad is not None:
-                p.grad.data = torch.nan_to_num(p.grad.data, nan=0.0, posinf=10.0, neginf=-10.0)
-
-        # 7. Optimizer Step
+        snapshot = self.telemetry.snapshot_parameter_updates(telemetry_iter) if hasattr(self, "telemetry") else None
+        # GradScaler recorded found_inf during unscale_. The scaler handles the
+        # optimizer skip and halves the loss scale, without modifying parameters.
+        old_scale = self.scaler.get_scale()
         self.scaler.step(self.optimizer)
         self.scaler.update()
+        new_scale = self.scaler.get_scale()
+        did_step = (not self.amp_training) or (new_scale >= old_scale)
+        if invalid_names and did_step:
+            raise RuntimeError("Invalid gradients but scaler did not skip optimizer update")
+        if not did_step:
+            self.amp_skipped_steps += 1
+            self.consecutive_amp_skips += 1
+            logger.warning("AMP overflow/backoff epoch={} iter={} scale {:.0f}->{:.0f}, offenders={}, consecutive={}",
+                           self.epoch + 1, self.iter + 1, old_scale, new_scale,
+                           invalid_names[:12], self.consecutive_amp_skips)
+            if self.consecutive_amp_skips >= self.max_consecutive_amp_skips:
+                raise FloatingPointError("Repeated AMP overflows; run FP32/anomaly audit")
+        else:
+            self.consecutive_amp_skips = 0
 
-        # 8. Riemannian Tangent-Space Momentum Hook & Spherical Projection
-        model_ref = self.model.module if self.is_distributed else self.model
-        if hasattr(model_ref, "project_prototypes_to_unit_sphere"):
-            model_ref.project_prototypes_to_unit_sphere()
+        # 8-9. Projection and EMA ONLY after a successful optimizer update.
+        if did_step:
+            self.successful_optimizer_steps += 1
+            model_ref = self.model.module if self.is_distributed else self.model
+            if hasattr(model_ref, "project_prototypes_to_unit_sphere"):
+                model_ref.project_prototypes_to_unit_sphere()
+            self._project_prototype_momentum(model_ref)
+            if self.use_model_ema:
+                self.ema_model.update(self.model)
+        else:
+            pass  # recorded above with detailed AMP overflow diagnostics
 
-        self._project_prototype_momentum(model_ref)
-
-        # 9. Model EMA Update (Strictly after spherical projection)
-        if self.use_model_ema:
-            self.ema_model.update(self.model)
+        if hasattr(self, "telemetry"):
+            self.telemetry.record_parameter_updates(
+                self.epoch + 1, telemetry_iter, snapshot, did_step,
+                lr_used=lr_used, clip_coefficient=clip_coefficient,
+            )
+        del snapshot
 
         # 10. Learning Rate Schedule Update
         lr = self.lr_scheduler.update_lr(self.progress_in_iter + 1)
         for param_group in self.optimizer.param_groups:
             param_group["lr"] = lr
+        lr_next = float(lr)
 
         iter_end_time = time.time()
 
@@ -218,13 +286,29 @@ class Trainer:
 
         # 12. Offline Structured JSONL Telemetry Logging
         if hasattr(self, "telemetry"):
+            runtime_state = {
+                "lr_used": lr_used,
+                "amp_scale_before": float(old_scale),
+                "amp_scale_after": float(new_scale),
+                "optimizer_step": bool(did_step),
+                "amp_skipped_steps_total": int(self.amp_skipped_steps),
+                "pre_clip_total_grad_norm": grad_norm_value,
+                "clip_threshold": clip_threshold,
+                "clip_coefficient": clip_coefficient,
+                "was_clipped": bool(clip_coefficient is not None and clip_coefficient < 0.999999),
+            }
             self.telemetry.record_iteration_losses(
-                self.epoch + 1, self.progress_in_iter + 1, lr, self.outputs
+                self.epoch + 1, telemetry_iter, lr_next, self.outputs, runtime=runtime_state
             )
-            if "num_fg" in self.outputs:
+
+            model_ref = self.model.module if self.is_distributed else self.model
+            head = getattr(model_ref, "head", None)
+            assignment_stats = getattr(head, "last_assignment_stats", None)
+            if assignment_stats:
                 self.telemetry.record_simota_assignment(
-                    self.epoch + 1, self.progress_in_iter + 1, self.outputs["num_fg"]
+                    self.epoch + 1, telemetry_iter, assignment_stats
                 )
+            self.telemetry.record_architecture_state(self.epoch + 1, telemetry_iter)
 
         # Explicit RAM reclamation
         del inps, targets, outputs, loss
@@ -240,6 +324,13 @@ class Trainer:
             "Model Summary: {}".format(get_model_info(model, self.exp.test_size))
         )
         model.to(self.device)
+        if self.rank == 0:
+            total = sum(p.numel() for p in model.parameters())
+            trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+            logger.info("PARAMETER INVENTORY: registered={} trainable={} (disabled branches may still be registered)", total, trainable)
+            for prefix in ("backbone.backbone", "backbone.spi_highway", "backbone.C3_", "head.memory_", "head.latent_", "affordance_head"):
+                count = sum(p.numel() for n, p in model.named_parameters() if n.startswith(prefix))
+                logger.info("PARAMETER BUCKET prefix={} count={}", prefix, count)
 
         # 2. Solver initialization
         self.optimizer = self.exp.get_optimizer(self.args.batch_size)
@@ -267,7 +358,9 @@ class Trainer:
             occupy_mem(self.local_rank)
 
         if self.is_distributed:
-            model = DDP(model, device_ids=[self.local_rank], broadcast_buffers=False)
+            # Feature flags create intentionally unused parameters during ablations.
+            model = DDP(model, device_ids=[self.local_rank], broadcast_buffers=False,
+                        find_unused_parameters=True)
 
         if self.use_model_ema:
             self.ema_model = ModelEMA(model, 0.9998)
@@ -421,6 +514,9 @@ class Trainer:
             "rec_loss",
             "afford_loss",
             "ttt_prob",
+            "det_loss",
+            "aux_total",
+            "aux_factor",
         ]
         for k, v in self.outputs.items():
             if k in tracked_keys:
@@ -493,6 +589,9 @@ class Trainer:
             model.load_state_dict(state_dict)
             self.optimizer.load_state_dict(ckpt["optimizer"])
             self.best_ap = ckpt.get("best_ap", 0.0)
+            if ckpt.get("scaler") is not None:
+                self.scaler.load_state_dict(ckpt["scaler"])
+            self.successful_optimizer_steps = ckpt.get("successful_optimizer_steps", 0)
             self.start_epoch = (
                 self.args.start_epoch - 1
                 if self.args.start_epoch is not None
@@ -519,11 +618,26 @@ class Trainer:
                 # Completely bypasses scalar num_batches_tracked to eliminate concatenation crashes
                 remapped_state_dict = {}
                 for k, v in clean_state_dict.items():
-                    if "dark2." in k and "backbone_stage" not in k and ".bn." not in k:
+                    if "dark2." in k and "backbone_stage" not in k:
                         new_k = k.replace("dark2.", "dark2.backbone_stage.")
                         remapped_state_dict[new_k] = v
                     remapped_state_dict[k] = v
 
+                # Report actual loaded elements (not simply missing custom keys).
+                current = model.state_dict()
+                compatible = {k for k, v in remapped_state_dict.items()
+                              if k in current and tuple(v.shape) == tuple(current[k].shape)}
+                matched = sum(current[k].numel() for k in compatible)
+                all_elements = sum(v.numel() for v in current.values())
+                logger.info("CHECKPOINT COVERAGE matched={}/{} elements ({:.2%}) keys={}/{}",
+                            matched, all_elements, matched / max(1, all_elements), len(compatible), len(current))
+                for critical in ("backbone.backbone.stem", "backbone.backbone.dark2.backbone_stage",
+                                 "backbone.backbone.dark3", "backbone.backbone.dark4", "backbone.backbone.dark5",
+                                 "backbone.C3_p4", "backbone.C3_p3", "backbone.C3_n3", "backbone.C3_n4",
+                                 "head.stems", "head.reg_convs", "head.obj_preds"):
+                    part = {k for k in current if k.startswith(critical)}
+                    part_match = part & compatible
+                    logger.info("CHECKPOINT COVERAGE {}: {}/{} keys", critical, len(part_match), len(part))
                 model = load_ckpt(model, remapped_state_dict)
             self.start_epoch = 0
 
@@ -536,7 +650,7 @@ class Trainer:
 
         # Enforce full adaptation during validation
         if hasattr(evalmodel, "set_meta_training_state"):
-            evalmodel.set_meta_training_state(self.max_epoch, self.max_epoch)
+            evalmodel.set_meta_training_state(self.epoch + 1, self.max_epoch)
 
         with adjust_status(evalmodel, training=False):
             (ap50_95, ap50, summary), predictions = self.exp.eval(
@@ -588,6 +702,8 @@ class Trainer:
                 "optimizer": self.optimizer.state_dict(),
                 "best_ap": self.best_ap,
                 "curr_ap": ap,
+                "scaler": self.scaler.state_dict(),
+                "successful_optimizer_steps": self.successful_optimizer_steps,
             }
             save_checkpoint(
                 ckpt_state,

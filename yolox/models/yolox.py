@@ -45,6 +45,8 @@ class YOLOX(nn.Module):
         self.backbone = backbone
         self.head = head
         self.num_classes = head.num_classes
+        self.train_ttt_enabled = True
+        self.eval_ttt_enabled = True
 
         # Multi-task loss weights
         self.afford_loss_weight = afford_loss_weight
@@ -75,21 +77,26 @@ class YOLOX(nn.Module):
         self.max_epochs = 80
         self.warmup_epochs = 10
         self.ramp_epochs = 50
+        self.aux_ramp_epochs = 12
         self.prob_start = 0.10
         self.prob_end = 0.60
 
         # Taxonomically-Calibrated Semantic Margin Prior Matrix (BDD100K 9 Classes)
-        # Classes: 0:pedestrian, 1:rider, 2:car, 3:truck, 4:bus, 5:train, 6:motorcycle, 7:bicycle, 8:traffic light
+        # BDD categories: 0 car, 1 bus, 2 truck, 3 person, 4 rider,
+        # 5 bike, 6 motor, 7 traffic light, 8 traffic sign.
         self.register_buffer("taxonomic_margins", torch.full((self.num_classes, self.num_classes), 0.15))
-        if self.num_classes >= 9:
-            # Humanoid cluster
-            self.taxonomic_margins[0, 1] = self.taxonomic_margins[1, 0] = 0.45
-            # Heavy vehicle cluster: allows natural shared metallic/rectangular features
-            self.taxonomic_margins[2, 3] = self.taxonomic_margins[3, 2] = 0.50  # car <-> truck
-            self.taxonomic_margins[3, 4] = self.taxonomic_margins[4, 3] = 0.55  # truck <-> bus
-            self.taxonomic_margins[2, 4] = self.taxonomic_margins[4, 2] = 0.45  # car <-> bus
-            # Two-wheeler cluster
-            self.taxonomic_margins[6, 7] = self.taxonomic_margins[7, 6] = 0.50  # motorcycle <-> bicycle
+        if self.num_classes == 9:
+            relations = {
+                (3, 4): 0.45,  # person <-> rider
+                (0, 2): 0.50,  # car <-> truck
+                (2, 1): 0.55,  # truck <-> bus
+                (0, 1): 0.45,  # car <-> bus
+                (5, 6): 0.50,  # bike <-> motor
+                (7, 8): 0.35,  # traffic light <-> traffic sign
+            }
+            for (i, j), margin in relations.items():
+                self.taxonomic_margins[i, j] = margin
+                self.taxonomic_margins[j, i] = margin
 
     def set_meta_training_state(self, epoch, max_epochs):
         """Synchronizes curriculum and schedule state to model and submodules."""
@@ -113,7 +120,9 @@ class YOLOX(nn.Module):
     def _get_ttt_probability(self):
         """Unified curriculum adaptation scheduler driven by experiment configuration."""
         if not self.training:
-            return 1.0  # Test-time adaptation is active at inference
+            return 1.0 if self.eval_ttt_enabled else 0.0
+        if not self.train_ttt_enabled:
+            return 0.0
 
         if self.current_epoch < self.warmup_epochs:
             return self.prob_start
@@ -199,6 +208,8 @@ class YOLOX(nn.Module):
         preventing probability distortion on dominant classes and class-0 argmax corruption.
         """
         # aux_mem_logits_list contains 3 tensors: [B, H3*W3, K], [B, H4*W4, K], [B, H5*W5, K]
+        if not aux_mem_logits_list:
+            return next(self.head.parameters()).sum() * 0.0
         batch_ordered_logits = torch.cat(aux_mem_logits_list, dim=1)  # [B, Total_Anchors, K]
         all_logits = batch_ordered_logits.view(-1, self.num_classes)
         fg_logits = all_logits[fg_masks.view(-1)]
@@ -237,15 +248,16 @@ class YOLOX(nn.Module):
             matched_classes_concat = tail[0] if len(tail) > 0 else cls_targets.argmax(dim=-1)
 
             # 1. Unbiased Cross-Entropy Memory Loss
-            mem_loss = self._calculate_unbiased_memory_loss(
-                aux_mem_logits_list, fg_masks, matched_classes_concat
+            mem_loss = (
+                self._calculate_unbiased_memory_loss(aux_mem_logits_list, fg_masks, matched_classes_concat)
+                if self.mem_loss_weight else det_loss.new_zeros(())
             )
 
             # 2. Taxonomically-Calibrated Prototype Loss
-            proto_loss = self._calculate_taxonomic_prototype_loss()
+            proto_loss = self._calculate_taxonomic_prototype_loss() if self.proto_loss_weight else det_loss.new_zeros(())
 
             # 3. Intra-Class Sub-Centroid Diversity Loss
-            intra_loss = self._calculate_intra_class_diversity_loss()
+            intra_loss = self._calculate_intra_class_diversity_loss() if self.intra_loss_weight else det_loss.new_zeros(())
 
             # 4. First-Order Outer Reconstruction Loss (TTTProjector Direct Training)
             # Exposes TTTProjector directly to master loss, eliminating DDP unused-parameter deadlocks
@@ -263,28 +275,40 @@ class YOLOX(nn.Module):
             p1_scaled = pan_out1 * 0.05 + pan_out1.detach() * 0.95
             p0_scaled = pan_out0 * 0.05 + pan_out0.detach() * 0.95
 
-            afford_logits = self.affordance_head(p2_scaled, p1_scaled, p0_scaled)
-            target_heatmaps = self.target_generator.generate(
-                targets,
-                num_classes=self.num_classes,
-                feat_size=pan_out2.shape[-2:],  # Dynamically resolved to N3 spatial shape
-                stride=8.0,
-            )
-            afford_loss = self.afford_criterion(afford_logits, target_heatmaps)
+            if self.afford_loss_weight:
+                afford_logits = self.affordance_head(p2_scaled, p1_scaled, p0_scaled)
+                target_heatmaps = self.target_generator.generate(
+                    targets,
+                    num_classes=self.num_classes,
+                    feat_size=pan_out2.shape[-2:],
+                    stride=8.0,
+                )
+                afford_loss = self.afford_criterion(afford_logits, target_heatmaps)
+            else:
+                afford_loss = det_loss.new_zeros(())
 
-            # Multi-task objective aggregation strictly in Float32
+            # Gradually introduce ALL auxiliary gradients while detection features
+            # initially adjust to the new 9-class head. Never silently omit a loss.
+            aux_factor = 0.1 + 0.9 * min(1.0, max(0.0, (self.current_epoch - 1) / max(1, self.aux_ramp_epochs - 1)))
             with torch.cuda.amp.autocast(enabled=False):
+                mem_contrib = aux_factor * self.mem_loss_weight * mem_loss.float()
+                proto_contrib = aux_factor * self.proto_loss_weight * proto_loss.float()
+                intra_contrib = aux_factor * self.intra_loss_weight * intra_loss.float()
+                rec_contrib = aux_factor * self.rec_loss_weight * rec_loss.float()
+                afford_contrib = aux_factor * self.afford_loss_weight * afford_loss.float()
                 total_loss = (
                     det_loss.float()
-                    + self.mem_loss_weight * mem_loss.float()
-                    + self.proto_loss_weight * proto_loss.float()
-                    + self.intra_loss_weight * intra_loss.float()
-                    + self.rec_loss_weight * rec_loss.float()
-                    + self.afford_loss_weight * afford_loss.float()
+                    + mem_contrib
+                    + proto_contrib
+                    + intra_contrib
+                    + rec_contrib
+                    + afford_contrib
                 )
 
             return {
                 "total_loss": total_loss,
+                "det_loss": det_loss,
+                "aux_total": (total_loss - det_loss),
                 "iou_loss": iou_l,
                 "l1_loss": l1_l,
                 "conf_loss": conf_l,
@@ -294,8 +318,18 @@ class YOLOX(nn.Module):
                 "intra_loss": intra_loss,
                 "rec_loss": rec_loss,
                 "afford_loss": afford_loss,
+                # Weighted contributions are what actually reach total_loss. Logging
+                # both raw losses and contributions prevents scalar-magnitude confusion.
+                "mem_contrib": mem_contrib,
+                "proto_contrib": proto_contrib,
+                "intra_contrib": intra_contrib,
+                "rec_contrib": rec_contrib,
+                "afford_contrib": afford_contrib,
                 "num_fg": num_fg,
+                "num_fg_total": self.head.last_assignment_stats["num_fg_total"],
+                "num_gt_total": self.head.last_assignment_stats["num_gt_total"],
                 "ttt_prob": current_ttt_prob,
+                "aux_factor": aux_factor,
             }
         else:
             # During evaluation/inference: Affordance head is completely severed (0.0 ms latency)

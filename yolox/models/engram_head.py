@@ -51,6 +51,15 @@ class TDE_Head(YOLOXHead):
     ):
         super().__init__(num_classes, width, strides, in_channels, act, depthwise)
         self.width = width
+        self.enable_memory_restoration = True
+        self.use_baseline_assignments = False
+        # Rich, detached assignment telemetry. The trainer reads this only at
+        # telemetry intervals, so the matching path does not retain autograd graphs.
+        self.last_assignment_stats = {"num_fg_total": 0, "num_gt_total": 0}
+        self._last_assignment_meta = {}
+        # Trainer enables this only on telemetry iterations to keep rich matching
+        # diagnostics from perturbing normal throughput.
+        self.collect_assignment_telemetry = False
 
         # Upgrade IoU loss to Quadratic Smooth OIoU (theta=2.0)
         self.iou_loss = IOUloss(reduction="none", loss_type=loss_type)
@@ -117,19 +126,38 @@ class TDE_Head(YOLOXHead):
 
             # --- BRANCH 1: REGRESSION & OBJECTNESS (Translation-Covariant, Memory-Free) ---
             # Step-0 exact pre-trained regression mapping
-            reg_feat = reg_conv(x) + 0.20 * torch.tanh(self.gamma_reg) * x
+            reg_feat = reg_conv(x) if self.use_baseline_assignments else (reg_conv(x) + 0.20 * torch.tanh(self.gamma_reg) * x)
             reg_output = self.reg_preds[k](reg_feat)
             obj_output = self.obj_preds[k](reg_feat)
 
-            # --- BRANCH 2: CLASSIFICATION (Unshackled Spatial Representation & Multi-Centroid FiLM) ---
+            # --- BRANCH 2: CLASSIFICATION ---
             cls_feat = cls_conv(x)
             B, C, H, W = cls_feat.shape
+            if not self.enable_memory_restoration:
+                cls_output = self.cls_preds[k](cls_feat)
+                if self.training:
+                    output = torch.cat([reg_output, obj_output, cls_output], 1)
+                    output, grid = self.get_output_and_grid(output, k, stride_this_level, xin[0].type())
+                    x_shifts.append(grid[:, :, 0])
+                    y_shifts.append(grid[:, :, 1])
+                    expanded_strides.append(torch.zeros(1, grid.shape[1]).fill_(stride_this_level).type_as(xin[0]))
+                    if self.use_l1:
+                        batch_size = reg_output.shape[0]
+                        hsize, wsize = reg_output.shape[-2:]
+                        orig = reg_output.view(batch_size, 1, 4, hsize, wsize)
+                        orig = orig.permute(0, 1, 3, 4, 2).reshape(batch_size, -1, 4)
+                        origin_preds.append(orig.clone())
+                else:
+                    output = torch.cat([reg_output, obj_output.sigmoid(), cls_output.sigmoid()], 1)
+                outputs.append(output)
+                continue
 
             # Purged feature sabotage: native clean convolutional features propagate uncorrupted
             cls_feat_mod = cls_feat
 
             # Native 1x1 Conv2d projection operates directly on 2D maps
-            latent_sp = self.latent_projectors[k](cls_feat_mod)  # [B, 128, H, W]
+            with torch.cuda.amp.autocast(enabled=False):
+                latent_sp = self.latent_projectors[k](cls_feat_mod.float())  # FP32 latent geometry
 
             # Zero-initialized residual spatial smoother (exact 1.0x identity at Step 0)
             latent_smooth = latent_sp + self.spatial_smoothers[k](latent_sp)
@@ -148,11 +176,15 @@ class TDE_Head(YOLOXHead):
             p_norm = F.normalize(p_flat, p=2, dim=-1)
             max_align = torch.matmul(x_norm_latent, p_norm.t()).max(dim=-1, keepdim=True).values  # [B, H*W, 1]
 
-            uncertainty_flat = obj_prob_flat * torch.clamp(1.0 - max_align, min=0.0, max=1.0)
+            # Preserve a small objectness-independent uncertainty pathway so
+            # obscured micro objects are not automatically rejected by memory.
+            object_evidence = 0.10 + 0.90 * obj_prob_flat.float()
+            uncertainty_flat = object_evidence * torch.clamp(1.0 - max_align.float(), min=0.0, max=1.0)
             uncertainty_sp = uncertainty_flat.view(B, H, W, 1).permute(0, 3, 1, 2)  # [B, 1, H, W]
 
             # Query Memory Bank: returns un-gated memory mixture and class-level logits
-            memory_retrieved_flat, class_logits_flat = self.memory_banks[k](latent_flat)
+            with torch.cuda.amp.autocast(enabled=False):
+                memory_retrieved_flat, class_logits_flat = self.memory_banks[k](latent_flat.float())
             aux_memory_logits_list.append(class_logits_flat)
 
             # Reconstruct 2D spatial memory map
@@ -174,9 +206,9 @@ class TDE_Head(YOLOXHead):
             soft_obj_gate = torch.sigmoid((obj_prob_detached - 0.15) / 0.05)
             
             restored_cls_feat = (
-                cls_feat * (1.0 + effective_gate * torch.tanh(mem_scaled))
-                + effective_gate * mem_scaled * soft_obj_gate
-            )
+                cls_feat.float() * (1.0 + effective_gate * torch.tanh(mem_scaled.float()))
+                + effective_gate * mem_scaled.float() * soft_obj_gate
+            ).to(cls_feat.dtype)
 
             cls_output = self.cls_preds[k](restored_cls_feat)
 
@@ -314,6 +346,13 @@ class TDE_Head(YOLOXHead):
         obj_preds,
         mode="gpu",
     ):
+        if self.use_baseline_assignments:
+            self._last_assignment_meta = {"assignment_mode": "baseline"}
+            return YOLOXHead.get_assignments(
+                self, batch_idx, num_gt, gt_bboxes_per_image, gt_classes,
+                bboxes_preds_per_image, expanded_strides, x_shifts, y_shifts,
+                cls_preds, obj_preds, mode=mode,
+            )
         if mode == "cpu":
             gt_bboxes_per_image = gt_bboxes_per_image.cpu().float()
             bboxes_preds_per_image = bboxes_preds_per_image.cpu().float()
@@ -329,16 +368,30 @@ class TDE_Head(YOLOXHead):
             y_shifts,
         )
 
-        num_in_boxes_anchor = fg_mask.sum().item()
-        # Empty-candidate early exit guard: prevents torch.topk crashes on image boundary boxes
-        if num_in_boxes_anchor == 0:
-            return (
-                gt_classes.new_zeros(0),
-                fg_mask,
-                gt_bboxes_per_image.new_zeros(0),
-                gt_classes.new_zeros(0, dtype=torch.int64),
-                0,
-            )
+        # A missing geometry candidate must not silently erase positive supervision.
+        # Augment candidate union with nearest anchor for each unmatched GT.
+        missing_gt = ~geometry_relation.any(dim=1)
+        geometry_fallback_gt = (
+            missing_gt.sum().detach() if self.collect_assignment_telemetry else None
+        )
+        if missing_gt.any():
+            anchor_cx = (x_shifts[0] + 0.5) * expanded_strides[0]
+            anchor_cy = (y_shifts[0] + 0.5) * expanded_strides[0]
+            missing_boxes = gt_bboxes_per_image[missing_gt]
+            dx = missing_boxes[:, 0:1] - anchor_cx.unsqueeze(0)
+            dy = missing_boxes[:, 1:2] - anchor_cy.unsqueeze(0)
+            closest = (dx.square() + dy.square()).argmin(dim=1)
+            old_indices = fg_mask.nonzero(as_tuple=False).flatten()
+            new_fg = fg_mask.clone()
+            new_fg[closest] = True
+            new_indices = new_fg.nonzero(as_tuple=False).flatten()
+            new_relation = geometry_relation.new_zeros((num_gt, new_indices.numel()))
+            if old_indices.numel():
+                new_relation[:, torch.searchsorted(new_indices, old_indices)] = geometry_relation
+            for gt_idx, anchor_idx in zip(missing_gt.nonzero(as_tuple=False).flatten(), closest):
+                new_relation[gt_idx, torch.searchsorted(new_indices, anchor_idx)] = True
+            fg_mask, geometry_relation = new_fg, new_relation
+        num_in_boxes_anchor = int(fg_mask.sum().item())
 
         bboxes_preds_per_image = bboxes_preds_per_image[fg_mask]
         cls_preds_ = cls_preds[batch_idx][fg_mask]
@@ -386,6 +439,18 @@ class TDE_Head(YOLOXHead):
             pred_ious_this_matching,
             matched_gt_inds,
         ) = self.simota_matching(cost, pair_wise_ious, gt_classes, num_gt, fg_mask)
+        # Merge geometry/candidate metadata with the matching metadata generated
+        # inside simota_matching(). All tensors are detached and tiny.
+        if self.collect_assignment_telemetry:
+            meta = dict(getattr(self, "_last_assignment_meta", {}) or {})
+            meta.update({
+                "assignment_mode": "custom",
+                "geometry_fallback_gt": geometry_fallback_gt,
+                "candidate_anchor_count": torch.as_tensor(
+                    num_in_boxes_anchor, device=gt_bboxes_per_image.device, dtype=torch.long
+                ),
+            })
+            self._last_assignment_meta = meta
         del pair_wise_cls_loss, cost, pair_wise_ious, pair_wise_ious_loss
 
         if mode == "cpu":
@@ -403,6 +468,8 @@ class TDE_Head(YOLOXHead):
         )
 
     def simota_matching(self, cost, pair_wise_ious, gt_classes, num_gt, fg_mask):
+        if self.use_baseline_assignments:
+            return YOLOXHead.simota_matching(self, cost, pair_wise_ious, gt_classes, num_gt, fg_mask)
         matching_matrix = torch.zeros_like(cost, dtype=torch.uint8)
 
         n_candidate_k = min(10, pair_wise_ious.size(1))
@@ -424,14 +491,25 @@ class TDE_Head(YOLOXHead):
             )
             matching_matrix[gt_idx][pos_idx] = 1
 
-        del topk_ious, dynamic_ks, pos_idx
-
+        # Duplicate-anchor resolution is part of the algorithm; the extra scalar
+        # reductions below are only evaluated on telemetry iterations.
+        pre_conflict_positive_total = (
+            matching_matrix.sum().detach() if self.collect_assignment_telemetry else None
+        )
         anchor_matching_gt = matching_matrix.sum(0)
-        if anchor_matching_gt.max() > 1:
-            multiple_match_mask = anchor_matching_gt > 1
+        multiple_match_mask = anchor_matching_gt > 1
+        conflict_anchor_count = (
+            multiple_match_mask.sum().detach() if self.collect_assignment_telemetry else None
+        )
+        if multiple_match_mask.any():
             _, cost_argmin = torch.min(cost[:, multiple_match_mask], dim=0)
             matching_matrix[:, multiple_match_mask] *= 0
             matching_matrix[cost_argmin, multiple_match_mask] = 1
+
+        # IMPORTANT: recompute after conflict resolution. The old code reused the
+        # pre-conflict anchor_matching_gt tensor; the boolean result happened to be
+        # equivalent for occupied anchors, but recomputation makes telemetry exact.
+        anchor_matching_gt = matching_matrix.sum(0)
         fg_mask_inboxes = anchor_matching_gt > 0
         num_fg = fg_mask_inboxes.sum().item()
 
@@ -443,6 +521,19 @@ class TDE_Head(YOLOXHead):
         pred_ious_this_matching = (matching_matrix * pair_wise_ious).sum(0)[
             fg_mask_inboxes
         ]
+
+        if self.collect_assignment_telemetry:
+            dynamic_k_hist = torch.bincount(
+                dynamic_ks.to(torch.long), minlength=11
+            )[:11].detach()
+            self._last_assignment_meta = {
+                "assignment_mode": "custom",
+                "dynamic_ks": dynamic_ks.detach(),
+                "dynamic_k_hist": dynamic_k_hist,
+                "pre_conflict_positive_total": pre_conflict_positive_total,
+                "conflict_anchor_count": conflict_anchor_count,
+            }
+        del topk_ious, pos_idx
         return num_fg, gt_matched_classes, pred_ious_this_matching, matched_gt_inds
 
     def get_losses_with_targets(
@@ -480,7 +571,44 @@ class TDE_Head(YOLOXHead):
             num_fg = 0.0
             num_gts = 0.0
 
-            lambda_soft = min(1.0, max(0.0, (self.current_epoch - 10) / 40.0))
+            # Assignment telemetry is aggregated on-device and detached once per
+            # batch, but ONLY on requested telemetry iterations. Size bins use the
+            # CURRENT augmented coordinates, i.e. the scale the detector sees.
+            collect_telemetry = bool(self.collect_assignment_telemetry)
+            stats_device = bbox_preds.device
+            size_names = ("micro", "medium", "macro")
+            size_thresholds_px = (32.0, 96.0)
+            size_gt_counts = torch.zeros(3, device=stats_device, dtype=torch.long)
+            size_positive_counts = torch.zeros(3, device=stats_device, dtype=torch.long)
+            size_covered_gt_counts = torch.zeros(3, device=stats_device, dtype=torch.long)
+            size_zero_positive_gt_counts = torch.zeros(3, device=stats_device, dtype=torch.long)
+            size_iou_sum = torch.zeros(3, device=stats_device, dtype=torch.float64)
+            size_iou_count = torch.zeros(3, device=stats_device, dtype=torch.long)
+            fpn_strides = tuple(int(x) for x in self.strides)
+            fpn_positive_counts = torch.zeros(len(fpn_strides), device=stats_device, dtype=torch.long)
+            fpn_iou_sum = torch.zeros(len(fpn_strides), device=stats_device, dtype=torch.float64)
+            fpn_iou_count = torch.zeros(len(fpn_strides), device=stats_device, dtype=torch.long)
+            class_gt_counts = torch.zeros(self.num_classes, device=stats_device, dtype=torch.long)
+            class_positive_counts = torch.zeros(self.num_classes, device=stats_device, dtype=torch.long)
+            matched_iou_sum = torch.zeros((), device=stats_device, dtype=torch.float64)
+            matched_iou_sq_sum = torch.zeros((), device=stats_device, dtype=torch.float64)
+            matched_iou_count = torch.zeros((), device=stats_device, dtype=torch.long)
+            matched_iou_min = torch.full((), float("inf"), device=stats_device, dtype=torch.float32)
+            matched_iou_max = torch.full((), float("-inf"), device=stats_device, dtype=torch.float32)
+            matched_iou_hist = torch.zeros(4, device=stats_device, dtype=torch.long)
+            invalid_matched_iou_count = torch.zeros((), device=stats_device, dtype=torch.long)
+            dynamic_k_sum = torch.zeros((), device=stats_device, dtype=torch.float64)
+            dynamic_k_count = torch.zeros((), device=stats_device, dtype=torch.long)
+            dynamic_k_min = torch.full((), 2**31 - 1, device=stats_device, dtype=torch.long)
+            dynamic_k_max = torch.zeros((), device=stats_device, dtype=torch.long)
+            dynamic_k_hist = torch.zeros(11, device=stats_device, dtype=torch.long)
+            pre_conflict_positive_total = torch.zeros((), device=stats_device, dtype=torch.long)
+            conflict_anchor_total = torch.zeros((), device=stats_device, dtype=torch.long)
+            geometry_fallback_gt_total = torch.zeros((), device=stats_device, dtype=torch.long)
+            candidate_anchor_total = torch.zeros((), device=stats_device, dtype=torch.long)
+            images_with_gt = 0
+
+            lambda_soft = 0.0 if self.use_baseline_assignments else min(1.0, max(0.0, (self.current_epoch - 10) / 40.0))
 
             for batch_idx in range(outputs.shape[0]):
                 num_gt = int(nlabel[batch_idx])
@@ -518,6 +646,113 @@ class TDE_Head(YOLOXHead):
 
                     num_fg += num_fg_img
 
+                    if collect_telemetry:
+                        # ---------------- Rich assignment telemetry ----------------
+                        images_with_gt += 1
+                        gt_classes_long = gt_classes.to(torch.long)
+                        class_gt_counts += torch.bincount(
+                            gt_classes_long, minlength=self.num_classes
+                        )[:self.num_classes]
+
+                        # Equivalent side length sqrt(w*h) in current augmented pixels.
+                        gt_wh = gt_bboxes_per_image[:, 2:4].clamp(min=0.0)
+                        gt_side = torch.sqrt((gt_wh[:, 0] * gt_wh[:, 1]).clamp(min=0.0))
+                        size_idx = (gt_side >= size_thresholds_px[0]).long() + (
+                            gt_side >= size_thresholds_px[1]
+                        ).long()
+                        size_gt_counts += torch.bincount(size_idx, minlength=3)[:3]
+
+                        if num_fg_img > 0:
+                            matched_gt_inds_long = matched_gt_inds.to(torch.long)
+                            pos_size_idx = size_idx[matched_gt_inds_long]
+                            size_positive_counts += torch.bincount(pos_size_idx, minlength=3)[:3]
+
+                            per_gt_pos = torch.bincount(
+                                matched_gt_inds_long, minlength=num_gt
+                            )
+                            covered = per_gt_pos > 0
+                            size_covered_gt_counts += torch.bincount(
+                                size_idx[covered], minlength=3
+                            )[:3]
+                            size_zero_positive_gt_counts += torch.bincount(
+                                size_idx[~covered], minlength=3
+                            )[:3]
+
+                            matched_classes_for_stats = gt_classes_long[matched_gt_inds_long]
+                            class_positive_counts += torch.bincount(
+                                matched_classes_for_stats, minlength=self.num_classes
+                            )[:self.num_classes]
+
+                            p_iou = pred_ious_this_matching.detach().float()
+                            finite_iou = torch.isfinite(p_iou)
+                            valid_range = finite_iou & (p_iou >= 0.0) & (p_iou <= 1.0)
+                            invalid_matched_iou_count += (~valid_range).sum()
+                            safe_iou = p_iou[valid_range]
+                            safe_size = pos_size_idx[valid_range]
+                            if safe_iou.numel() > 0:
+                                matched_iou_sum += safe_iou.double().sum()
+                                matched_iou_sq_sum += safe_iou.double().square().sum()
+                                matched_iou_count += safe_iou.numel()
+                                matched_iou_min = torch.minimum(matched_iou_min, safe_iou.min())
+                                matched_iou_max = torch.maximum(matched_iou_max, safe_iou.max())
+                                # [0,.25), [.25,.5), [.5,.75), [.75,1.0]
+                                iou_bin = torch.bucketize(
+                                    safe_iou,
+                                    torch.tensor([0.25, 0.50, 0.75], device=safe_iou.device),
+                                    right=False,
+                                )
+                                matched_iou_hist += torch.bincount(iou_bin, minlength=4)[:4]
+                                for bin_idx in range(3):
+                                    mask_b = safe_size == bin_idx
+                                    if mask_b.any():
+                                        size_iou_sum[bin_idx] += safe_iou[mask_b].double().sum()
+                                        size_iou_count[bin_idx] += mask_b.sum()
+
+                            pos_strides = expanded_strides[0][fg_mask].detach().float()
+                            for level_idx, stride_val in enumerate(fpn_strides):
+                                level_mask = pos_strides == float(stride_val)
+                                fpn_positive_counts[level_idx] += level_mask.sum()
+                                if level_mask.any():
+                                    level_ious = p_iou[level_mask & valid_range]
+                                    if level_ious.numel() > 0:
+                                        fpn_iou_sum[level_idx] += level_ious.double().sum()
+                                        fpn_iou_count[level_idx] += level_ious.numel()
+                        else:
+                            # Every GT in this image is uncovered if matching produced 0 FG.
+                            size_zero_positive_gt_counts += torch.bincount(size_idx, minlength=3)[:3]
+
+                        meta = getattr(self, "_last_assignment_meta", {}) or {}
+                        dyn = meta.get("dynamic_ks")
+                        if torch.is_tensor(dyn) and dyn.numel() > 0:
+                            dyn = dyn.to(stats_device)
+                            dynamic_k_sum += dyn.double().sum()
+                            dynamic_k_count += dyn.numel()
+                            dynamic_k_min = torch.minimum(dynamic_k_min, dyn.min().to(torch.long))
+                            dynamic_k_max = torch.maximum(dynamic_k_max, dyn.max().to(torch.long))
+                            hist = meta.get("dynamic_k_hist")
+                            if torch.is_tensor(hist):
+                                dynamic_k_hist += hist.to(stats_device, dtype=torch.long)[:11]
+                        for meta_key, target_acc_name in (
+                            ("pre_conflict_positive_total", "pre"),
+                            ("conflict_anchor_count", "conflict"),
+                            ("geometry_fallback_gt", "fallback"),
+                            ("candidate_anchor_count", "candidate"),
+                        ):
+                            value = meta.get(meta_key)
+                            if torch.is_tensor(value):
+                                value = value.to(stats_device, dtype=torch.long)
+                            elif value is not None:
+                                value = torch.as_tensor(value, device=stats_device, dtype=torch.long)
+                            if value is not None:
+                                if target_acc_name == "pre":
+                                    pre_conflict_positive_total += value
+                                elif target_acc_name == "conflict":
+                                    conflict_anchor_total += value
+                                elif target_acc_name == "fallback":
+                                    geometry_fallback_gt_total += value
+                                elif target_acc_name == "candidate":
+                                    candidate_anchor_total += value
+
                     cls_target = F.one_hot(
                         gt_matched_classes.to(torch.int64), self.num_classes
                     ).float() * pred_ious_this_matching.unsqueeze(-1).float()
@@ -553,6 +788,53 @@ class TDE_Head(YOLOXHead):
             fg_masks_concat = torch.cat(fg_masks, 0)
             matched_classes_concat = torch.cat(matched_classes, 0)
 
+            if collect_telemetry:
+                self.last_assignment_stats = {
+                    "telemetry_schema": 3,
+                    "assignment_mode": "baseline" if self.use_baseline_assignments else "custom",
+                    "num_fg_total": int(num_fg),
+                    "num_gt_total": int(num_gts),
+                    "input_hw": [int(imgs.shape[-2]), int(imgs.shape[-1])] if imgs is not None else None,
+                    "size_bin_basis": "sqrt(current_augmented_box_area_px)",
+                    "size_bin_names": list(size_names),
+                    "size_thresholds_px": list(size_thresholds_px),
+                    "size_gt_counts": size_gt_counts.detach(),
+                    "size_positive_counts": size_positive_counts.detach(),
+                    "size_covered_gt_counts": size_covered_gt_counts.detach(),
+                    "size_zero_positive_gt_counts": size_zero_positive_gt_counts.detach(),
+                    "size_iou_sum": size_iou_sum.detach(),
+                    "size_iou_count": size_iou_count.detach(),
+                    "fpn_strides": list(fpn_strides),
+                    "fpn_positive_counts": fpn_positive_counts.detach(),
+                    "fpn_iou_sum": fpn_iou_sum.detach(),
+                    "fpn_iou_count": fpn_iou_count.detach(),
+                    "class_gt_counts": class_gt_counts.detach(),
+                    "class_positive_counts": class_positive_counts.detach(),
+                    "matched_iou_sum": matched_iou_sum.detach(),
+                    "matched_iou_sq_sum": matched_iou_sq_sum.detach(),
+                    "matched_iou_count": matched_iou_count.detach(),
+                    "matched_iou_min": matched_iou_min.detach(),
+                    "matched_iou_max": matched_iou_max.detach(),
+                    "matched_iou_hist": matched_iou_hist.detach(),
+                    "invalid_matched_iou_count": invalid_matched_iou_count.detach(),
+                    "dynamic_k_sum": dynamic_k_sum.detach(),
+                    "dynamic_k_count": dynamic_k_count.detach(),
+                    "dynamic_k_min": dynamic_k_min.detach(),
+                    "dynamic_k_max": dynamic_k_max.detach(),
+                    "dynamic_k_hist": dynamic_k_hist.detach(),
+                    "pre_conflict_positive_total": pre_conflict_positive_total.detach(),
+                    "conflict_anchor_total": conflict_anchor_total.detach(),
+                    "geometry_fallback_gt_total": geometry_fallback_gt_total.detach(),
+                    "candidate_anchor_total": candidate_anchor_total.detach(),
+                    "images_with_gt": int(images_with_gt),
+                }
+            else:
+                self.last_assignment_stats = {
+                    "telemetry_schema": 3,
+                    "assignment_mode": "baseline" if self.use_baseline_assignments else "custom",
+                    "num_fg_total": int(num_fg),
+                    "num_gt_total": int(num_gts),
+                }
             num_fg = max(num_fg, 1)
             loss_iou = (
                 self.iou_loss(bbox_preds.view(-1, 4)[fg_masks_concat], reg_targets_concat)
@@ -576,7 +858,7 @@ class TDE_Head(YOLOXHead):
                     self.l1_loss(origin_preds.view(-1, 4)[fg_masks_concat], l1_targets_concat)
                 ).sum() / num_fg * l1_weight
 
-            reg_weight = 2.5
+            reg_weight = 5.0 if self.use_baseline_assignments else 2.5
             total_loss = reg_weight * loss_iou + loss_obj + loss_cls + loss_l1
 
             return (

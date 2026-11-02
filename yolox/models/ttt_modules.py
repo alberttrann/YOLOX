@@ -85,9 +85,17 @@ class TTTAdaptiveStage(nn.Module):
         init_ttt_lr=0.02,
         noise_std=0.08,
         mask_ratio=0.20,
+        residual_adapter=False,
     ):
         super().__init__()
         self.backbone_stage = stage_module
+        self.residual_adapter = residual_adapter
+        if residual_adapter:
+            # Adapt only a bounded feature-space affine correction, NEVER original BN or CSP weights.
+            self.residual_scale = nn.Parameter(torch.zeros(1, in_channels, 1, 1))
+            self.residual_bias = nn.Parameter(torch.zeros(1, in_channels, 1, 1))
+            self.residual_gain = 0.10
+            self.residual_grad_clip = 5.0
         self.projector = TTTProjector(in_channels)
         self.noise_std = noise_std
         self.mask_ratio = mask_ratio
@@ -107,11 +115,15 @@ class TTTAdaptiveStage(nn.Module):
         init_logit = math.log(p_ratio / (1.0 - p_ratio))
 
         self.ttt_lrs = nn.ParameterDict()
-        for name, param in self.backbone_stage.named_parameters():
-            if ("gn" in name or "norm" in name) and param.requires_grad:
-                self.ttt_lrs[name.replace(".", "_")] = nn.Parameter(
-                    torch.tensor(init_logit, dtype=torch.float32)
-                )
+        if self.residual_adapter:
+            for key in ("residual_scale", "residual_bias"):
+                self.ttt_lrs[key] = nn.Parameter(torch.tensor(init_logit, dtype=torch.float32))
+        else:
+            for name, param in self.backbone_stage.named_parameters():
+                if ("gn" in name or "norm" in name) and param.requires_grad:
+                    self.ttt_lrs[name.replace(".", "_")] = nn.Parameter(
+                        torch.tensor(init_logit, dtype=torch.float32)
+                    )
 
     def set_epoch_state(self, epoch, max_epochs):
         self.current_epoch = epoch
@@ -185,6 +197,301 @@ class TTTAdaptiveStage(nn.Module):
 
         return mse_loss + 0.1 * cos_loss
 
+    def _forward_residual_ttt(self, x_in, run_ttt=True, precomputed_feat=None):
+        """First-order, pretrained-preserving feature-space TTT.
+
+        Training:
+        - Meta-learns the persistent residual adapter and inner learning rates.
+
+        Evaluation / EMA:
+        - Evaluation can run inside torch.no_grad().
+        - EMA model parameters can all have requires_grad=False.
+        - Create ephemeral FP32 differentiable fast weights for the inner step.
+        - Never mutate persistent model / EMA parameters.
+
+        Native BN statistics are never adapted by the TTT inner step.
+        """
+
+        base_feat = (
+            self.backbone_stage(x_in)
+            if precomputed_feat is None
+            else precomputed_feat
+        )
+
+        if not run_ttt:
+            return base_feat
+
+        training_meta = bool(self.training)
+
+        # Local autograd island.
+        #
+        # This overrides evaluator no_grad(), but importantly we still need
+        # explicit differentiable fast variables during EMA evaluation because
+        # the persistent EMA parameters themselves are frozen.
+        with torch.enable_grad():
+            with torch.cuda.amp.autocast(enabled=False):
+                feat = base_feat.float()
+                source = feat.detach()
+
+                # ----------------------------------------------------------
+                # Construct the self-supervised TTT target.
+                # None of these operations need a graph.
+                # ----------------------------------------------------------
+                with torch.no_grad():
+                    target = self._get_noise_clipped_target(source)
+
+                    mask = self._get_relative_contrast_mask(
+                        target,
+                        self.mask_ratio,
+                    ).float()
+
+                    noise = (
+                        torch.randn_like(source) * self.noise_std
+                        if training_meta
+                        else torch.zeros_like(source)
+                    )
+
+                    # Residual conditioning only.
+                    # Native pretrained BN path remains untouched.
+                    normalized = F.group_norm(
+                        source,
+                        8,
+                        eps=1e-5,
+                    )
+
+                # ----------------------------------------------------------
+                # Choose inner-loop fast weights.
+                # ----------------------------------------------------------
+                if training_meta:
+                    # TRAIN:
+                    # Keep persistent adapter parameters in the outer
+                    # meta-gradient pathway.
+                    fast_scale = self.residual_scale
+                    fast_bias = self.residual_bias
+
+                else:
+                    # EVAL / EMA:
+                    # EMA parameters are frozen, so adapting them directly
+                    # would create a detached objective.
+                    #
+                    # Build transient leaf tensors instead.
+                    fast_scale = (
+                        self.residual_scale
+                        .detach()
+                        .float()
+                        .clone()
+                        .requires_grad_(True)
+                    )
+
+                    fast_bias = (
+                        self.residual_bias
+                        .detach()
+                        .float()
+                        .clone()
+                        .requires_grad_(True)
+                    )
+
+                def residual(scale, bias):
+                    return self.residual_gain * (
+                        torch.tanh(scale) * normalized
+                        + torch.tanh(bias)
+                    )
+
+                # ----------------------------------------------------------
+                # Inner reconstruction objective.
+                # ----------------------------------------------------------
+                def inner_objective(scale, bias):
+                    restored = source + residual(scale, bias)
+
+                    corrupted = (
+                        (restored + noise) * (1.0 - mask)
+                        + self.projector.mask_token.detach().float() * mask
+                    )
+
+                    prediction = self.projector(corrupted)
+
+                    return F.mse_loss(
+                        prediction.float(),
+                        target,
+                    )
+
+                inner_loss = inner_objective(
+                    fast_scale,
+                    fast_bias,
+                )
+
+                # Fail with an informative error instead of the opaque
+                # autograd message we just encountered.
+                if not inner_loss.requires_grad:
+                    raise RuntimeError(
+                        "Residual TTT inner loss is detached. "
+                        "Evaluation TTT requires differentiable "
+                        "ephemeral fast weights."
+                    )
+
+                g_scale, g_bias = torch.autograd.grad(
+                    inner_loss,
+                    (fast_scale, fast_bias),
+                    create_graph=False,
+                    retain_graph=False,
+                )
+
+                if (
+                    not torch.isfinite(g_scale).all()
+                    or not torch.isfinite(g_bias).all()
+                ):
+                    raise FloatingPointError(
+                        "Residual TTT inner gradient is non-finite"
+                    )
+
+                # ----------------------------------------------------------
+                # Inner-gradient clipping.
+                # ----------------------------------------------------------
+                grad_norm = torch.sqrt(
+                    g_scale.detach().square().sum()
+                    + g_bias.detach().square().sum()
+                    + 1e-12
+                )
+
+                grad_clip = (
+                    self.residual_grad_clip / grad_norm
+                ).clamp(max=1.0)
+
+                # ----------------------------------------------------------
+                # Scheduled learned TTT learning rates.
+                # ----------------------------------------------------------
+                epoch_fraction = min(
+                    1.0,
+                    max(
+                        0.0,
+                        self.current_epoch
+                        / max(1, self.max_epochs),
+                    ),
+                )
+
+                lr_ceiling = (
+                    self.min_meta_lr
+                    + (
+                        self.base_max_lr
+                        - self.min_meta_lr
+                    )
+                    * (
+                        0.5
+                        * (
+                            1.0
+                            + math.cos(
+                                math.pi * epoch_fraction
+                            )
+                        )
+                    )
+                )
+
+                lr_scale_param = (
+                    self.ttt_lrs["residual_scale"]
+                )
+
+                lr_bias_param = (
+                    self.ttt_lrs["residual_bias"]
+                )
+
+                lr_scale = (
+                    self.min_meta_lr
+                    + (
+                        lr_ceiling
+                        - self.min_meta_lr
+                    )
+                    * torch.sigmoid(
+                        lr_scale_param
+                    )
+                )
+
+                lr_bias = (
+                    self.min_meta_lr
+                    + (
+                        lr_ceiling
+                        - self.min_meta_lr
+                    )
+                    * torch.sigmoid(
+                        lr_bias_param
+                    )
+                )
+
+                # ----------------------------------------------------------
+                # One transient inner adaptation step.
+                # ----------------------------------------------------------
+                updated_scale = (
+                    fast_scale
+                    - lr_scale
+                    * (
+                        g_scale.detach()
+                        * grad_clip
+                    )
+                )
+
+                updated_bias = (
+                    fast_bias
+                    - lr_bias
+                    * (
+                        g_bias.detach()
+                        * grad_clip
+                    )
+                )
+
+                # ----------------------------------------------------------
+                # Apply adapted residual.
+                # ----------------------------------------------------------
+                normalized_outer = F.group_norm(
+                    feat,
+                    8,
+                    eps=1e-5,
+                )
+
+                out = (
+                    feat
+                    + self.residual_gain
+                    * (
+                        torch.tanh(updated_scale)
+                        * normalized_outer
+                        + torch.tanh(updated_bias)
+                    )
+                )
+
+                # ----------------------------------------------------------
+                # Outer training reconstruction objective.
+                #
+                # Only needed during meta-training.
+                # ----------------------------------------------------------
+                if training_meta:
+                    corrupted_outer = (
+                        (out.detach() + noise)
+                        * (1.0 - mask)
+                        + self.projector.mask_token
+                        * mask
+                    )
+
+                    self.current_rec_loss = F.mse_loss(
+                        self.projector(
+                            corrupted_outer
+                        ).float(),
+                        target,
+                    )
+
+        # Evaluation adaptation is episodic.
+        #
+        # No fast-weight graph should escape into the normal inference graph.
+        if not training_meta:
+            out = out.detach()
+
+        return out.to(
+            dtype=base_feat.dtype
+        )
+
+    def forward_from_features(self, native_features, run_ttt=True):
+        """Called after dark2 runs once on the entire batch (BN-safe partition)."""
+        if not self.residual_adapter:
+            raise RuntimeError('Precomputed TTT features require residual_adapter=True')
+        return self._forward_residual_ttt(None, run_ttt=run_ttt, precomputed_feat=native_features)
+
     def forward(self, x_in, run_ttt=True):
         is_profiling = False
         for m in self.backbone_stage.modules():
@@ -192,8 +499,14 @@ class TTTAdaptiveStage(nn.Module):
                 is_profiling = True
                 break
 
-        if is_profiling or not run_ttt:
+        if is_profiling:
             return self.backbone_stage(x_in)
+        if self.residual_adapter:
+            return self._forward_residual_ttt(x_in, run_ttt=run_ttt)
+        if not run_ttt:
+            return self.backbone_stage(x_in)
+        if not self.ttt_lrs:
+            raise RuntimeError("TTT enabled but dark2 has no adaptable GN/norm parameters; use a residual adapter")
 
         input_dtype = x_in.dtype
         is_inference_mode = not torch.is_grad_enabled()
@@ -265,8 +578,9 @@ class TTTAdaptiveStage(nn.Module):
                 lr_scale = torch.sigmoid(self.ttt_lrs[lr_key])
                 lr = self.min_meta_lr + (active_max_lr - self.min_meta_lr) * lr_scale
                 
-                g_clean = torch.nan_to_num(g.detach(), nan=0.0, posinf=0.0, neginf=0.0)
-                updated_backbone_params[name] = updated_backbone_params[name] - (lr * g_clean).to(
+                if not torch.isfinite(g).all().item():
+                    raise FloatingPointError(f"Non-finite TTT inner gradient in {name}")
+                updated_backbone_params[name] = updated_backbone_params[name] - (lr * g.detach()).to(
                     updated_backbone_params[name].dtype
                 )
 
@@ -276,8 +590,11 @@ class TTTAdaptiveStage(nn.Module):
             out = functional_call(self.backbone_stage, updated_backbone_params, x_curr)
             
             # Direct First-Order Projector Training: updates projector directly and prevents DDP deadlocks
-            with torch.no_grad():
-                feat_corrupted = (out.detach() + noise_map) * (1.0 - mask) + self.projector.mask_token * mask
+            # Keep outer reconstruction independent of trunk while training mask_token.
+            feat_corrupted = (
+                (out.detach() + noise_map.detach()) * (1.0 - mask.detach())
+                + self.projector.mask_token * mask.detach()
+            )
             rec_outer = self.projector(feat_corrupted)
             self.current_rec_loss = F.mse_loss(rec_outer, clean_target)
         else:
@@ -698,10 +1015,12 @@ class ContinuousSaliencyAttention(nn.Module):
         # Direct Spatial Local Value Bypass (Independent 5x5 DWConv)
         self.local_v_conv = nn.Conv2d(dim, dim, kernel_size=5, padding=2, groups=dim, bias=False)
 
-        # Zero-Convolution Initialization: guarantees exact mathematical identity at Step 0
-        nn.init.zeros_(self.proj.weight)
+        # Only the OUTER gate is zero-initialized. The attention terminal
+        # projections retain variance-preserving initialization so that the
+        # gate receives a useful first-step gradient instead of ~1e-7 noise.
+        nn.init.kaiming_uniform_(self.proj.weight, a=math.sqrt(5))
         nn.init.zeros_(self.proj.bias)
-        nn.init.zeros_(self.local_v_conv.weight)
+        nn.init.kaiming_uniform_(self.local_v_conv.weight, a=math.sqrt(5))
 
     def forward(self, x):
         B, C, H, W = x.shape
@@ -801,10 +1120,10 @@ class EngramMemoryBank(nn.Module):
 
     def forward(self, x_latent):
         B, N, D = x_latent.shape
-        x_norm = F.normalize(x_latent, p=2, dim=-1)
+        x_norm = F.normalize(x_latent.float(), p=2, dim=-1, eps=1e-6)
 
         p_flat = self.prototypes.view(self.num_classes * self.num_centroids, D)
-        p_norm = F.normalize(p_flat, p=2, dim=-1)
+        p_norm = F.normalize(p_flat.float(), p=2, dim=-1, eps=1e-6)
 
         logits = torch.matmul(x_norm, p_norm.t()) * self.temperature
         attn_weights = F.softmax(logits, dim=-1)
@@ -814,8 +1133,10 @@ class EngramMemoryBank(nn.Module):
         # OOD Rejection Margin: preserve exact input dtype (FP16/FP32 safe)
         raw_cosine = torch.matmul(x_norm, p_norm.t())
         max_cosine = raw_cosine.max(dim=-1, keepdim=True).values
-        ood_valid_mask = (max_cosine >= 0.30).to(dtype=x_latent.dtype)
-        memory_retrieved = memory_retrieved * ood_valid_mask
+        # Smooth OOD confidence retains learning gradients for initially unaligned
+        # prototypes. Hard thresholding previously permanently starved retrieval.
+        ood_valid_mask = 0.05 + 0.95 * torch.sigmoid((max_cosine.float() - 0.30) / 0.08)
+        memory_retrieved = memory_retrieved * ood_valid_mask.to(memory_retrieved.dtype)
 
         sub_logits = logits.view(B, N, self.num_classes, self.num_centroids)
         class_logits = sub_logits.logsumexp(dim=-1)

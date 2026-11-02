@@ -1,0 +1,380 @@
+{
+  "checkpoint": "YOLOX_outputs/tde_yolox_s/last_epoch_ckpt.pth",
+  "epoch": 15,
+  "results": [
+    {
+      "mode": "AMP + FULL_CONTEXT",
+      "branches_bypassed": 0,
+      "loss": 11.787785530090332,
+      "components": {
+        "iou_loss": 1.9523773193359375,
+        "conf_loss": 6.083527565002441,
+        "cls_loss": 2.2312488555908203,
+        "mem_loss": 2.1836330890655518,
+        "rec_loss": 0.12506496906280518,
+        "afford_loss": 5.184051036834717
+      },
+      "gradient_tensors": 494,
+      "nonfinite_gradient_parameters": 0,
+      "nonfinite_gradient_elements": 0,
+      "finite_element_norm_fp64": 275.482703348757,
+      "original_style_grad_norm_fp32": 275.4827022537727,
+      "groups": {
+        "Other": {
+          "params": 27,
+          "bad_params": 0,
+          "bad_elements": 0
+        },
+        "Backbone dark2": {
+          "params": 12,
+          "bad_params": 0,
+          "bad_elements": 0
+        },
+        "TTT projector": {
+          "params": 8,
+          "bad_params": 0,
+          "bad_elements": 0
+        },
+        "TTT meta LR": {
+          "params": 12,
+          "bad_params": 0,
+          "bad_elements": 0
+        },
+        "Backbone dark3": {
+          "params": 30,
+          "bad_params": 0,
+          "bad_elements": 0
+        },
+        "Backbone dark4": {
+          "params": 34,
+          "bad_params": 0,
+          "bad_elements": 0
+        },
+        "Backbone dark5": {
+          "params": 28,
+          "bad_params": 0,
+          "bad_elements": 0
+        },
+        "SPI": {
+          "params": 17,
+          "bad_params": 0,
+          "bad_elements": 0
+        },
+        "Tribrid dense & gates": {
+          "params": 52,
+          "bad_params": 0,
+          "bad_elements": 0
+        },
+        "Tribrid global_mixer": {
+          "params": 180,
+          "bad_params": 0,
+          "bad_elements": 0
+        },
+        "Head bbox": {
+          "params": 25,
+          "bad_params": 0,
+          "bad_elements": 0
+        },
+        "Memory": {
+          "params": 22,
+          "bad_params": 0,
+          "bad_elements": 0
+        },
+        "Head classification": {
+          "params": 24,
+          "bad_params": 0,
+          "bad_elements": 0
+        },
+        "Head objectness": {
+          "params": 6,
+          "bad_params": 0,
+          "bad_elements": 0
+        },
+        "Affordance": {
+          "params": 17,
+          "bad_params": 0,
+          "bad_elements": 0
+        }
+      },
+      "first_bad_parameters": []
+    },
+    {
+      "mode": "AMP + BYPASS_CONTEXT",
+      "branches_bypassed": 4,
+      "loss": 11.787785530090332,
+      "components": {
+        "iou_loss": 1.9523773193359375,
+        "conf_loss": 6.083527565002441,
+        "cls_loss": 2.2312488555908203,
+        "mem_loss": 2.1836330890655518,
+        "rec_loss": 0.12506496906280518,
+        "afford_loss": 5.184051036834717
+      },
+      "gradient_tensors": 314,
+      "nonfinite_gradient_parameters": 0,
+      "nonfinite_gradient_elements": 0,
+      "finite_element_norm_fp64": 275.4927919825249,
+      "original_style_grad_norm_fp32": 275.4927900122102,
+      "groups": {
+        "Other": {
+          "params": 27,
+          "bad_params": 0,
+          "bad_elements": 0
+        },
+        "Backbone dark2": {
+          "params": 12,
+          "bad_params": 0,
+          "bad_elements": 0
+        },
+        "TTT projector": {
+          "params": 8,
+          "bad_params": 0,
+          "bad_elements": 0
+        },
+        "TTT meta LR": {
+          "params": 12,
+          "bad_params": 0,
+          "bad_elements": 0
+        },
+        "Backbone dark3": {
+          "params": 30,
+          "bad_params": 0,
+          "bad_elements": 0
+        },
+        "Backbone dark4": {
+          "params": 34,
+          "bad_params": 0,
+          "bad_elements": 0
+        },
+        "Backbone dark5": {
+          "params": 28,
+          "bad_params": 0,
+          "bad_elements": 0
+        },
+        "SPI": {
+          "params": 17,
+          "bad_params": 0,
+          "bad_elements": 0
+        },
+        "Tribrid dense & gates": {
+          "params": 52,
+          "bad_params": 0,
+          "bad_elements": 0
+        },
+        "Head bbox": {
+          "params": 25,
+          "bad_params": 0,
+          "bad_elements": 0
+        },
+        "Memory": {
+          "params": 22,
+          "bad_params": 0,
+          "bad_elements": 0
+        },
+        "Head classification": {
+          "params": 24,
+          "bad_params": 0,
+          "bad_elements": 0
+        },
+        "Head objectness": {
+          "params": 6,
+          "bad_params": 0,
+          "bad_elements": 0
+        },
+        "Affordance": {
+          "params": 17,
+          "bad_params": 0,
+          "bad_elements": 0
+        }
+      },
+      "first_bad_parameters": []
+    },
+    {
+      "mode": "FP32 + FULL_CONTEXT",
+      "branches_bypassed": 0,
+      "loss": 11.78609848022461,
+      "components": {
+        "iou_loss": 1.9528729915618896,
+        "conf_loss": 6.082964897155762,
+        "cls_loss": 2.229583501815796,
+        "mem_loss": 2.1835145950317383,
+        "rec_loss": 0.12505848705768585,
+        "afford_loss": 5.184279441833496
+      },
+      "gradient_tensors": 500,
+      "nonfinite_gradient_parameters": 0,
+      "nonfinite_gradient_elements": 0,
+      "finite_element_norm_fp64": 280.22077651081224,
+      "original_style_grad_norm_fp32": 280.22077612460805,
+      "groups": {
+        "Other": {
+          "params": 27,
+          "bad_params": 0,
+          "bad_elements": 0
+        },
+        "Backbone dark2": {
+          "params": 18,
+          "bad_params": 0,
+          "bad_elements": 0
+        },
+        "TTT projector": {
+          "params": 8,
+          "bad_params": 0,
+          "bad_elements": 0
+        },
+        "TTT meta LR": {
+          "params": 12,
+          "bad_params": 0,
+          "bad_elements": 0
+        },
+        "Backbone dark3": {
+          "params": 30,
+          "bad_params": 0,
+          "bad_elements": 0
+        },
+        "Backbone dark4": {
+          "params": 34,
+          "bad_params": 0,
+          "bad_elements": 0
+        },
+        "Backbone dark5": {
+          "params": 28,
+          "bad_params": 0,
+          "bad_elements": 0
+        },
+        "SPI": {
+          "params": 17,
+          "bad_params": 0,
+          "bad_elements": 0
+        },
+        "Tribrid dense & gates": {
+          "params": 52,
+          "bad_params": 0,
+          "bad_elements": 0
+        },
+        "Tribrid global_mixer": {
+          "params": 180,
+          "bad_params": 0,
+          "bad_elements": 0
+        },
+        "Head bbox": {
+          "params": 25,
+          "bad_params": 0,
+          "bad_elements": 0
+        },
+        "Memory": {
+          "params": 22,
+          "bad_params": 0,
+          "bad_elements": 0
+        },
+        "Head classification": {
+          "params": 24,
+          "bad_params": 0,
+          "bad_elements": 0
+        },
+        "Head objectness": {
+          "params": 6,
+          "bad_params": 0,
+          "bad_elements": 0
+        },
+        "Affordance": {
+          "params": 17,
+          "bad_params": 0,
+          "bad_elements": 0
+        }
+      },
+      "first_bad_parameters": []
+    },
+    {
+      "mode": "FP32 + BYPASS_CONTEXT",
+      "branches_bypassed": 4,
+      "loss": 11.78609848022461,
+      "components": {
+        "iou_loss": 1.9528729915618896,
+        "conf_loss": 6.082964897155762,
+        "cls_loss": 2.229583501815796,
+        "mem_loss": 2.1835145950317383,
+        "rec_loss": 0.12505848705768585,
+        "afford_loss": 5.184279441833496
+      },
+      "gradient_tensors": 320,
+      "nonfinite_gradient_parameters": 0,
+      "nonfinite_gradient_elements": 0,
+      "finite_element_norm_fp64": 280.220165702307,
+      "original_style_grad_norm_fp32": 280.2201642131616,
+      "groups": {
+        "Other": {
+          "params": 27,
+          "bad_params": 0,
+          "bad_elements": 0
+        },
+        "Backbone dark2": {
+          "params": 18,
+          "bad_params": 0,
+          "bad_elements": 0
+        },
+        "TTT projector": {
+          "params": 8,
+          "bad_params": 0,
+          "bad_elements": 0
+        },
+        "TTT meta LR": {
+          "params": 12,
+          "bad_params": 0,
+          "bad_elements": 0
+        },
+        "Backbone dark3": {
+          "params": 30,
+          "bad_params": 0,
+          "bad_elements": 0
+        },
+        "Backbone dark4": {
+          "params": 34,
+          "bad_params": 0,
+          "bad_elements": 0
+        },
+        "Backbone dark5": {
+          "params": 28,
+          "bad_params": 0,
+          "bad_elements": 0
+        },
+        "SPI": {
+          "params": 17,
+          "bad_params": 0,
+          "bad_elements": 0
+        },
+        "Tribrid dense & gates": {
+          "params": 52,
+          "bad_params": 0,
+          "bad_elements": 0
+        },
+        "Head bbox": {
+          "params": 25,
+          "bad_params": 0,
+          "bad_elements": 0
+        },
+        "Memory": {
+          "params": 22,
+          "bad_params": 0,
+          "bad_elements": 0
+        },
+        "Head classification": {
+          "params": 24,
+          "bad_params": 0,
+          "bad_elements": 0
+        },
+        "Head objectness": {
+          "params": 6,
+          "bad_params": 0,
+          "bad_elements": 0
+        },
+        "Affordance": {
+          "params": 17,
+          "bad_params": 0,
+          "bad_elements": 0
+        }
+      },
+      "first_bad_parameters": []
+    }
+  ]
+}

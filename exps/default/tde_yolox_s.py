@@ -29,7 +29,7 @@ class Exp(MyExp):
         # --- MODEL SCALE: STANDARD YOLOX-S ---
         self.depth = 0.33
         self.width = 0.50
-        self.exp_name = os.path.split(os.path.realpath(__file__))[1].split(".")[0]
+        self.exp_name = "tde_yolox_s_full_vnext2"  # separate checkpoints from prior runs
         self.act = "silu"
 
         # --- TDE-YOLOX RESEARCH CONFIGURATION ---
@@ -38,6 +38,23 @@ class Exp(MyExp):
         self.ttt_noise_std = 0.08      # Denoising perturbation
         self.ttt_mask_ratio = 0.20     # Exact 20% relative contrast Sobel masking
         self.afford_loss_weight = 0.25  # Training-only dense affordance supervision weight
+        self.recovery_mode = False  # Full research architecture; not the prior ablation-only recovery run
+        # Independently toggle one proposed capability per ablation.
+        self.pretrained_compatible_dark2 = True
+        self.enable_ttt = True  # pretrained-compatible feature-space residual TTT
+        self.enable_legacy_ttt = False  # legacy GN weight adaptation remains disallowed
+        self.enable_spi = True
+        self.enable_global_context = True
+        self.enable_dense_local = True
+        self.enable_backbone_attention = True
+        self.enable_memory = True
+        self.enable_memory_aux = True
+        self.enable_proto_aux = True
+        self.enable_intra_aux = True
+        self.enable_rec_aux = True
+        self.enable_afford_aux = True
+        self.use_baseline_assignments = False
+        self.regression_loss_type = "oiou"
 
         # --- NATIVE 16:9 RULE-OF-64 RESOLUTION PROTOCOL ---
         self.input_size = (576, 1024)   # (Height, Width) - 0% Letterbox Padding Waste
@@ -65,9 +82,10 @@ class Exp(MyExp):
         # --- TRAINING & CURRICULUM SCHEDULE (Calibrated for Pre-trained Fine-Tuning) ---
         self.max_epoch = 80
         # When fine-tuning from yolox_s.pth, 1-2 epochs of warmup is standard (10 epochs is for scratch)
-        self.warmup_epochs = 1
+        self.warmup_epochs = 10 if self.recovery_mode else 1
         self.no_aug_epochs = 15
         self.ramp_epochs = 50
+        self.aux_ramp_epochs = 12  # active at step one, smoothly reach nominal auxiliary weights
         self.prob_start = 0.10
         self.prob_end = 0.60
 
@@ -84,12 +102,12 @@ class Exp(MyExp):
 
         # Crowd-Safe Evaluation Thresholds
         self.test_conf = 0.01
-        self.nmsthre = 0.60
+        self.nmsthre = 0.65 if self.recovery_mode else 0.60
 
     def random_resize(self, data_loader, epoch, rank, is_distributed):
         tensor = torch.LongTensor(2).cuda()
         if rank == 0:
-            if self.multiscale_range > 0 and epoch < (self.max_epoch - self.no_aug_epochs):
+            if self.multiscale_range > 0 and (self.recovery_mode or epoch < (self.max_epoch - self.no_aug_epochs)):
                 scale_choices = [(512, 896), (576, 1024), (640, 1152)]
                 h, w = random.choice(scale_choices)
                 tensor[0] = h
@@ -150,7 +168,7 @@ class Exp(MyExp):
             name="",
             img_size=self.input_size,
             preproc=TrainTransform(
-                max_labels=160,
+                max_labels=120 if self.recovery_mode else 160,
                 flip_prob=self.flip_prob,
                 hsv_prob=self.hsv_prob,
             ),
@@ -202,6 +220,13 @@ class Exp(MyExp):
                     m.momentum = 0.03
 
         if getattr(self, "model", None) is None:
+            if self.enable_memory_aux and not self.enable_memory:
+                raise ValueError("Memory CE requires enable_memory=True")
+            if self.enable_rec_aux and not (self.enable_ttt or self.enable_legacy_ttt):
+                raise ValueError("Reconstruction loss requires an enabled TTT implementation")
+            if self.pretrained_compatible_dark2 and self.enable_legacy_ttt:
+                raise ValueError("Legacy TTT requires GN dark2 and destroys native BN parity. "
+                                 "Implement a separate residual GN adapter before enabling it.")
             backbone = CSPDarknet(
                 self.depth,
                 self.width,
@@ -210,6 +235,8 @@ class Exp(MyExp):
                 ttt_lr=self.init_ttt_lr,
                 ttt_noise_std=self.ttt_noise_std,
                 ttt_mask_ratio=self.ttt_mask_ratio,
+                pretrained_compatible_dark2=self.pretrained_compatible_dark2,
+                ttt_residual_adapter=self.enable_ttt and self.pretrained_compatible_dark2,
             )
 
             neck = YOLOPAFPN(
@@ -220,6 +247,8 @@ class Exp(MyExp):
                 ttt_lr=self.init_ttt_lr,
                 ttt_noise_std=self.ttt_noise_std,
                 ttt_mask_ratio=self.ttt_mask_ratio,
+                pretrained_compatible_dark2=self.pretrained_compatible_dark2,
+                ttt_residual_adapter=self.enable_ttt and self.pretrained_compatible_dark2,
             )
             neck.backbone = backbone
 
@@ -228,7 +257,7 @@ class Exp(MyExp):
                 self.width,
                 in_channels=[256, 512, 1024],
                 act=self.act,
-                loss_type="oiou",
+                loss_type=self.regression_loss_type,
             )
 
             self.model = YOLOX(
@@ -236,6 +265,25 @@ class Exp(MyExp):
                 head,
                 afford_loss_weight=self.afford_loss_weight,
             )
+            from yolox.models.network_blocks import C2fA
+            from yolox.models.tribrid_neck import C2f_Tribrid
+            self.model.train_ttt_enabled = self.enable_ttt
+            self.model.eval_ttt_enabled = self.enable_ttt
+            neck.enable_spi = self.enable_spi
+            head.enable_memory_restoration = self.enable_memory
+            head.use_baseline_assignments = self.use_baseline_assignments
+            self.model.mem_loss_weight = 0.10 if self.enable_memory_aux else 0.0
+            self.model.proto_loss_weight = 0.10 if self.enable_proto_aux else 0.0
+            self.model.intra_loss_weight = 0.05 if self.enable_intra_aux else 0.0
+            self.model.rec_loss_weight = 0.05 if self.enable_rec_aux else 0.0
+            self.model.afford_loss_weight = self.afford_loss_weight if self.enable_afford_aux else 0.0
+            for module in self.model.modules():
+                if isinstance(module, C2f_Tribrid):
+                    module.enable_global_context = self.enable_global_context
+                    module.enable_dense_local = self.enable_dense_local
+                elif isinstance(module, C2fA):
+                    module.enable_attention = self.enable_backbone_attention
+                    module.enable_dense_local = self.enable_dense_local
 
         self.model.apply(init_yolo)
         self.model.head.initialize_biases(1e-2)
@@ -243,6 +291,7 @@ class Exp(MyExp):
         self.model.max_epochs = self.max_epoch
         self.model.warmup_epochs = self.warmup_epochs
         self.model.ramp_epochs = self.ramp_epochs
+        self.model.aux_ramp_epochs = self.aux_ramp_epochs
         self.model.prob_start = self.prob_start
         self.model.prob_end = self.prob_end
 
