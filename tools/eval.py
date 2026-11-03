@@ -121,11 +121,23 @@ def make_parser():
     parser.add_argument("--legacy", default=False, action="store_true", help="Maintain legacy data transform")
     parser.add_argument("--test", default=False, action="store_true", help="Evaluate against test-dev split")
     parser.add_argument("--speed", default=False, action="store_true", help="Execute speed profiling only")
+    parser.add_argument("--model-exp", default=None, type=str,
+                        help="Training experiment that EXACTLY built the checkpoint. Required for legacy ACDC experiment files.")
+    parser.add_argument("--data-exp", default=None, type=str,
+                        help="Dataset-only experiment (e.g. test_acdc_fog.py); never used to construct the model.")
+    parser.add_argument("--weights", choices=("ema", "raw"), default="ema",
+                        help="Which checkpoint state to evaluate. Training validation defaults to EMA.")
+    parser.add_argument("--ttt-mode", choices=("off", "on"), default="off",
+                        help="Off=pure DG, on=condition-blind episodic test-time adaptation.")
+    parser.add_argument("--ttt-batch-policy", choices=("per_image", "shared"), default="per_image",
+                        help="Evaluation-only episodic fast-weight policy; per_image is batch-independent. Shared is legacy ablation.")
+    parser.add_argument("--deploy-fold", action="store_true", default=False,
+                        help="Optional branch reparameterization; disabled by default to preserve exact checkpoint semantics.")
     parser.add_argument("opts", default=None, nargs=argparse.REMAINDER, help="Command-line option overrides")
     return parser
 
 
-@logger.catch
+@logger.catch(reraise=True)
 def main(exp, args, num_gpu):
     if args.seed is not None:
         random.seed(args.seed)
@@ -165,36 +177,60 @@ def main(exp, args, num_gpu):
     # 3. LOAD CHECKPOINT WEIGHTS FIRST (Bug B3 Fix)
     # Checkpoint contains multi-branch RepDWConv weights (dw_3x3, dw_1x1).
     # Strict loading must execute BEFORE structural re-parameterization folding!
-    if not args.speed and not args.trt:
+    if not args.trt:
         ckpt_file = args.ckpt if args.ckpt is not None else os.path.join(file_name, "best_ckpt.pth")
         logger.info("Loading evaluation checkpoint from {}".format(ckpt_file))
         loc = "cuda:{}".format(rank)
         ckpt = torch.load(ckpt_file, map_location=loc)
-        state_dict = ckpt["model"] if "model" in ckpt else ckpt
+        if args.weights == "ema":
+            if not isinstance(ckpt, dict) or not isinstance(ckpt.get("ema_model"), dict):
+                raise RuntimeError("Requested EMA but checkpoint has no ema_model state")
+            state_dict = ckpt["ema_model"]
+        else:
+            state_dict = ckpt["model"] if isinstance(ckpt, dict) and "model" in ckpt else ckpt
         clean_state_dict = {
             (k[7:] if k.startswith("module.") else k): v for k, v in state_dict.items()
         }
         
         # Strict loading ensures 100% parameter coverage; zero silent missing weights
+        # CRITICAL: never silently benchmark an incompatible architecture.
+        # Some old ACDC experiment files construct GN dark2 / legacy TTT, which
+        # cannot receive a residual-BN dark2 vNext.2 checkpoint.
         try:
             model.load_state_dict(clean_state_dict, strict=True)
-            logger.info("Loaded checkpoint weights with strict=True successfully.")
         except RuntimeError as e:
-            logger.warning(f"Strict load failed ({e}). Falling back to non-strict load with coverage logging.")
-            missing, unexpected = model.load_state_dict(clean_state_dict, strict=False)
-            logger.info(f"Missing keys: {len(missing)}, Unexpected keys: {len(unexpected)}")
+            raise RuntimeError(
+                "Checkpoint/model architecture mismatch; evaluation ABORTED. "
+                "Use --model-exp exps/default/tde_yolox_s.py and --data-exp "
+                "exps/default/test_acdc_<condition>.py. Original error:\n" + str(e)
+            ) from e
+        logger.info("CHECKPOINT EXACT MATCH: strict=True, source={}", args.weights)
+        if hasattr(model_ref, "set_meta_training_state"):
+            ckpt_epoch = int(ckpt.get("start_epoch", 1)) if isinstance(ckpt, dict) else 1
+            model_ref.set_meta_training_state(max(1, ckpt_epoch), int(exp.max_epoch))
 
-    # 4. Enforce Deterministic TTT Mode for Zero-Shot OOD Evaluation
-    if hasattr(model_ref, "set_meta_training_state"):
-        logger.info("TDE-YOLOX: Enforcing Test-Time Adaptation Mode (ttt_prob = 1.0)...")
-        model_ref.set_meta_training_state(exp.max_epoch, exp.max_epoch)
+    # Compare two predeclared, condition-independent scientific protocols.
+    # TTT on must use the saved checkpoint's own learned meta-LRs.
+    if hasattr(model_ref, "eval_ttt_enabled"):
+        model_ref.eval_ttt_enabled = (args.ttt_mode == "on")
+    if args.ttt_mode == "on":
+        dark2 = model_ref.backbone.backbone.dark2
+        if (args.ttt_batch_policy == "per_image" and
+                not hasattr(dark2, "_forward_residual_ttt_per_image_eval")):
+            raise RuntimeError("--ttt-batch-policy per_image requires the vNext.2 "
+                               "eval-only TTT patch. Refusing silent shared-batch fallback.")
+        dark2.eval_ttt_batch_policy = args.ttt_batch_policy
+    logger.info("EVAL_PROTOCOL: weights={} ttt={} batch_policy={} (no condition-specific tuning)",
+                args.weights, args.ttt_mode, args.ttt_batch_policy)
 
-    # 5. TRIGGER STRUCTURAL RE-PARAMETERIZATION DEPLOYMENT FOLDING SECOND (Bug B3 Fix)
-    # Folds loaded dw_3x3 and dw_1x1 weights into fused_conv for zero-overhead inference
-    if hasattr(model_ref, "backbone") and hasattr(model_ref.backbone, "switch_to_deploy"):
-        logger.info("TDE-YOLOX: Folding RepDWConv branches into single 3x3 convs for deployment...")
-        model_ref.backbone.switch_to_deploy()
+    # Folding is optional and must be separately parity-tested against unfused.
+    if args.deploy_fold:
+        if hasattr(model_ref, "backbone") and hasattr(model_ref.backbone, "switch_to_deploy"):
+            model_ref.backbone.switch_to_deploy()
 
+    # Do not fuse around active TTT without verified numerics and timing parity.
+    if args.fuse and args.ttt_mode == "on":
+        raise RuntimeError("--fuse with TTT is not validated; benchmark unfused TTT separately")
     # 6. Execute Selective Conv-BN Fusion
     if args.fuse:
         model = fuse_tde_model(model)
@@ -232,7 +268,20 @@ def main(exp, args, num_gpu):
 if __name__ == "__main__":
     configure_module()
     args = make_parser().parse_args()
-    exp = get_exp(args.exp_file, args.name)
+    # The experiment providing dataset paths is NEVER allowed to decide the model
+    # architecture. In particular, legacy ACDC configs instantiate GN dark2.
+    model_file = args.model_exp or args.exp_file
+    if not model_file:
+        raise ValueError("Provide --model-exp (trained architecture) and --data-exp (dataset)")
+    if args.exp_file and not args.model_exp and "test_acdc" in str(args.exp_file).lower():
+        raise RuntimeError("Legacy ACDC experiment cannot construct the model. "
+                           "Pass --model-exp exps/default/tde_yolox_s.py ")
+    exp = get_exp(model_file, args.name)
+    dataset_file = args.data_exp or (args.exp_file if args.model_exp else None)
+    if dataset_file:
+        data_exp = get_exp(dataset_file, None)
+        for field in ("data_dir", "val_ann", "test_ann", "test_size"):
+            setattr(exp, field, getattr(data_exp, field))
     exp.merge(args.opts)
 
     if not args.experiment_name:
@@ -251,3 +300,5 @@ if __name__ == "__main__":
         dist_url=dist_url,
         args=(exp, args, num_gpu),
     )
+
+

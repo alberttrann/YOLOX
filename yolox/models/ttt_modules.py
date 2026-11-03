@@ -197,6 +197,99 @@ class TTTAdaptiveStage(nn.Module):
 
         return mse_loss + 0.1 * cos_loss
 
+    def _forward_residual_ttt_per_image_eval(self, base_feat):
+        """Independent, stateless test-time adaptation for each input image.
+
+        Only used in eval() (training continues through the original path).
+        Retains the checkpoint's projector, mask, target, learned meta-LRs,
+        residual gain, and fast-weight clipping; adds no persistent parameters.
+
+        For sample i, differentiate its own mean reconstruction loss, not the
+        average over B samples. This preserves the B=1 effective learning rate.
+        """
+        if self.training:
+            raise RuntimeError("Per-image eval TTT called while training")
+        if torch.is_inference_mode_enabled():
+            raise RuntimeError(
+                "Gradient-based TTT requires torch.no_grad(), not "
+                "torch.inference_mode(); disable inference_mode for --ttt-mode on."
+            )
+        if not self.residual_adapter:
+            raise RuntimeError("Per-image TTT requires residual_adapter=True")
+        if base_feat.shape[0] == 0:
+            return base_feat
+
+        with torch.enable_grad(), torch.autocast(
+            device_type=base_feat.device.type, enabled=False
+        ):
+            # The native BN/CSP feature computation happened once, outside this
+            # inner loop. It is never differentiated or modified by evaluation.
+            source = base_feat.detach().float()
+            bsz = source.shape[0]
+            with torch.no_grad():
+                target = self._get_noise_clipped_target(source)
+                mask = self._get_relative_contrast_mask(
+                    target, self.mask_ratio
+                ).float()
+                norm = F.group_norm(source, 8, eps=1e-5)
+
+            # Leaf fast weights are [B,C,1,1], one independent pair/image.
+            # Frozen EMA parameters never receive or accumulate gradients.
+            fast_s = (self.residual_scale.detach().float()
+                      .expand(bsz, -1, -1, -1).clone()
+                      .requires_grad_(True))
+            fast_b = (self.residual_bias.detach().float()
+                      .expand(bsz, -1, -1, -1).clone()
+                      .requires_grad_(True))
+
+            restored = source + self.residual_gain * (
+                torch.tanh(fast_s) * norm + torch.tanh(fast_b)
+            )
+            corrupted = (
+                restored * (1.0 - mask)
+                + self.projector.mask_token.detach().float() * mask
+            )
+            predicted = self.projector(corrupted).float()
+            # Mean over C,H,W *per image*, then sum across images. Using a
+            # batch mean here would scale each fast update by 1/B.
+            per_image_loss = (predicted - target).square().flatten(1).mean(1)
+            g_s, g_b = torch.autograd.grad(
+                per_image_loss.sum(), (fast_s, fast_b), create_graph=False
+            )
+            if not (torch.isfinite(g_s).all() and torch.isfinite(g_b).all()):
+                raise FloatingPointError("Non-finite per-image TTT gradient")
+
+            # Clipping is applied to each example independently.
+            grad_norm = torch.sqrt(
+                g_s.detach().square().flatten(1).sum(1)
+                + g_b.detach().square().flatten(1).sum(1)
+                + 1e-12
+            )
+            clip = (self.residual_grad_clip / grad_norm).clamp(max=1.0)
+            clip = clip.reshape(bsz, 1, 1, 1)
+
+            progress = min(1.0, max(
+                0.0, self.current_epoch / max(1, self.max_epochs)
+            ))
+            lr_ceiling = self.min_meta_lr + (
+                self.base_max_lr - self.min_meta_lr
+            ) * (0.5 * (1.0 + math.cos(math.pi * progress)))
+            lr_s = self.min_meta_lr + (
+                lr_ceiling - self.min_meta_lr
+            ) * torch.sigmoid(self.ttt_lrs['residual_scale'].detach())
+            lr_b = self.min_meta_lr + (
+                lr_ceiling - self.min_meta_lr
+            ) * torch.sigmoid(self.ttt_lrs['residual_bias'].detach())
+
+            next_s = fast_s - lr_s * (g_s.detach() * clip)
+            next_b = fast_b - lr_b * (g_b.detach() * clip)
+            out = source + self.residual_gain * (
+                torch.tanh(next_s) * norm + torch.tanh(next_b)
+            )
+
+        # No test-time graph or fast weights survive this call.
+        return out.detach().to(dtype=base_feat.dtype)
+
     def _forward_residual_ttt(self, x_in, run_ttt=True, precomputed_feat=None):
         """First-order, pretrained-preserving feature-space TTT.
 
@@ -220,6 +313,8 @@ class TTTAdaptiveStage(nn.Module):
 
         if not run_ttt:
             return base_feat
+        if (not self.training and getattr(self, 'eval_ttt_batch_policy', 'per_image') == 'per_image'):
+            return self._forward_residual_ttt_per_image_eval(base_feat)
 
         training_meta = bool(self.training)
 

@@ -1,0 +1,38 @@
+--- a/tools/eval.py
++++ b/tools/eval.py
+@@ -129,6 +129,8 @@
+                         help="Which checkpoint state to evaluate. Training validation defaults to EMA.")
+     parser.add_argument("--ttt-mode", choices=("off", "on"), default="off",
+                         help="Off=pure DG, on=condition-blind episodic test-time adaptation.")
++    parser.add_argument("--ttt-batch-policy", choices=("per_image", "shared"), default="per_image",
++                        help="Evaluation-only episodic fast-weight policy; per_image is batch-independent. Shared is legacy ablation.")
+     parser.add_argument("--deploy-fold", action="store_true", default=False,
+                         help="Optional branch reparameterization; disabled by default to preserve exact checkpoint semantics.")
+     parser.add_argument("opts", default=None, nargs=argparse.REMAINDER, help="Command-line option overrides")
+@@ -202,7 +204,7 @@
+                 "Use --model-exp exps/default/tde_yolox_s.py and --data-exp "
+                 "exps/default/test_acdc_<condition>.py. Original error:\n" + str(e)
+             ) from e
+-        logger.info("CHECKPOINT EXACT MATCH: strict=True, source=%s", args.weights)
++        logger.info("CHECKPOINT EXACT MATCH: strict=True, source={}", args.weights)
+         if hasattr(model_ref, "set_meta_training_state"):
+             ckpt_epoch = int(ckpt.get("start_epoch", 1)) if isinstance(ckpt, dict) else 1
+             model_ref.set_meta_training_state(max(1, ckpt_epoch), int(exp.max_epoch))
+@@ -211,8 +213,15 @@
+     # TTT on must use the saved checkpoint's own learned meta-LRs.
+     if hasattr(model_ref, "eval_ttt_enabled"):
+         model_ref.eval_ttt_enabled = (args.ttt_mode == "on")
+-    logger.info("EVAL_PROTOCOL: weights=%s ttt=%s (no condition-specific tuning)",
+-                args.weights, args.ttt_mode)
++    if args.ttt_mode == "on":
++        dark2 = model_ref.backbone.backbone.dark2
++        if (args.ttt_batch_policy == "per_image" and
++                not hasattr(dark2, "_forward_residual_ttt_per_image_eval")):
++            raise RuntimeError("--ttt-batch-policy per_image requires the vNext.2 "
++                               "eval-only TTT patch. Refusing silent shared-batch fallback.")
++        dark2.eval_ttt_batch_policy = args.ttt_batch_policy
++    logger.info("EVAL_PROTOCOL: weights={} ttt={} batch_policy={} (no condition-specific tuning)",
++                args.weights, args.ttt_mode, args.ttt_batch_policy)
+ 
+     # Folding is optional and must be separately parity-tested against unfused.
+     if args.deploy_fold:
