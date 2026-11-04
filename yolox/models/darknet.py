@@ -16,7 +16,6 @@ from .network_blocks import (
     ResLayer,
     SPPBottleneck,
 )
-from .ttt_modules import TTTAdaptiveStage
 
 
 class Darknet(nn.Module):
@@ -148,14 +147,8 @@ class CSPDarknet(nn.Module):
             ),
         )
 
-        self.dark2 = TTTAdaptiveStage(
-            dark2_base,
-            in_channels=base_channels * 2,
-            init_ttt_lr=ttt_lr,
-            noise_std=ttt_noise_std,
-            mask_ratio=ttt_mask_ratio,
-            residual_adapter=ttt_residual_adapter,
-        )
+        # vNext.3: native BN-compatible dark2, without a registered TTT stage.
+        self.dark2 = dark2_base
 
         # 2. Stage 2 (dark3, Stride 8): Standard BatchNorm2d CSP Layer
         self.dark3 = nn.Sequential(
@@ -204,39 +197,8 @@ class CSPDarknet(nn.Module):
         x = self.stem(x)
         outputs["stem"] = x
 
-        # New forward, clear reconstruction loss ONCE before the adapted/static split.
-        # Never clear inside dark2(run_ttt=False): the static subbatch comes second.
-        self.dark2.current_rec_loss = x.new_zeros(())
-
-        # Step 1: Full-batch native dark2 forward ONCE (preserves normal BN
-        # statistics), then optional feature-space TTT on a subset of its output.
-        if getattr(self.dark2, 'residual_adapter', False):
-            native = self.dark2.backbone_stage(x)
-            if not self.training:
-                x = self.dark2.forward_from_features(native, run_ttt=(ttt_prob is None or ttt_prob > 0))
-            else:
-                prob = ttt_prob if ttt_prob is not None else 0.0
-                b = native.shape[0]
-                if prob <= 0:
-                    x = native
-                elif b == 1:
-                    x = self.dark2.forward_from_features(native, run_ttt=True)
-                else:
-                    b_meta = max(1, min(b, int(round(b * prob))))
-                    x_meta = self.dark2.forward_from_features(native[:b_meta], run_ttt=True)
-                    x = torch.cat((x_meta, native[b_meta:]), dim=0) if b_meta < b else x_meta
-        elif not self.training:
-            x = self.dark2(x, run_ttt=(ttt_prob is None or ttt_prob > 0.0))
-        else:
-            prob = ttt_prob if ttt_prob is not None else 0.0
-            b = x.shape[0]
-            if prob <= 0.0 or b <= 1:
-                x = self.dark2(x, run_ttt=(prob > 0.5) if b == 1 else False)
-            else:
-                b_meta = max(1, min(b - 1, int(round(b * prob))))
-                x_meta = self.dark2(x[:b_meta], run_ttt=True)
-                x_static = self.dark2(x[b_meta:], run_ttt=False)
-                x = torch.cat([x_meta, x_static], dim=0)
+        # One native dark2 forward; no test-time reconstruction.
+        x = self.dark2(x)
 
         outputs["dark2"] = x  # Expose dark2 for the SPI Highway
 

@@ -1,0 +1,204 @@
+{
+  "status": "CHECKS_PASSED",
+  "purpose": "audit_only_no_training",
+  "seed": 20261103,
+  "batches": 40,
+  "batch_size": 2,
+  "threshold_code_check": {
+    "available": true,
+    "traintransform_call_sha256": "a7296c99ce1d762e3f199c9a20a771657b88d2ba4b4e4a09129ff9c0515e1862",
+    "standard_strict_gt_1px_filter_detected": true,
+    "diagnostic_threshold_px": 1.0,
+    "warning": null
+  },
+  "variants": {
+    "no_aug": {
+      "valid_pre_boxes": 1587,
+      "invalid_pre_boxes": 0,
+      "post_valid_boxes": 1587,
+      "predicted_keep_by_min_side_filter": 1587,
+      "predicted_filter_by_min_side": 0,
+      "unmatched_valid_boxes": 0,
+      "unmatched_explained_by_min_side_filter": 0,
+      "unmatched_not_explained_by_min_side_filter": 0,
+      "variant": "no_aug",
+      "samples_traced": 80,
+      "mosaic_probability": 0.5,
+      "mosaic_enabled": false,
+      "unmatched_details": [],
+      "num_unmatched_details_omitted": 0,
+      "exceptions": []
+    },
+    "forced_mosaic": {
+      "valid_pre_boxes": 2163,
+      "invalid_pre_boxes": 3809,
+      "post_valid_boxes": 2156,
+      "predicted_keep_by_min_side_filter": 2156,
+      "predicted_filter_by_min_side": 7,
+      "unmatched_valid_boxes": 7,
+      "unmatched_explained_by_min_side_filter": 7,
+      "unmatched_not_explained_by_min_side_filter": 0,
+      "variant": "forced_mosaic",
+      "samples_traced": 80,
+      "mosaic_probability": 1.0,
+      "mosaic_enabled": true,
+      "unmatched_details": [
+        {
+          "gt_pre_index": 6,
+          "class_id": 0,
+          "size_bin": "<4px",
+          "width_px": 75.861329,
+          "height_px": 0.77238,
+          "min_side_px": 0.77238,
+          "reason": "consistent_with_min_side_filter",
+          "before_bbox_xyxy": [
+            709.30467,
+            575.22762,
+            785.166,
+            576.0
+          ],
+          "sample_index": 9
+        },
+        {
+          "gt_pre_index": 5,
+          "class_id": 8,
+          "size_bin": "<4px",
+          "width_px": 11.768288,
+          "height_px": 0.939377,
+          "min_side_px": 0.939377,
+          "reason": "consistent_with_min_side_filter",
+          "before_bbox_xyxy": [
+            319.00689,
+            16.56921,
+            330.77518,
+            17.50859
+          ],
+          "sample_index": 21
+        },
+        {
+          "gt_pre_index": 27,
+          "class_id": 0,
+          "size_bin": "<4px",
+          "width_px": 0.996857,
+          "height_px": 16.42051,
+          "min_side_px": 0.996857,
+          "reason": "consistent_with_min_side_filter",
+          "before_bbox_xyxy": [
+            0.0,
+            176.59484,
+            0.99686,
+            193.01535
+          ],
+          "sample_index": 43
+        },
+        {
+          "gt_pre_index": 67,
+          "class_id": 0,
+          "size_bin": "<4px",
+          "width_px": 0.077353,
+          "height_px": 15.273402,
+          "min_side_px": 0.077353,
+          "reason": "consistent_with_min_side_filter",
+          "before_bbox_xyxy": [
+            1023.92265,
+            510.73237,
+            1024.0,
+            526.00577
+          ],
+          "sample_index": 46
+        },
+        {
+          "gt_pre_index": 25,
+          "class_id": 3,
+          "size_bin": "<4px",
+          "width_px": 24.595355,
+          "height_px": 0.202391,
+          "min_side_px": 0.202391,
+          "reason": "consistent_with_min_side_filter",
+          "before_bbox_xyxy": [
+            181.83005,
+            575.79761,
+            206.4254,
+            576.0
+          ],
+          "sample_index": 48
+        },
+        {
+          "gt_pre_index": 63,
+          "class_id": 0,
+          "size_bin": "<4px",
+          "width_px": 0.016669,
+          "height_px": 21.460851,
+          "min_side_px": 0.016669,
+          "reason": "consistent_with_min_side_filter",
+          "before_bbox_xyxy": [
+            1023.98333,
+            418.25069,
+            1024.0,
+            439.71154
+          ],
+          "sample_index": 56
+        },
+        {
+          "gt_pre_index": 36,
+          "class_id": 7,
+          "size_bin": "<4px",
+          "width_px": 25.493865,
+          "height_px": 0.921982,
+          "min_side_px": 0.921982,
+          "reason": "consistent_with_min_side_filter",
+          "before_bbox_xyxy": [
+            931.08259,
+            575.07802,
+            956.57646,
+            576.0
+          ],
+          "sample_index": 64
+        }
+      ],
+      "num_unmatched_details_omitted": 0,
+      "exceptions": []
+    },
+    "mixed_mosaic": {
+      "valid_pre_boxes": 1754,
+      "invalid_pre_boxes": 2176,
+      "post_valid_boxes": 1753,
+      "predicted_keep_by_min_side_filter": 1753,
+      "predicted_filter_by_min_side": 1,
+      "unmatched_valid_boxes": 1,
+      "unmatched_explained_by_min_side_filter": 1,
+      "unmatched_not_explained_by_min_side_filter": 0,
+      "variant": "mixed_mosaic",
+      "samples_traced": 80,
+      "mosaic_probability": 0.5,
+      "mosaic_enabled": true,
+      "unmatched_details": [
+        {
+          "gt_pre_index": 8,
+          "class_id": 7,
+          "size_bin": "<4px",
+          "width_px": 0.711457,
+          "height_px": 24.93502,
+          "min_side_px": 0.711457,
+          "reason": "consistent_with_min_side_filter",
+          "before_bbox_xyxy": [
+            0.0,
+            201.07516,
+            0.71146,
+            226.01018
+          ],
+          "sample_index": 50
+        }
+      ],
+      "num_unmatched_details_omitted": 0,
+      "exceptions": []
+    }
+  },
+  "blockers": [],
+  "scope": [
+    "Final TrainTransform only, after upstream Mosaic crop/affine",
+    "Final flip and HSV disabled for geometric identity audit",
+    "Does not modify box filtering or training parameters",
+    "The 1px rule is a diagnostic oracle, not an endorsement of that threshold"
+  ]
+}

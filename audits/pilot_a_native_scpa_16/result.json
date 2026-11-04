@@ -1,0 +1,93 @@
+{
+  "variant": "native_scpa",
+  "steps_requested": 16,
+  "seed": 20261104,
+  "input_size": [
+    576,
+    1024
+  ],
+  "test_size": [
+    576,
+    1024
+  ],
+  "class_count": 9,
+  "native_lr": 0.00015625,
+  "semantic_lr": null,
+  "checkpoint": {
+    "checkpoint": "weights/yolox_s.pth",
+    "sha256": "f55ded7181e1b0c13285c56e7790b8f0e8f8db590fe4edb37f0b7f345c913a30",
+    "matched_tensors": 456,
+    "shape_mismatches": [
+      "head.cls_preds.0.weight",
+      "head.cls_preds.0.bias",
+      "head.cls_preds.1.weight",
+      "head.cls_preds.1.bias",
+      "head.cls_preds.2.weight",
+      "head.cls_preds.2.bias"
+    ],
+    "is_pilot_warmstart": false
+  },
+  "warmstart": false,
+  "mosaic_enabled": true,
+  "mosaic_prob": 0.5,
+  "eval_images": 16,
+  "eval_indices": [
+    661,
+    851,
+    1285,
+    2190,
+    2736,
+    3323,
+    3401,
+    4246,
+    4473,
+    4618,
+    5034,
+    6540,
+    6578,
+    6754,
+    7199,
+    7435
+  ],
+  "clean_val_json_sha256": "bb78f2f5d0d9159eba5ee021fa89b2347429897a8b31c7cbd78cede846f5a164",
+  "limitations": [
+    "single GPU, single-process only",
+    "no full 80-epoch schedule",
+    "fixed training input shape",
+    "no full-trainer EMA",
+    "pilot COCO metrics use subset images",
+    "semantic utility uses source-feature perturbations",
+    "no adverse-set evaluation"
+  ],
+  "status": "CHECKS_PASSED",
+  "native_state_sha256": "2f2a1747f6543442775f03068ea50e761f24ca18d316b9cede9a8aa8fd9012ad",
+  "training_batch_stream_sha256": "10c42951c4e8e4b021774793667c0bff75ac2134e5f9a2419df421ce95596b8f",
+  "successful_native_updates": 15,
+  "successful_semantic_updates": 0,
+  "amp_skips": 1,
+  "first_training_batch_sha256": "edea7d7b78e1fe198dcdd9d3d4d11c373acc0661a30b5436a78d1ef7ad2e8cc2",
+  "seconds_elapsed": 6.52,
+  "last_telemetry": {
+    "step": 16,
+    "native_loss": 7.675880432128906,
+    "native_grad_norm_before_clip": 185.75888061523438,
+    "native_step_success": true,
+    "scaler_scale": 512.0,
+    "valid_gt": 10,
+    "assignments": {
+      "num_fg_total": 40,
+      "num_gt_total": 10,
+      "uncovered_gt": 0,
+      "core_positives": 10,
+      "candidate_edges": 120
+    },
+    "pos_per_level": {
+      "P3": 28,
+      "P4": 10,
+      "P5": 2
+    },
+    "semantic_step": null,
+    "semantic_utility": null
+  },
+  "clean_validation": "subset_only"
+}

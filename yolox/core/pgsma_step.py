@@ -1,0 +1,75 @@
+"""Separate FP32 semantic optimizer step; does not touch native optimizer/state.
+
+`model` has completed one native forward and cached a *detached* feature snapshot.
+Run this BEFORE updating the native parameters so its native counterfactual uses
+consistent pre-update classifier weights.
+"""
+import torch
+
+
+def semantic_optimizer_step(model, optimizer, seed, correction_mode='pgsma',
+                            max_grad_norm=10.0, protect_candidate=True):
+    optimizer.zero_grad(set_to_none=True)
+    losses = model.semantic_losses(seed=seed, correction_mode=correction_mode)
+    total = losses['prototype'] + losses['candidate'] + losses['gate']
+    if not torch.isfinite(total).all():
+        optimizer.zero_grad(set_to_none=True)
+        return False, {'reason': 'nonfinite-semantic-main'}
+    # Only the candidate objective updates the predictors within `total`.
+    # Record that gradient before adding the teacher objective.
+    # In memory-only mode, teacher consistency is intentionally disabled and
+    # the returned zero tensor has no autograd graph. Skip its backward pass.
+    # For a trainable teacher loss, the candidate and teacher may share the
+    # predictor graph: retain it even when conflict protection is disabled.
+    teacher = losses['teacher']
+    if not torch.isfinite(teacher).all():
+        optimizer.zero_grad(set_to_none=True)
+        return False, {'reason': 'nonfinite-semantic-teacher'}
+    has_teacher_gradient = bool(teacher.requires_grad)
+    total.backward(retain_graph=has_teacher_gradient)
+    predictors = list(model.semantic.predictors.parameters())
+    main_grad = {id(p):p.grad.detach().clone() if p.grad is not None else None
+                 for p in predictors}
+    if protect_candidate and has_teacher_gradient:
+        teacher.backward()
+        # Project teacher gradients against candidate gradients across the
+        # entire predictor parameter group (not independently per tensor).
+        dot = teacher.new_zeros(()); main_sq = teacher.new_zeros(())
+        j_sq = teacher.new_zeros(())
+        for p in predictors:
+            m = main_grad[id(p)]
+            if m is None:
+                continue
+            j = p.grad - m
+            dot = dot + (m*j).sum()
+            main_sq = main_sq + m.square().sum()
+            j_sq = j_sq + j.square().sum()
+        # Objective priority: teacher update cannot oppose candidate to first
+        # order, and cannot exceed candidate grad norm (unless main == zero).
+        if main_sq.item() > 1e-20:
+            coefficient = torch.minimum(dot / main_sq.clamp(min=1e-20), dot.new_zeros(()))
+            j_projected_sq = (j_sq - 2*coefficient*dot + coefficient.square()*main_sq).clamp(min=0)
+            scale = (main_sq.sqrt() / j_projected_sq.sqrt().clamp(min=1e-12)).clamp(max=1)
+            for p in predictors:
+                m = main_grad[id(p)]
+                if m is None: continue
+                j = p.grad - m
+                p.grad = m + (j - coefficient*m)*scale
+        else:
+            # No meaningful candidate gradient: don't spend predictor
+            # capacity exclusively chasing a potentially weak proxy.
+            for p in predictors:
+                p.grad = main_grad[id(p)]
+    elif has_teacher_gradient:
+        teacher.backward()
+    params = [p for p in model.semantic.parameters() if p.requires_grad]
+    if any(p.grad is not None and not torch.isfinite(p.grad).all() for p in params):
+        optimizer.zero_grad(set_to_none=True)
+        return False, {'reason': 'nonfinite-semantic-gradient'}
+    torch.nn.utils.clip_grad_norm_(params, max_norm=max_grad_norm, error_if_nonfinite=True)
+    optimizer.step()
+    model.semantic.update_teacher()
+    model.semantic.semantic_step.add_(1)
+    metrics = {k:float(v.detach().item()) for k,v in losses.items()}
+    metrics['reason']='success'
+    return True, metrics

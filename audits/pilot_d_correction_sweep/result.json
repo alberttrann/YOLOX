@@ -1,0 +1,137 @@
+{
+  "status": "CHECKS_PASSED",
+  "checkpoint_sha256": "68dc9c719925d9d4e222b8cd94475c9cc5ded6e2e0f0e3e73518238a8cf539f1",
+  "model_state_unchanged": true,
+  "model_state_sha256": "4ca5c3371c5d3828d54fa9ee7ea4eedc9a6c0ba283ef5786fdbfe031457e9075",
+  "calibration_images": 128,
+  "confirmation_images": 128,
+  "selection": {
+    "selected": "native",
+    "rules": "AP and AR nonregression; COCO small/medium/large AP >= native-.005; effective-bin R@0.5 >= native-.005 for each bin with >=30 GTs; maximize dAP+.5*dAR+.1*dAP75",
+    "rankings": [
+      {
+        "key": "gated_0250",
+        "eligible": false,
+        "reasons": [
+          "AP50_95_regression"
+        ],
+        "objective_delta": 1.2942758305475865e-05
+      },
+      {
+        "key": "gated_0500",
+        "eligible": false,
+        "reasons": [
+          "AP50_95_regression",
+          "AR100_regression",
+          "4to8_R0p5_regression",
+          "16to32_R0p5_regression"
+        ],
+        "objective_delta": -0.0008914314833596976
+      },
+      {
+        "key": "gated_0750",
+        "eligible": false,
+        "reasons": [
+          "AP50_95_regression",
+          "AR100_regression",
+          "4to8_R0p5_regression",
+          "8to16_R0p5_regression",
+          "16to32_R0p5_regression"
+        ],
+        "objective_delta": -0.003390428368003756
+      },
+      {
+        "key": "gated_1000",
+        "eligible": false,
+        "reasons": [
+          "AP50_95_regression",
+          "AR100_regression",
+          "4to8_R0p5_regression",
+          "8to16_R0p5_regression",
+          "16to32_R0p5_regression"
+        ],
+        "objective_delta": -0.003915945559044687
+      },
+      {
+        "key": "ungated_0250",
+        "eligible": false,
+        "reasons": [
+          "AP50_95_regression"
+        ],
+        "objective_delta": -5.072675920800296e-06
+      },
+      {
+        "key": "ungated_0500",
+        "eligible": false,
+        "reasons": [
+          "AP50_95_regression",
+          "AR100_regression",
+          "4to8_R0p5_regression",
+          "16to32_R0p5_regression"
+        ],
+        "objective_delta": -0.000908601959768679
+      },
+      {
+        "key": "ungated_0750",
+        "eligible": false,
+        "reasons": [
+          "AP50_95_regression",
+          "AR100_regression",
+          "4to8_R0p5_regression",
+          "8to16_R0p5_regression",
+          "16to32_R0p5_regression"
+        ],
+        "objective_delta": -0.003390498097965056
+      },
+      {
+        "key": "ungated_1000",
+        "eligible": false,
+        "reasons": [
+          "AP50_95_regression",
+          "AR100_regression",
+          "4to8_R0p5_regression",
+          "8to16_R0p5_regression",
+          "16to32_R0p5_regression"
+        ],
+        "objective_delta": -0.003921993796610204
+      }
+    ],
+    "fallback_to_native": true
+  },
+  "confirmation_native": {
+    "AP50_95": 0.17040430111261737,
+    "AP50": 0.33531533505895683,
+    "AP75": 0.15911766592903753,
+    "AR100": 0.2791692963673817,
+    "AP_small_COCO": 0.07435962758831655,
+    "AP_medium_COCO": 0.21885332527679818,
+    "AP_large_COCO": 0.31069054361706705
+  },
+  "confirmation_selected": {
+    "AP50_95": 0.17040430111261737,
+    "AP50": 0.33531533505895683,
+    "AP75": 0.15911766592903753,
+    "AR100": 0.2791692963673817,
+    "AP_small_COCO": 0.07435962758831655,
+    "AP_medium_COCO": 0.21885332527679818,
+    "AP_large_COCO": 0.31069054361706705
+  },
+  "confirmation_original_gated_1": {
+    "AP50_95": 0.16992456868778577,
+    "AP50": 0.33380279239958777,
+    "AP75": 0.15663115256645443,
+    "AR100": 0.2762672998174894,
+    "AP_small_COCO": 0.0727414045914471,
+    "AP_medium_COCO": 0.21664271403942567,
+    "AP_large_COCO": 0.31656708345176643
+  },
+  "limitations": [
+    "One checkpoint and one deterministic clean-source split",
+    "No adverse-domain evidence; do not tune on the adverse test set",
+    "96 earlier pilot images excluded, but clean validation remains source-domain",
+    "Per-image paired bootstrap covers scale recall only, not COCO AP confidence interval",
+    "COCO small AP is area-based and differs from effective min-side scale recall",
+    "Pre-NMS support classification is diagnostic, not proof of a unique NMS cause",
+    "No training, no parameter updates, no full 80-epoch permission"
+  ]
+}

@@ -1,0 +1,58 @@
+{
+  "onnx_path": "audits\\native.onnx",
+  "mode": "native",
+  "weights": "random_untrained_architecture_only",
+  "torch_version": "2.0.1+cu118",
+  "exporter": "legacy_dynamic_axes",
+  "dynamic_input_axes": {
+    "batch": "batch",
+    "height": "height",
+    "width": "width"
+  },
+  "onnx_check": "passed",
+  "providers": [
+    "CPUExecutionProvider"
+  ],
+  "shapes": [
+    {
+      "H": 64,
+      "W": 96,
+      "shape": [
+        1,
+        126,
+        14
+      ],
+      "max_abs": 1.9073486328125e-06,
+      "allclose": true
+    },
+    {
+      "H": 96,
+      "W": 64,
+      "shape": [
+        1,
+        126,
+        14
+      ],
+      "max_abs": 1.9073486328125e-06,
+      "allclose": true
+    },
+    {
+      "H": 128,
+      "W": 128,
+      "shape": [
+        1,
+        336,
+        14
+      ],
+      "max_abs": 3.814697265625e-06,
+      "allclose": true
+    }
+  ],
+  "status": "CHECKS_PASSED",
+  "not_verified": [
+    "TensorRT compile/profile",
+    "FP16 TensorRT parity",
+    "NMS output parity",
+    "edge latency/VRAM"
+  ]
+}

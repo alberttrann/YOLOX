@@ -1,0 +1,65 @@
+{
+  "status": "CHECKS_PASSED",
+  "batches": 6,
+  "batch_size": 2,
+  "runs": {
+    "no_aug": {
+      "dataset_type": "MosaicDetection",
+      "examples": 12,
+      "valid_pixel_fraction_range": [
+        1.0,
+        1.0
+      ],
+      "gt_count_range": [
+        8,
+        41
+      ],
+      "valid_anchor_count_range": [
+        12096,
+        12096
+      ],
+      "invalid_gt_centers": 0
+    },
+    "forced_mosaic": {
+      "dataset_type": "MosaicDetection",
+      "examples": 12,
+      "valid_pixel_fraction_range": [
+        1.0,
+        1.0
+      ],
+      "gt_count_range": [
+        1,
+        83
+      ],
+      "valid_anchor_count_range": [
+        12096,
+        12096
+      ],
+      "invalid_gt_centers": 0
+    },
+    "mixed_mosaic": {
+      "dataset_type": "MosaicDetection",
+      "examples": 12,
+      "valid_pixel_fraction_range": [
+        1.0,
+        1.0
+      ],
+      "gt_count_range": [
+        7,
+        47
+      ],
+      "valid_anchor_count_range": [
+        12096,
+        12096
+      ],
+      "invalid_gt_centers": 0
+    }
+  },
+  "blockers": [],
+  "limits": [
+    "Mosaic synthetic border is treated as valid train background",
+    "YOLOX TrainTransform may remove subpixel boxes; this is not an annotation-survival audit",
+    "No validation of ignore regions not present in COCO JSON",
+    "No real CUDA training or TensorRT measurement"
+  ]
+}

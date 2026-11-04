@@ -1,0 +1,30 @@
+{
+  "status": "CHECKS_PASSED",
+  "training_performed": false,
+  "native_or_semantic_updates": 0,
+  "variants": [
+    {
+      "variant": "memory_simota",
+      "inference_mode": "memory",
+      "semantic_trainable_parameter_tensors": 40,
+      "semantic_frozen_parameter_tensors": 6,
+      "teacher_parameter_tensors": 6,
+      "semantic_trainable_elements": 55402,
+      "frozen_teacher_in_optimizer": false,
+      "native_semantic_overlap": false,
+      "optimizer_membership": "exact_trainable_semantic_set"
+    },
+    {
+      "variant": "pgsma_simota",
+      "inference_mode": "pgsma",
+      "semantic_trainable_parameter_tensors": 40,
+      "semantic_frozen_parameter_tensors": 6,
+      "teacher_parameter_tensors": 6,
+      "semantic_trainable_elements": 55402,
+      "frozen_teacher_in_optimizer": false,
+      "native_semantic_overlap": false,
+      "optimizer_membership": "exact_trainable_semantic_set"
+    }
+  ],
+  "scope": "optimizer membership only, no CUDA/AMP or data-loader execution"
+}

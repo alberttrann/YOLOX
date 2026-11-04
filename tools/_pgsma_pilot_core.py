@@ -1,0 +1,141 @@
+"""Dependency-light safety, calibration and measurement utilities for bounded PG-SMA pilots.
+
+This module is imported only by the pilot; it cannot unlock the full Trainer.
+"""
+from __future__ import annotations
+import hashlib
+import json
+import math
+import os
+from pathlib import Path
+import tempfile
+
+HARD_STEP_LIMIT = 2048
+HARD_EVAL_LIMIT = 512
+
+
+def validate_budget(steps: int, eval_images: int, batch_size: int, eval_every: int) -> None:
+    if not (1 <= steps <= HARD_STEP_LIMIT):
+        raise ValueError(f"Pilot steps must be within [1, {HARD_STEP_LIMIT}], got {steps}")
+    if not (1 <= eval_images <= HARD_EVAL_LIMIT):
+        raise ValueError(f"Clean validation images must be in [1, {HARD_EVAL_LIMIT}]")
+    if not (1 <= batch_size <= 8):
+        raise ValueError("Pilot batch_size must be in [1,8], not a full training batch")
+    if not (1 <= eval_every <= HARD_STEP_LIMIT):
+        raise ValueError("eval_every outside pilot safety envelope")
+
+
+def configure_variant(model, variant: str):
+    if variant not in ('native_simota', 'native_simota_continue', 'native_scpa', 'native_scpa_instance', 'memory', 'pgsma', 'memory_simota', 'pgsma_simota'):
+        raise ValueError('Unknown variant ' + repr(variant))
+    model.head.assignment = 'baseline' if variant in ('native_simota', 'native_simota_continue', 'memory_simota', 'pgsma_simota') else 'scpa'
+    model.head.use_baseline_assignments = (model.head.assignment == 'baseline')
+    model.head.per_gt_normalization = (variant == 'native_scpa_instance')
+    inference_mode = 'memory' if variant in ('memory', 'memory_simota') else 'pgsma' if variant in ('pgsma', 'pgsma_simota') else 'native'
+    model.set_inference_mode(inference_mode)
+    return inference_mode
+
+
+def model_parameter_split(model, native_optimizer, semantic_optimizer=None):
+    native = [p for g in native_optimizer.param_groups for p in g['params']]
+    if len(native) != len(set(map(id, native))):
+        raise RuntimeError('Duplicated parameter in native optimizer')
+    semantic = [p for g in semantic_optimizer.param_groups for p in g['params']] if semantic_optimizer else []
+    if len(semantic) != len(set(map(id, semantic))):
+        raise RuntimeError('Duplicated semantic parameter')
+    if set(map(id, native)) & set(map(id, semantic)):
+        raise RuntimeError('Native and semantic optimizers overlap')
+    expected_native = {id(p) for p in model.native_parameters() if p.requires_grad}
+    if set(map(id, native)) != expected_native:
+        raise RuntimeError('Native optimizer does not own exactly native trainable parameters')
+    if semantic_optimizer is not None:
+        expected_semantic = {id(p) for p in model.semantic_parameters() if p.requires_grad}
+        if set(map(id, semantic)) != expected_semantic:
+            raise RuntimeError('Semantic optimizer ownership mismatch')
+    return native
+
+
+def finite_scalar(x, name):
+    result = float(x)
+    if not math.isfinite(result):
+        raise FloatingPointError(f'Non-finite {name}: {result}')
+    return result
+
+
+def file_digest(path, blocksize=1024 * 1024):
+    digest = hashlib.sha256()
+    with open(path, 'rb') as file:
+        for block in iter(lambda: file.read(blocksize), b''):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def atomic_json(path, payload):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    data = json.dumps(payload, ensure_ascii=False, indent=2, allow_nan=False, default=str).encode('utf8')
+    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix='.pilot_')
+    try:
+        with os.fdopen(fd, 'wb') as output:
+            output.write(data)
+        os.replace(tmp, path)
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+
+
+def group_scale(min_side: float) -> str:
+    if min_side < 4: return 'lt4'
+    if min_side < 8: return '4to8'
+    if min_side < 16: return '8to16'
+    if min_side < 32: return '16to32'
+    return 'ge32'
+
+
+def greedy_recall_pairs(ground_truth, predictions, threshold: float = 0.5):
+    """Post-NMS class-aware localization recall on one image (not COCO AR).
+
+    Each list item: (class_id, [x1,y1,x2,y2], score), where GT score is ignored.
+    Predictions are greedily matched by descending confidence, once per GT.
+    """
+    remaining = set(range(len(ground_truth)))
+    matches = set()
+    for cls, box, score in sorted(predictions, key=lambda x: -x[2]):
+        choice = None
+        best = threshold
+        for i in remaining:
+            gt_cls, gt_box, _ = ground_truth[i]
+            if cls != gt_cls:
+                continue
+            ix1=max(box[0],gt_box[0]); iy1=max(box[1],gt_box[1])
+            ix2=min(box[2],gt_box[2]); iy2=min(box[3],gt_box[3])
+            inter=max(0,ix2-ix1)*max(0,iy2-iy1)
+            a=max(0,box[2]-box[0])*max(0,box[3]-box[1])
+            b=max(0,gt_box[2]-gt_box[0])*max(0,gt_box[3]-gt_box[1])
+            iou=inter/max(a+b-inter,1e-9)
+            if iou>=best:
+                best=iou; choice=i
+        if choice is not None:
+            matches.add(choice)
+            remaining.remove(choice)
+    return matches
+
+
+def native_recipe(variant: str) -> str:
+    """Scientific recipe grouping: semantic variants must share native rules."""
+    if variant in ('native_simota', 'native_simota_continue', 'memory_simota', 'pgsma_simota'):
+        return 'simota_per_positive'
+    if variant in ('native_scpa', 'memory', 'pgsma'):
+        return 'scpa_per_positive'
+    if variant == 'native_scpa_instance':
+        return 'scpa_per_gt'
+    raise ValueError('Unknown pilot variant '+repr(variant))
+
+def expected_warmstart_source(variant: str):
+    if variant in ('native_simota_continue','memory_simota','pgsma_simota'):
+        return 'native_simota'
+    if variant in ('native_scpa','memory','pgsma'):
+        return 'native_scpa'
+    if variant in ('native_simota','native_scpa_instance'):
+        return None
+    raise ValueError('Unknown variant '+repr(variant))

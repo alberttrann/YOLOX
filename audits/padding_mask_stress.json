@@ -1,0 +1,157 @@
+{
+  "status": "CHECKS_PASSED",
+  "cases": [
+    {
+      "case": "reference_16_9",
+      "source_hw": [
+        720,
+        1280
+      ],
+      "valid_rectangle_hw": [
+        576,
+        1024
+      ],
+      "valid_pixel_fraction": 1.0,
+      "pixel_mask_mismatches": 0,
+      "levels": [
+        {
+          "stride": 8,
+          "valid_anchors": 9216,
+          "total_anchors": 9216
+        },
+        {
+          "stride": 16,
+          "valid_anchors": 2304,
+          "total_anchors": 2304
+        },
+        {
+          "stride": 32,
+          "valid_anchors": 576,
+          "total_anchors": 576
+        }
+      ]
+    },
+    {
+      "case": "square",
+      "source_hw": [
+        640,
+        640
+      ],
+      "valid_rectangle_hw": [
+        576,
+        576
+      ],
+      "valid_pixel_fraction": 0.5625,
+      "pixel_mask_mismatches": 0,
+      "levels": [
+        {
+          "stride": 8,
+          "valid_anchors": 5184,
+          "total_anchors": 9216
+        },
+        {
+          "stride": 16,
+          "valid_anchors": 1296,
+          "total_anchors": 2304
+        },
+        {
+          "stride": 32,
+          "valid_anchors": 324,
+          "total_anchors": 576
+        }
+      ]
+    },
+    {
+      "case": "portrait",
+      "source_hw": [
+        1280,
+        720
+      ],
+      "valid_rectangle_hw": [
+        576,
+        324
+      ],
+      "valid_pixel_fraction": 0.316406,
+      "pixel_mask_mismatches": 0,
+      "levels": [
+        {
+          "stride": 8,
+          "valid_anchors": 2880,
+          "total_anchors": 9216
+        },
+        {
+          "stride": 16,
+          "valid_anchors": 720,
+          "total_anchors": 2304
+        },
+        {
+          "stride": 32,
+          "valid_anchors": 180,
+          "total_anchors": 576
+        }
+      ]
+    },
+    {
+      "case": "four_three",
+      "source_hw": [
+        480,
+        640
+      ],
+      "valid_rectangle_hw": [
+        576,
+        768
+      ],
+      "valid_pixel_fraction": 0.75,
+      "pixel_mask_mismatches": 0,
+      "levels": [
+        {
+          "stride": 8,
+          "valid_anchors": 6912,
+          "total_anchors": 9216
+        },
+        {
+          "stride": 16,
+          "valid_anchors": 1728,
+          "total_anchors": 2304
+        },
+        {
+          "stride": 32,
+          "valid_anchors": 432,
+          "total_anchors": 576
+        }
+      ]
+    },
+    {
+      "case": "wide",
+      "source_hw": [
+        480,
+        1440
+      ],
+      "valid_rectangle_hw": [
+        341,
+        1024
+      ],
+      "valid_pixel_fraction": 0.592014,
+      "pixel_mask_mismatches": 0,
+      "levels": [
+        {
+          "stride": 8,
+          "valid_anchors": 5504,
+          "total_anchors": 9216
+        },
+        {
+          "stride": 16,
+          "valid_anchors": 1344,
+          "total_anchors": 2304
+        },
+        {
+          "stride": 32,
+          "valid_anchors": 352,
+          "total_anchors": 576
+        }
+      ]
+    }
+  ],
+  "blockers": [],
+  "scope": "Valid-content geometry only; not ignored-object or Mosaic provenance masks"
+}

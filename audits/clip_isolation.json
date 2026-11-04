@@ -1,0 +1,13 @@
+{
+  "status": "CHECKS_PASSED",
+  "device": "cuda",
+  "trainer_source_checked": true,
+  "sem_grad_norm": 1000000.0,
+  "native_grad_norm_before_1": 10.0,
+  "native_grad_norm_before_2": 20.0,
+  "native_grad_after_clip_2": [
+    5.999999523162842,
+    7.999999523162842
+  ],
+  "note": "Synthetic extreme gradients; proves parameter selection and source contract, not real multi-step training."
+}

@@ -1,0 +1,2637 @@
+{
+  "split": "calibration",
+  "images": 128,
+  "image_ids": [
+    1,
+    19,
+    116,
+    136,
+    189,
+    272,
+    291,
+    311,
+    332,
+    509,
+    548,
+    566,
+    651,
+    656,
+    743,
+    814,
+    818,
+    1022,
+    1026,
+    1244,
+    1253,
+    1362,
+    1378,
+    1484,
+    1617,
+    1785,
+    1813,
+    2021,
+    2022,
+    2077,
+    2090,
+    2154,
+    2171,
+    2242,
+    2303,
+    2381,
+    2421,
+    2477,
+    2521,
+    2612,
+    2652,
+    2851,
+    2911,
+    2925,
+    2999,
+    3033,
+    3130,
+    3180,
+    3234,
+    3273,
+    3300,
+    3317,
+    3476,
+    3496,
+    3584,
+    3724,
+    3725,
+    3736,
+    3838,
+    3968,
+    4146,
+    4312,
+    4322,
+    4330,
+    4366,
+    4386,
+    4502,
+    4724,
+    4744,
+    4779,
+    4906,
+    5071,
+    5123,
+    5125,
+    5164,
+    5240,
+    5256,
+    5602,
+    5621,
+    5669,
+    5759,
+    5801,
+    5897,
+    5934,
+    5961,
+    6111,
+    6203,
+    6210,
+    6309,
+    6387,
+    6428,
+    6459,
+    6482,
+    6533,
+    6561,
+    6610,
+    6652,
+    6751,
+    6962,
+    7007,
+    7022,
+    7058,
+    7123,
+    7175,
+    7277,
+    7289,
+    7300,
+    7330,
+    7333,
+    7371,
+    7449,
+    7454,
+    7469,
+    7551,
+    7610,
+    7678,
+    7741,
+    7784,
+    7847,
+    7889,
+    7894,
+    8137,
+    8138,
+    8145,
+    8329,
+    8409,
+    8422,
+    8469
+  ],
+  "gt_by_effective_size": {
+    "lt4": 14,
+    "4to8": 257,
+    "8to16": 866,
+    "16to32": 751,
+    "ge32": 690
+  },
+  "gate_diagnostics": {
+    "all": {
+      "anchors": 1548288,
+      "gate_mean": 0.9964956105686724,
+      "gate_min": 0.942508670501411,
+      "gate_ge_0p95": 0.9997164024971426
+    },
+    "gt_overlap_iou_ge_0p5": {
+      "anchors": 37733,
+      "gate_mean": 0.9983979298093938,
+      "gate_min": 0.9907483821252254,
+      "gate_ge_0p95": 0.999999991882218,
+      "matched_gt_class_delta_mean": -0.8713859603983022,
+      "matched_gt_class_delta_positive_fraction": 0.017650332713024883
+    },
+    "gt_overlap_4to8": {
+      "anchors": 567,
+      "gate_mean": 0.9985657288073653,
+      "gate_min": 0.9956436306500982,
+      "gate_ge_0p95": 1.0,
+      "matched_gt_class_delta_mean": -0.9284984039724189,
+      "matched_gt_class_delta_positive_fraction": 0.0017636684566158045
+    },
+    "gt_overlap_8to16": {
+      "anchors": 5487,
+      "gate_mean": 0.9985485240282073,
+      "gate_min": 0.9941090842142378,
+      "gate_ge_0p95": 0.9999999892783334,
+      "matched_gt_class_delta_mean": -0.9474852807875516,
+      "matched_gt_class_delta_positive_fraction": 0.020958629526240002
+    },
+    "gt_overlap_16to32": {
+      "anchors": 8860,
+      "gate_mean": 0.9986409204202634,
+      "gate_min": 0.9942101171740559,
+      "gate_ge_0p95": 0.9999999938242592,
+      "matched_gt_class_delta_mean": -0.9963999254069802,
+      "matched_gt_class_delta_positive_fraction": 0.012415350029301782
+    },
+    "gt_overlap_ge32": {
+      "anchors": 22819,
+      "gate_mean": 0.9982631994519342,
+      "gate_min": 0.9910398807161618,
+      "gate_ge_0p95": 0.9999999933052849,
+      "matched_gt_class_delta_mean": -0.8031286574513892,
+      "matched_gt_class_delta_positive_fraction": 0.019282177310762084
+    },
+    "background_iou_lt_0p1": {
+      "anchors": 1405325,
+      "gate_mean": 0.9963917066863339,
+      "gate_min": 0.9430980237618675,
+      "gate_ge_0p95": 0.9997110950505073
+    },
+    "hard_background_top_objectness": {
+      "anchors": 32768,
+      "gate_mean": 0.9982322584837675,
+      "gate_min": 0.9928538827225566,
+      "gate_ge_0p95": 1.0
+    }
+  },
+  "variants": {
+    "native": {
+      "coco_metrics": {
+        "AP50_95": 0.21692185590848093,
+        "AP50": 0.39647661321600186,
+        "AP75": 0.20256134618991012,
+        "AR100": 0.30681617057320537,
+        "AP_small_COCO": 0.0784265142244085,
+        "AP_medium_COCO": 0.2788975552220535,
+        "AP_large_COCO": 0.4639539330456916
+      },
+      "detections": 10570,
+      "effective_scale_recall_iou50": {
+        "lt4": {
+          "total_gt": 14,
+          "matched": 0,
+          "recall": 0.0,
+          "gained_vs_native": 0,
+          "lost_vs_native": 0
+        },
+        "4to8": {
+          "total_gt": 257,
+          "matched": 80,
+          "recall": 0.311284046692607,
+          "gained_vs_native": 0,
+          "lost_vs_native": 0
+        },
+        "8to16": {
+          "total_gt": 866,
+          "matched": 599,
+          "recall": 0.6916859122401847,
+          "gained_vs_native": 0,
+          "lost_vs_native": 0
+        },
+        "16to32": {
+          "total_gt": 751,
+          "matched": 618,
+          "recall": 0.8229027962716379,
+          "gained_vs_native": 0,
+          "lost_vs_native": 0
+        },
+        "ge32": {
+          "total_gt": 690,
+          "matched": 635,
+          "recall": 0.9202898550724637,
+          "gained_vs_native": 0,
+          "lost_vs_native": 0
+        }
+      },
+      "lost_examples_vs_native": [],
+      "delta_coco_vs_native": {
+        "AP50_95": 0.0,
+        "AP50": 0.0,
+        "AP75": 0.0,
+        "AR100": 0.0,
+        "AP_small_COCO": 0.0,
+        "AP_medium_COCO": 0.0,
+        "AP_large_COCO": 0.0
+      }
+    },
+    "gated_0250": {
+      "coco_metrics": {
+        "AP50_95": 0.2168240217541063,
+        "AP50": 0.3970438884232388,
+        "AP75": 0.2016660019865806,
+        "AR100": 0.30721679323923146,
+        "AP_small_COCO": 0.07948608689042373,
+        "AP_medium_COCO": 0.2786332929139704,
+        "AP_large_COCO": 0.4641348092797313
+      },
+      "detections": 10109,
+      "effective_scale_recall_iou50": {
+        "lt4": {
+          "total_gt": 14,
+          "matched": 0,
+          "recall": 0.0,
+          "gained_vs_native": 0,
+          "lost_vs_native": 0
+        },
+        "4to8": {
+          "total_gt": 257,
+          "matched": 79,
+          "recall": 0.30739299610894943,
+          "gained_vs_native": 0,
+          "lost_vs_native": 1
+        },
+        "8to16": {
+          "total_gt": 866,
+          "matched": 598,
+          "recall": 0.6905311778290993,
+          "gained_vs_native": 3,
+          "lost_vs_native": 4
+        },
+        "16to32": {
+          "total_gt": 751,
+          "matched": 617,
+          "recall": 0.8215712383488681,
+          "gained_vs_native": 1,
+          "lost_vs_native": 2
+        },
+        "ge32": {
+          "total_gt": 690,
+          "matched": 634,
+          "recall": 0.9188405797101449,
+          "gained_vs_native": 0,
+          "lost_vs_native": 1
+        }
+      },
+      "lost_examples_vs_native": [
+        {
+          "image_id": 566,
+          "annotation_id": 10430,
+          "category_id": 9,
+          "effective_size": "8to16",
+          "likely_stage": "class_or_confidence_before_nms"
+        },
+        {
+          "image_id": 1022,
+          "annotation_id": 19129,
+          "category_id": 8,
+          "effective_size": "16to32",
+          "likely_stage": "class_or_confidence_before_nms"
+        },
+        {
+          "image_id": 1244,
+          "annotation_id": 23314,
+          "category_id": 8,
+          "effective_size": "8to16",
+          "likely_stage": "nms_or_score_ordering"
+        },
+        {
+          "image_id": 1253,
+          "annotation_id": 23504,
+          "category_id": 1,
+          "effective_size": "16to32",
+          "likely_stage": "class_or_confidence_before_nms"
+        },
+        {
+          "image_id": 1785,
+          "annotation_id": 33366,
+          "category_id": 4,
+          "effective_size": "4to8",
+          "likely_stage": "class_or_confidence_before_nms"
+        },
+        {
+          "image_id": 2521,
+          "annotation_id": 47272,
+          "category_id": 1,
+          "effective_size": "8to16",
+          "likely_stage": "class_or_confidence_before_nms"
+        },
+        {
+          "image_id": 4366,
+          "annotation_id": 81718,
+          "category_id": 4,
+          "effective_size": "8to16",
+          "likely_stage": "class_or_confidence_before_nms"
+        },
+        {
+          "image_id": 7847,
+          "annotation_id": 145689,
+          "category_id": 1,
+          "effective_size": "ge32",
+          "likely_stage": "nms_or_score_ordering"
+        }
+      ],
+      "delta_coco_vs_native": {
+        "AP50_95": -9.783415437461529e-05,
+        "AP50": 0.000567275207236928,
+        "AP75": -0.0008953442033295123,
+        "AR100": 0.00040062266602608476,
+        "AP_small_COCO": 0.0010595726660152377,
+        "AP_medium_COCO": -0.00026426230808312967,
+        "AP_large_COCO": 0.000180876234039673
+      },
+      "recall_paired_bootstrap95": {
+        "lt4": {
+          "difference_point": 0.0,
+          "ci95": [
+            0.0,
+            0.0
+          ],
+          "n_boot": 1000
+        },
+        "4to8": {
+          "difference_point": -0.0038910505836575876,
+          "ci95": [
+            -0.012932433945364979,
+            0.0
+          ],
+          "n_boot": 1000
+        },
+        "8to16": {
+          "difference_point": -0.0011547344110854503,
+          "ci95": [
+            -0.006317130405631914,
+            0.0035593566244467396
+          ],
+          "n_boot": 1000
+        },
+        "16to32": {
+          "difference_point": -0.0013315579227696406,
+          "ci95": [
+            -0.006017566852912097,
+            0.002890488015637977
+          ],
+          "n_boot": 1000
+        },
+        "ge32": {
+          "difference_point": -0.0014492753623188406,
+          "ci95": [
+            -0.0055115656309155546,
+            0.0
+          ],
+          "n_boot": 1000
+        }
+      }
+    },
+    "gated_0500": {
+      "coco_metrics": {
+        "AP50_95": 0.21638136233571711,
+        "AP50": 0.39581469890606924,
+        "AP75": 0.20120088397636784,
+        "AR100": 0.30638638719472205,
+        "AP_small_COCO": 0.07884864532999324,
+        "AP_medium_COCO": 0.27986584970193573,
+        "AP_large_COCO": 0.463324460479503
+      },
+      "detections": 9601,
+      "effective_scale_recall_iou50": {
+        "lt4": {
+          "total_gt": 14,
+          "matched": 0,
+          "recall": 0.0,
+          "gained_vs_native": 0,
+          "lost_vs_native": 0
+        },
+        "4to8": {
+          "total_gt": 257,
+          "matched": 78,
+          "recall": 0.3035019455252918,
+          "gained_vs_native": 0,
+          "lost_vs_native": 2
+        },
+        "8to16": {
+          "total_gt": 866,
+          "matched": 597,
+          "recall": 0.6893764434180139,
+          "gained_vs_native": 5,
+          "lost_vs_native": 7
+        },
+        "16to32": {
+          "total_gt": 751,
+          "matched": 612,
+          "recall": 0.8149134487350199,
+          "gained_vs_native": 2,
+          "lost_vs_native": 8
+        },
+        "ge32": {
+          "total_gt": 690,
+          "matched": 633,
+          "recall": 0.9173913043478261,
+          "gained_vs_native": 0,
+          "lost_vs_native": 2
+        }
+      },
+      "lost_examples_vs_native": [
+        {
+          "image_id": 19,
+          "annotation_id": 345,
+          "category_id": 1,
+          "effective_size": "16to32",
+          "likely_stage": "nms_or_score_ordering"
+        },
+        {
+          "image_id": 116,
+          "annotation_id": 1929,
+          "category_id": 9,
+          "effective_size": "8to16",
+          "likely_stage": "class_or_confidence_before_nms"
+        },
+        {
+          "image_id": 566,
+          "annotation_id": 10430,
+          "category_id": 9,
+          "effective_size": "8to16",
+          "likely_stage": "class_or_confidence_before_nms"
+        },
+        {
+          "image_id": 1022,
+          "annotation_id": 19129,
+          "category_id": 8,
+          "effective_size": "16to32",
+          "likely_stage": "class_or_confidence_before_nms"
+        },
+        {
+          "image_id": 1244,
+          "annotation_id": 23314,
+          "category_id": 8,
+          "effective_size": "8to16",
+          "likely_stage": "nms_or_score_ordering"
+        },
+        {
+          "image_id": 1253,
+          "annotation_id": 23504,
+          "category_id": 1,
+          "effective_size": "16to32",
+          "likely_stage": "class_or_confidence_before_nms"
+        },
+        {
+          "image_id": 1785,
+          "annotation_id": 33366,
+          "category_id": 4,
+          "effective_size": "4to8",
+          "likely_stage": "class_or_confidence_before_nms"
+        },
+        {
+          "image_id": 2022,
+          "annotation_id": 38027,
+          "category_id": 1,
+          "effective_size": "16to32",
+          "likely_stage": "class_or_confidence_before_nms"
+        },
+        {
+          "image_id": 2171,
+          "annotation_id": 40779,
+          "category_id": 1,
+          "effective_size": "16to32",
+          "likely_stage": "class_or_confidence_before_nms"
+        },
+        {
+          "image_id": 2521,
+          "annotation_id": 47272,
+          "category_id": 1,
+          "effective_size": "8to16",
+          "likely_stage": "class_or_confidence_before_nms"
+        },
+        {
+          "image_id": 3033,
+          "annotation_id": 56759,
+          "category_id": 1,
+          "effective_size": "16to32",
+          "likely_stage": "class_or_confidence_before_nms"
+        },
+        {
+          "image_id": 3130,
+          "annotation_id": 58774,
+          "category_id": 1,
+          "effective_size": "16to32",
+          "likely_stage": "class_or_confidence_before_nms"
+        },
+        {
+          "image_id": 3300,
+          "annotation_id": 62066,
+          "category_id": 1,
+          "effective_size": "8to16",
+          "likely_stage": "nms_or_score_ordering"
+        },
+        {
+          "image_id": 4366,
+          "annotation_id": 81718,
+          "category_id": 4,
+          "effective_size": "8to16",
+          "likely_stage": "class_or_confidence_before_nms"
+        },
+        {
+          "image_id": 6309,
+          "annotation_id": 117189,
+          "category_id": 1,
+          "effective_size": "16to32",
+          "likely_stage": "nms_or_score_ordering"
+        },
+        {
+          "image_id": 7022,
+          "annotation_id": 130532,
+          "category_id": 1,
+          "effective_size": "ge32",
+          "likely_stage": "nms_or_score_ordering"
+        },
+        {
+          "image_id": 7289,
+          "annotation_id": 135398,
+          "category_id": 8,
+          "effective_size": "4to8",
+          "likely_stage": "nms_or_score_ordering"
+        },
+        {
+          "image_id": 7678,
+          "annotation_id": 142647,
+          "category_id": 4,
+          "effective_size": "8to16",
+          "likely_stage": "nms_or_score_ordering"
+        },
+        {
+          "image_id": 7847,
+          "annotation_id": 145689,
+          "category_id": 1,
+          "effective_size": "ge32",
+          "likely_stage": "nms_or_score_ordering"
+        }
+      ],
+      "delta_coco_vs_native": {
+        "AP50_95": -0.0005404935727638116,
+        "AP50": -0.0006619143099326208,
+        "AP75": -0.001360462213542274,
+        "AR100": -0.00042978337848331716,
+        "AP_small_COCO": 0.00042213110558474154,
+        "AP_medium_COCO": 0.0009682944798822257,
+        "AP_large_COCO": -0.0006294725661886158
+      },
+      "recall_paired_bootstrap95": {
+        "lt4": {
+          "difference_point": 0.0,
+          "ci95": [
+            0.0,
+            0.0
+          ],
+          "n_boot": 1000
+        },
+        "4to8": {
+          "difference_point": -0.007782101167315175,
+          "ci95": [
+            -0.0196078431372549,
+            0.0
+          ],
+          "n_boot": 1000
+        },
+        "8to16": {
+          "difference_point": -0.0023094688221709007,
+          "ci95": [
+            -0.00897943397943398,
+            0.0037004084463625143
+          ],
+          "n_boot": 1000
+        },
+        "16to32": {
+          "difference_point": -0.007989347536617843,
+          "ci95": [
+            -0.01673734647050884,
+            0.0
+          ],
+          "n_boot": 1000
+        },
+        "ge32": {
+          "difference_point": -0.002898550724637681,
+          "ci95": [
+            -0.007861944733323429,
+            0.0
+          ],
+          "n_boot": 1000
+        }
+      }
+    },
+    "gated_0750": {
+      "coco_metrics": {
+        "AP50_95": 0.21517547239718476,
+        "AP50": 0.39389491738572785,
+        "AP75": 0.19944807807526738,
+        "AR100": 0.30415073448271873,
+        "AP_small_COCO": 0.07563627803343144,
+        "AP_medium_COCO": 0.2795986433270988,
+        "AP_large_COCO": 0.46121216231200457
+      },
+      "detections": 9068,
+      "effective_scale_recall_iou50": {
+        "lt4": {
+          "total_gt": 14,
+          "matched": 0,
+          "recall": 0.0,
+          "gained_vs_native": 0,
+          "lost_vs_native": 0
+        },
+        "4to8": {
+          "total_gt": 257,
+          "matched": 75,
+          "recall": 0.2918287937743191,
+          "gained_vs_native": 0,
+          "lost_vs_native": 5
+        },
+        "8to16": {
+          "total_gt": 866,
+          "matched": 593,
+          "recall": 0.684757505773672,
+          "gained_vs_native": 8,
+          "lost_vs_native": 14
+        },
+        "16to32": {
+          "total_gt": 751,
+          "matched": 611,
+          "recall": 0.8135818908122503,
+          "gained_vs_native": 4,
+          "lost_vs_native": 11
+        },
+        "ge32": {
+          "total_gt": 690,
+          "matched": 632,
+          "recall": 0.9159420289855073,
+          "gained_vs_native": 0,
+          "lost_vs_native": 3
+        }
+      },
+      "lost_examples_vs_native": [
+        {
+          "image_id": 19,
+          "annotation_id": 345,
+          "category_id": 1,
+          "effective_size": "16to32",
+          "likely_stage": "nms_or_score_ordering"
+        },
+        {
+          "image_id": 116,
+          "annotation_id": 1929,
+          "category_id": 9,
+          "effective_size": "8to16",
+          "likely_stage": "class_or_confidence_before_nms"
+        },
+        {
+          "image_id": 136,
+          "annotation_id": 2348,
+          "category_id": 9,
+          "effective_size": "16to32",
+          "likely_stage": "class_or_confidence_before_nms"
+        },
+        {
+          "image_id": 548,
+          "annotation_id": 10084,
+          "category_id": 9,
+          "effective_size": "8to16",
+          "likely_stage": "nms_or_score_ordering"
+        },
+        {
+          "image_id": 566,
+          "annotation_id": 10430,
+          "category_id": 9,
+          "effective_size": "8to16",
+          "likely_stage": "class_or_confidence_before_nms"
+        },
+        {
+          "image_id": 743,
+          "annotation_id": 13693,
+          "category_id": 9,
+          "effective_size": "16to32",
+          "likely_stage": "class_or_confidence_before_nms"
+        },
+        {
+          "image_id": 1022,
+          "annotation_id": 19129,
+          "category_id": 8,
+          "effective_size": "16to32",
+          "likely_stage": "class_or_confidence_before_nms"
+        },
+        {
+          "image_id": 1244,
+          "annotation_id": 23314,
+          "category_id": 8,
+          "effective_size": "8to16",
+          "likely_stage": "nms_or_score_ordering"
+        },
+        {
+          "image_id": 1253,
+          "annotation_id": 23504,
+          "category_id": 1,
+          "effective_size": "16to32",
+          "likely_stage": "class_or_confidence_before_nms"
+        },
+        {
+          "image_id": 1785,
+          "annotation_id": 33366,
+          "category_id": 4,
+          "effective_size": "4to8",
+          "likely_stage": "class_or_confidence_before_nms"
+        },
+        {
+          "image_id": 2022,
+          "annotation_id": 38014,
+          "category_id": 9,
+          "effective_size": "4to8",
+          "likely_stage": "class_or_confidence_before_nms"
+        },
+        {
+          "image_id": 2022,
+          "annotation_id": 38027,
+          "category_id": 1,
+          "effective_size": "16to32",
+          "likely_stage": "class_or_confidence_before_nms"
+        },
+        {
+          "image_id": 2171,
+          "annotation_id": 40779,
+          "category_id": 1,
+          "effective_size": "16to32",
+          "likely_stage": "class_or_confidence_before_nms"
+        },
+        {
+          "image_id": 2521,
+          "annotation_id": 47272,
+          "category_id": 1,
+          "effective_size": "8to16",
+          "likely_stage": "class_or_confidence_before_nms"
+        },
+        {
+          "image_id": 2911,
+          "annotation_id": 54456,
+          "category_id": 8,
+          "effective_size": "8to16",
+          "likely_stage": "nms_or_score_ordering"
+        },
+        {
+          "image_id": 2999,
+          "annotation_id": 56158,
+          "category_id": 9,
+          "effective_size": "8to16",
+          "likely_stage": "class_or_confidence_before_nms"
+        },
+        {
+          "image_id": 3033,
+          "annotation_id": 56759,
+          "category_id": 1,
+          "effective_size": "16to32",
+          "likely_stage": "class_or_confidence_before_nms"
+        },
+        {
+          "image_id": 3130,
+          "annotation_id": 58774,
+          "category_id": 1,
+          "effective_size": "16to32",
+          "likely_stage": "class_or_confidence_before_nms"
+        },
+        {
+          "image_id": 3300,
+          "annotation_id": 62066,
+          "category_id": 1,
+          "effective_size": "8to16",
+          "likely_stage": "nms_or_score_ordering"
+        },
+        {
+          "image_id": 3725,
+          "annotation_id": 70385,
+          "category_id": 4,
+          "effective_size": "8to16",
+          "likely_stage": "nms_or_score_ordering"
+        },
+        {
+          "image_id": 4366,
+          "annotation_id": 81718,
+          "category_id": 4,
+          "effective_size": "8to16",
+          "likely_stage": "class_or_confidence_before_nms"
+        },
+        {
+          "image_id": 6309,
+          "annotation_id": 117189,
+          "category_id": 1,
+          "effective_size": "16to32",
+          "likely_stage": "nms_or_score_ordering"
+        },
+        {
+          "image_id": 6459,
+          "annotation_id": 120133,
+          "category_id": 8,
+          "effective_size": "4to8",
+          "likely_stage": "nms_or_score_ordering"
+        },
+        {
+          "image_id": 7022,
+          "annotation_id": 130532,
+          "category_id": 1,
+          "effective_size": "ge32",
+          "likely_stage": "nms_or_score_ordering"
+        },
+        {
+          "image_id": 7123,
+          "annotation_id": 132303,
+          "category_id": 8,
+          "effective_size": "8to16",
+          "likely_stage": "nms_or_score_ordering"
+        },
+        {
+          "image_id": 7175,
+          "annotation_id": 133221,
+          "category_id": 8,
+          "effective_size": "8to16",
+          "likely_stage": "nms_or_score_ordering"
+        },
+        {
+          "image_id": 7277,
+          "annotation_id": 135182,
+          "category_id": 1,
+          "effective_size": "8to16",
+          "likely_stage": "class_or_confidence_before_nms"
+        },
+        {
+          "image_id": 7289,
+          "annotation_id": 135398,
+          "category_id": 8,
+          "effective_size": "4to8",
+          "likely_stage": "nms_or_score_ordering"
+        },
+        {
+          "image_id": 7330,
+          "annotation_id": 136208,
+          "category_id": 1,
+          "effective_size": "ge32",
+          "likely_stage": "nms_or_score_ordering"
+        },
+        {
+          "image_id": 7678,
+          "annotation_id": 142647,
+          "category_id": 4,
+          "effective_size": "8to16",
+          "likely_stage": "nms_or_score_ordering"
+        },
+        {
+          "image_id": 7847,
+          "annotation_id": 145689,
+          "category_id": 1,
+          "effective_size": "ge32",
+          "likely_stage": "nms_or_score_ordering"
+        },
+        {
+          "image_id": 7889,
+          "annotation_id": 146416,
+          "category_id": 1,
+          "effective_size": "16to32",
+          "likely_stage": "class_or_confidence_before_nms"
+        },
+        {
+          "image_id": 8422,
+          "annotation_id": 156728,
+          "category_id": 9,
+          "effective_size": "4to8",
+          "likely_stage": "nms_or_score_ordering"
+        }
+      ],
+      "delta_coco_vs_native": {
+        "AP50_95": -0.0017463835112961623,
+        "AP50": -0.002581695830274011,
+        "AP75": -0.003113268114642742,
+        "AR100": -0.002665436090486639,
+        "AP_small_COCO": -0.002790236190977055,
+        "AP_medium_COCO": 0.0007010881050452666,
+        "AP_large_COCO": -0.0027417707336870323
+      },
+      "recall_paired_bootstrap95": {
+        "lt4": {
+          "difference_point": 0.0,
+          "ci95": [
+            0.0,
+            0.0
+          ],
+          "n_boot": 1000
+        },
+        "4to8": {
+          "difference_point": -0.019455252918287938,
+          "ci95": [
+            -0.03560743067453519,
+            -0.004253538680673019
+          ],
+          "n_boot": 1000
+        },
+        "8to16": {
+          "difference_point": -0.006928406466512702,
+          "ci95": [
+            -0.01734121953141228,
+            0.0022779692625771748
+          ],
+          "n_boot": 1000
+        },
+        "16to32": {
+          "difference_point": -0.009320905459387484,
+          "ci95": [
+            -0.020487588286316135,
+            0.0011852252749441005
+          ],
+          "n_boot": 1000
+        },
+        "ge32": {
+          "difference_point": -0.004347826086956522,
+          "ci95": [
+            -0.009929430609284333,
+            0.0
+          ],
+          "n_boot": 1000
+        }
+      }
+    },
+    "gated_1000": {
+      "coco_metrics": {
+        "AP50_95": 0.21492863108596671,
+        "AP50": 0.3924788900859305,
+        "AP75": 0.19926544796611595,
+        "AR100": 0.30362990874490325,
+        "AP_small_COCO": 0.07495539108308942,
+        "AP_medium_COCO": 0.2806768462616658,
+        "AP_large_COCO": 0.4622084438034664
+      },
+      "detections": 8576,
+      "effective_scale_recall_iou50": {
+        "lt4": {
+          "total_gt": 14,
+          "matched": 0,
+          "recall": 0.0,
+          "gained_vs_native": 0,
+          "lost_vs_native": 0
+        },
+        "4to8": {
+          "total_gt": 257,
+          "matched": 73,
+          "recall": 0.2840466926070039,
+          "gained_vs_native": 0,
+          "lost_vs_native": 7
+        },
+        "8to16": {
+          "total_gt": 866,
+          "matched": 589,
+          "recall": 0.6801385681293303,
+          "gained_vs_native": 9,
+          "lost_vs_native": 19
+        },
+        "16to32": {
+          "total_gt": 751,
+          "matched": 602,
+          "recall": 0.8015978695073236,
+          "gained_vs_native": 4,
+          "lost_vs_native": 20
+        },
+        "ge32": {
+          "total_gt": 690,
+          "matched": 632,
+          "recall": 0.9159420289855073,
+          "gained_vs_native": 2,
+          "lost_vs_native": 5
+        }
+      },
+      "lost_examples_vs_native": [
+        {
+          "image_id": 19,
+          "annotation_id": 339,
+          "category_id": 1,
+          "effective_size": "ge32",
+          "likely_stage": "class_or_confidence_before_nms"
+        },
+        {
+          "image_id": 19,
+          "annotation_id": 345,
+          "category_id": 1,
+          "effective_size": "16to32",
+          "likely_stage": "nms_or_score_ordering"
+        },
+        {
+          "image_id": 116,
+          "annotation_id": 1929,
+          "category_id": 9,
+          "effective_size": "8to16",
+          "likely_stage": "class_or_confidence_before_nms"
+        },
+        {
+          "image_id": 136,
+          "annotation_id": 2348,
+          "category_id": 9,
+          "effective_size": "16to32",
+          "likely_stage": "class_or_confidence_before_nms"
+        },
+        {
+          "image_id": 332,
+          "annotation_id": 6065,
+          "category_id": 1,
+          "effective_size": "16to32",
+          "likely_stage": "nms_or_score_ordering"
+        },
+        {
+          "image_id": 548,
+          "annotation_id": 10084,
+          "category_id": 9,
+          "effective_size": "8to16",
+          "likely_stage": "nms_or_score_ordering"
+        },
+        {
+          "image_id": 566,
+          "annotation_id": 10430,
+          "category_id": 9,
+          "effective_size": "8to16",
+          "likely_stage": "class_or_confidence_before_nms"
+        },
+        {
+          "image_id": 743,
+          "annotation_id": 13693,
+          "category_id": 9,
+          "effective_size": "16to32",
+          "likely_stage": "class_or_confidence_before_nms"
+        },
+        {
+          "image_id": 1022,
+          "annotation_id": 19129,
+          "category_id": 8,
+          "effective_size": "16to32",
+          "likely_stage": "class_or_confidence_before_nms"
+        },
+        {
+          "image_id": 1026,
+          "annotation_id": 19234,
+          "category_id": 1,
+          "effective_size": "16to32",
+          "likely_stage": "nms_or_score_ordering"
+        },
+        {
+          "image_id": 1244,
+          "annotation_id": 23314,
+          "category_id": 8,
+          "effective_size": "8to16",
+          "likely_stage": "nms_or_score_ordering"
+        },
+        {
+          "image_id": 1253,
+          "annotation_id": 23504,
+          "category_id": 1,
+          "effective_size": "16to32",
+          "likely_stage": "class_or_confidence_before_nms"
+        },
+        {
+          "image_id": 1785,
+          "annotation_id": 33366,
+          "category_id": 4,
+          "effective_size": "4to8",
+          "likely_stage": "class_or_confidence_before_nms"
+        },
+        {
+          "image_id": 2022,
+          "annotation_id": 38014,
+          "category_id": 9,
+          "effective_size": "4to8",
+          "likely_stage": "class_or_confidence_before_nms"
+        },
+        {
+          "image_id": 2022,
+          "annotation_id": 38027,
+          "category_id": 1,
+          "effective_size": "16to32",
+          "likely_stage": "class_or_confidence_before_nms"
+        },
+        {
+          "image_id": 2154,
+          "annotation_id": 40523,
+          "category_id": 9,
+          "effective_size": "16to32",
+          "likely_stage": "class_or_confidence_before_nms"
+        },
+        {
+          "image_id": 2171,
+          "annotation_id": 40779,
+          "category_id": 1,
+          "effective_size": "16to32",
+          "likely_stage": "class_or_confidence_before_nms"
+        },
+        {
+          "image_id": 2303,
+          "annotation_id": 43193,
+          "category_id": 1,
+          "effective_size": "ge32",
+          "likely_stage": "class_or_confidence_before_nms"
+        },
+        {
+          "image_id": 2521,
+          "annotation_id": 47272,
+          "category_id": 1,
+          "effective_size": "8to16",
+          "likely_stage": "class_or_confidence_before_nms"
+        },
+        {
+          "image_id": 2911,
+          "annotation_id": 54456,
+          "category_id": 8,
+          "effective_size": "8to16",
+          "likely_stage": "nms_or_score_ordering"
+        },
+        {
+          "image_id": 2925,
+          "annotation_id": 54730,
+          "category_id": 9,
+          "effective_size": "8to16",
+          "likely_stage": "class_or_confidence_before_nms"
+        },
+        {
+          "image_id": 2999,
+          "annotation_id": 56158,
+          "category_id": 9,
+          "effective_size": "8to16",
+          "likely_stage": "class_or_confidence_before_nms"
+        },
+        {
+          "image_id": 3033,
+          "annotation_id": 56759,
+          "category_id": 1,
+          "effective_size": "16to32",
+          "likely_stage": "class_or_confidence_before_nms"
+        },
+        {
+          "image_id": 3033,
+          "annotation_id": 56769,
+          "category_id": 9,
+          "effective_size": "16to32",
+          "likely_stage": "class_or_confidence_before_nms"
+        },
+        {
+          "image_id": 3130,
+          "annotation_id": 58774,
+          "category_id": 1,
+          "effective_size": "16to32",
+          "likely_stage": "class_or_confidence_before_nms"
+        },
+        {
+          "image_id": 3300,
+          "annotation_id": 62066,
+          "category_id": 1,
+          "effective_size": "8to16",
+          "likely_stage": "nms_or_score_ordering"
+        },
+        {
+          "image_id": 3725,
+          "annotation_id": 70385,
+          "category_id": 4,
+          "effective_size": "8to16",
+          "likely_stage": "nms_or_score_ordering"
+        },
+        {
+          "image_id": 4330,
+          "annotation_id": 81145,
+          "category_id": 1,
+          "effective_size": "16to32",
+          "likely_stage": "class_or_confidence_before_nms"
+        },
+        {
+          "image_id": 4366,
+          "annotation_id": 81718,
+          "category_id": 4,
+          "effective_size": "8to16",
+          "likely_stage": "class_or_confidence_before_nms"
+        },
+        {
+          "image_id": 5240,
+          "annotation_id": 97644,
+          "category_id": 9,
+          "effective_size": "8to16",
+          "likely_stage": "class_or_confidence_before_nms"
+        },
+        {
+          "image_id": 6309,
+          "annotation_id": 117189,
+          "category_id": 1,
+          "effective_size": "16to32",
+          "likely_stage": "nms_or_score_ordering"
+        },
+        {
+          "image_id": 6459,
+          "annotation_id": 120133,
+          "category_id": 8,
+          "effective_size": "4to8",
+          "likely_stage": "nms_or_score_ordering"
+        },
+        {
+          "image_id": 6561,
+          "annotation_id": 121991,
+          "category_id": 8,
+          "effective_size": "8to16",
+          "likely_stage": "nms_or_score_ordering"
+        },
+        {
+          "image_id": 7022,
+          "annotation_id": 130532,
+          "category_id": 1,
+          "effective_size": "ge32",
+          "likely_stage": "nms_or_score_ordering"
+        },
+        {
+          "image_id": 7175,
+          "annotation_id": 133221,
+          "category_id": 8,
+          "effective_size": "8to16",
+          "likely_stage": "nms_or_score_ordering"
+        },
+        {
+          "image_id": 7277,
+          "annotation_id": 135159,
+          "category_id": 1,
+          "effective_size": "16to32",
+          "likely_stage": "nms_or_score_ordering"
+        },
+        {
+          "image_id": 7277,
+          "annotation_id": 135182,
+          "category_id": 1,
+          "effective_size": "8to16",
+          "likely_stage": "class_or_confidence_before_nms"
+        },
+        {
+          "image_id": 7289,
+          "annotation_id": 135398,
+          "category_id": 8,
+          "effective_size": "4to8",
+          "likely_stage": "nms_or_score_ordering"
+        },
+        {
+          "image_id": 7300,
+          "annotation_id": 135604,
+          "category_id": 1,
+          "effective_size": "16to32",
+          "likely_stage": "nms_or_score_ordering"
+        },
+        {
+          "image_id": 7330,
+          "annotation_id": 136208,
+          "category_id": 1,
+          "effective_size": "ge32",
+          "likely_stage": "nms_or_score_ordering"
+        },
+        {
+          "image_id": 7449,
+          "annotation_id": 138318,
+          "category_id": 9,
+          "effective_size": "8to16",
+          "likely_stage": "class_or_confidence_before_nms"
+        },
+        {
+          "image_id": 7454,
+          "annotation_id": 138375,
+          "category_id": 1,
+          "effective_size": "16to32",
+          "likely_stage": "nms_or_score_ordering"
+        },
+        {
+          "image_id": 7469,
+          "annotation_id": 138639,
+          "category_id": 8,
+          "effective_size": "4to8",
+          "likely_stage": "nms_or_score_ordering"
+        },
+        {
+          "image_id": 7678,
+          "annotation_id": 142647,
+          "category_id": 4,
+          "effective_size": "8to16",
+          "likely_stage": "nms_or_score_ordering"
+        },
+        {
+          "image_id": 7847,
+          "annotation_id": 145689,
+          "category_id": 1,
+          "effective_size": "ge32",
+          "likely_stage": "nms_or_score_ordering"
+        },
+        {
+          "image_id": 7889,
+          "annotation_id": 146416,
+          "category_id": 1,
+          "effective_size": "16to32",
+          "likely_stage": "class_or_confidence_before_nms"
+        },
+        {
+          "image_id": 8137,
+          "annotation_id": 151083,
+          "category_id": 8,
+          "effective_size": "4to8",
+          "likely_stage": "class_or_confidence_before_nms"
+        },
+        {
+          "image_id": 8138,
+          "annotation_id": 151105,
+          "category_id": 8,
+          "effective_size": "8to16",
+          "likely_stage": "nms_or_score_ordering"
+        },
+        {
+          "image_id": 8138,
+          "annotation_id": 151107,
+          "category_id": 9,
+          "effective_size": "16to32",
+          "likely_stage": "class_or_confidence_before_nms"
+        },
+        {
+          "image_id": 8329,
+          "annotation_id": 154730,
+          "category_id": 8,
+          "effective_size": "8to16",
+          "likely_stage": "class_or_confidence_before_nms"
+        },
+        {
+          "image_id": 8422,
+          "annotation_id": 156728,
+          "category_id": 9,
+          "effective_size": "4to8",
+          "likely_stage": "nms_or_score_ordering"
+        }
+      ],
+      "delta_coco_vs_native": {
+        "AP50_95": -0.0019932248225142113,
+        "AP50": -0.003997723130071351,
+        "AP75": -0.003295898223794169,
+        "AR100": -0.003186261828302117,
+        "AP_small_COCO": -0.003471123141319074,
+        "AP_medium_COCO": 0.001779291039612274,
+        "AP_large_COCO": -0.0017454892422252288
+      },
+      "recall_paired_bootstrap95": {
+        "lt4": {
+          "difference_point": 0.0,
+          "ci95": [
+            0.0,
+            0.0
+          ],
+          "n_boot": 1000
+        },
+        "4to8": {
+          "difference_point": -0.027237354085603113,
+          "ci95": [
+            -0.04725346831646044,
+            -0.010168632615666515
+          ],
+          "n_boot": 1000
+        },
+        "8to16": {
+          "difference_point": -0.011547344110854504,
+          "ci95": [
+            -0.023088263580365646,
+            0.0
+          ],
+          "n_boot": 1000
+        },
+        "16to32": {
+          "difference_point": -0.02130492676431425,
+          "ci95": [
+            -0.03438110652451519,
+            -0.009458822029576748
+          ],
+          "n_boot": 1000
+        },
+        "ge32": {
+          "difference_point": -0.004347826086956522,
+          "ci95": [
+            -0.012214207344118402,
+            0.0029154518950437317
+          ],
+          "n_boot": 1000
+        }
+      }
+    },
+    "ungated_0250": {
+      "coco_metrics": {
+        "AP50_95": 0.21681163649406823,
+        "AP50": 0.3970529953164347,
+        "AP75": 0.20160970024469863,
+        "AR100": 0.30721679323923146,
+        "AP_small_COCO": 0.07946988824968562,
+        "AP_medium_COCO": 0.2785791583813832,
+        "AP_large_COCO": 0.4641348092797313
+      },
+      "detections": 10108,
+      "effective_scale_recall_iou50": {
+        "lt4": {
+          "total_gt": 14,
+          "matched": 0,
+          "recall": 0.0,
+          "gained_vs_native": 0,
+          "lost_vs_native": 0
+        },
+        "4to8": {
+          "total_gt": 257,
+          "matched": 79,
+          "recall": 0.30739299610894943,
+          "gained_vs_native": 0,
+          "lost_vs_native": 1
+        },
+        "8to16": {
+          "total_gt": 866,
+          "matched": 598,
+          "recall": 0.6905311778290993,
+          "gained_vs_native": 3,
+          "lost_vs_native": 4
+        },
+        "16to32": {
+          "total_gt": 751,
+          "matched": 617,
+          "recall": 0.8215712383488681,
+          "gained_vs_native": 1,
+          "lost_vs_native": 2
+        },
+        "ge32": {
+          "total_gt": 690,
+          "matched": 634,
+          "recall": 0.9188405797101449,
+          "gained_vs_native": 0,
+          "lost_vs_native": 1
+        }
+      },
+      "lost_examples_vs_native": [
+        {
+          "image_id": 566,
+          "annotation_id": 10430,
+          "category_id": 9,
+          "effective_size": "8to16",
+          "likely_stage": "class_or_confidence_before_nms"
+        },
+        {
+          "image_id": 1022,
+          "annotation_id": 19129,
+          "category_id": 8,
+          "effective_size": "16to32",
+          "likely_stage": "class_or_confidence_before_nms"
+        },
+        {
+          "image_id": 1244,
+          "annotation_id": 23314,
+          "category_id": 8,
+          "effective_size": "8to16",
+          "likely_stage": "nms_or_score_ordering"
+        },
+        {
+          "image_id": 1253,
+          "annotation_id": 23504,
+          "category_id": 1,
+          "effective_size": "16to32",
+          "likely_stage": "class_or_confidence_before_nms"
+        },
+        {
+          "image_id": 1785,
+          "annotation_id": 33366,
+          "category_id": 4,
+          "effective_size": "4to8",
+          "likely_stage": "class_or_confidence_before_nms"
+        },
+        {
+          "image_id": 2521,
+          "annotation_id": 47272,
+          "category_id": 1,
+          "effective_size": "8to16",
+          "likely_stage": "class_or_confidence_before_nms"
+        },
+        {
+          "image_id": 4366,
+          "annotation_id": 81718,
+          "category_id": 4,
+          "effective_size": "8to16",
+          "likely_stage": "class_or_confidence_before_nms"
+        },
+        {
+          "image_id": 7847,
+          "annotation_id": 145689,
+          "category_id": 1,
+          "effective_size": "ge32",
+          "likely_stage": "nms_or_score_ordering"
+        }
+      ],
+      "delta_coco_vs_native": {
+        "AP50_95": -0.00011021941441269334,
+        "AP50": 0.0005763821004328151,
+        "AP75": -0.0009516459452114934,
+        "AR100": 0.00040062266602608476,
+        "AP_small_COCO": 0.0010433740252771273,
+        "AP_medium_COCO": -0.0003183968406703097,
+        "AP_large_COCO": 0.000180876234039673
+      },
+      "recall_paired_bootstrap95": {
+        "lt4": {
+          "difference_point": 0.0,
+          "ci95": [
+            0.0,
+            0.0
+          ],
+          "n_boot": 1000
+        },
+        "4to8": {
+          "difference_point": -0.0038910505836575876,
+          "ci95": [
+            -0.012932433945364979,
+            0.0
+          ],
+          "n_boot": 1000
+        },
+        "8to16": {
+          "difference_point": -0.0011547344110854503,
+          "ci95": [
+            -0.006317130405631914,
+            0.0035593566244467396
+          ],
+          "n_boot": 1000
+        },
+        "16to32": {
+          "difference_point": -0.0013315579227696406,
+          "ci95": [
+            -0.006017566852912097,
+            0.002890488015637977
+          ],
+          "n_boot": 1000
+        },
+        "ge32": {
+          "difference_point": -0.0014492753623188406,
+          "ci95": [
+            -0.0055115656309155546,
+            0.0
+          ],
+          "n_boot": 1000
+        }
+      }
+    },
+    "ungated_0500": {
+      "coco_metrics": {
+        "AP50_95": 0.21637188300142687,
+        "AP50": 0.39580916465373556,
+        "AP75": 0.20112397255518044,
+        "AR100": 0.30638638719472205,
+        "AP_small_COCO": 0.0788485127525522,
+        "AP_medium_COCO": 0.2798491168799657,
+        "AP_large_COCO": 0.46332546453372214
+      },
+      "detections": 9601,
+      "effective_scale_recall_iou50": {
+        "lt4": {
+          "total_gt": 14,
+          "matched": 0,
+          "recall": 0.0,
+          "gained_vs_native": 0,
+          "lost_vs_native": 0
+        },
+        "4to8": {
+          "total_gt": 257,
+          "matched": 78,
+          "recall": 0.3035019455252918,
+          "gained_vs_native": 0,
+          "lost_vs_native": 2
+        },
+        "8to16": {
+          "total_gt": 866,
+          "matched": 597,
+          "recall": 0.6893764434180139,
+          "gained_vs_native": 5,
+          "lost_vs_native": 7
+        },
+        "16to32": {
+          "total_gt": 751,
+          "matched": 612,
+          "recall": 0.8149134487350199,
+          "gained_vs_native": 2,
+          "lost_vs_native": 8
+        },
+        "ge32": {
+          "total_gt": 690,
+          "matched": 633,
+          "recall": 0.9173913043478261,
+          "gained_vs_native": 0,
+          "lost_vs_native": 2
+        }
+      },
+      "lost_examples_vs_native": [
+        {
+          "image_id": 19,
+          "annotation_id": 345,
+          "category_id": 1,
+          "effective_size": "16to32",
+          "likely_stage": "nms_or_score_ordering"
+        },
+        {
+          "image_id": 116,
+          "annotation_id": 1929,
+          "category_id": 9,
+          "effective_size": "8to16",
+          "likely_stage": "class_or_confidence_before_nms"
+        },
+        {
+          "image_id": 566,
+          "annotation_id": 10430,
+          "category_id": 9,
+          "effective_size": "8to16",
+          "likely_stage": "class_or_confidence_before_nms"
+        },
+        {
+          "image_id": 1022,
+          "annotation_id": 19129,
+          "category_id": 8,
+          "effective_size": "16to32",
+          "likely_stage": "class_or_confidence_before_nms"
+        },
+        {
+          "image_id": 1244,
+          "annotation_id": 23314,
+          "category_id": 8,
+          "effective_size": "8to16",
+          "likely_stage": "nms_or_score_ordering"
+        },
+        {
+          "image_id": 1253,
+          "annotation_id": 23504,
+          "category_id": 1,
+          "effective_size": "16to32",
+          "likely_stage": "class_or_confidence_before_nms"
+        },
+        {
+          "image_id": 1785,
+          "annotation_id": 33366,
+          "category_id": 4,
+          "effective_size": "4to8",
+          "likely_stage": "class_or_confidence_before_nms"
+        },
+        {
+          "image_id": 2022,
+          "annotation_id": 38027,
+          "category_id": 1,
+          "effective_size": "16to32",
+          "likely_stage": "class_or_confidence_before_nms"
+        },
+        {
+          "image_id": 2171,
+          "annotation_id": 40779,
+          "category_id": 1,
+          "effective_size": "16to32",
+          "likely_stage": "class_or_confidence_before_nms"
+        },
+        {
+          "image_id": 2521,
+          "annotation_id": 47272,
+          "category_id": 1,
+          "effective_size": "8to16",
+          "likely_stage": "class_or_confidence_before_nms"
+        },
+        {
+          "image_id": 3033,
+          "annotation_id": 56759,
+          "category_id": 1,
+          "effective_size": "16to32",
+          "likely_stage": "class_or_confidence_before_nms"
+        },
+        {
+          "image_id": 3130,
+          "annotation_id": 58774,
+          "category_id": 1,
+          "effective_size": "16to32",
+          "likely_stage": "class_or_confidence_before_nms"
+        },
+        {
+          "image_id": 3300,
+          "annotation_id": 62066,
+          "category_id": 1,
+          "effective_size": "8to16",
+          "likely_stage": "nms_or_score_ordering"
+        },
+        {
+          "image_id": 4366,
+          "annotation_id": 81718,
+          "category_id": 4,
+          "effective_size": "8to16",
+          "likely_stage": "class_or_confidence_before_nms"
+        },
+        {
+          "image_id": 6309,
+          "annotation_id": 117189,
+          "category_id": 1,
+          "effective_size": "16to32",
+          "likely_stage": "nms_or_score_ordering"
+        },
+        {
+          "image_id": 7022,
+          "annotation_id": 130532,
+          "category_id": 1,
+          "effective_size": "ge32",
+          "likely_stage": "nms_or_score_ordering"
+        },
+        {
+          "image_id": 7289,
+          "annotation_id": 135398,
+          "category_id": 8,
+          "effective_size": "4to8",
+          "likely_stage": "nms_or_score_ordering"
+        },
+        {
+          "image_id": 7678,
+          "annotation_id": 142647,
+          "category_id": 4,
+          "effective_size": "8to16",
+          "likely_stage": "nms_or_score_ordering"
+        },
+        {
+          "image_id": 7847,
+          "annotation_id": 145689,
+          "category_id": 1,
+          "effective_size": "ge32",
+          "likely_stage": "nms_or_score_ordering"
+        }
+      ],
+      "delta_coco_vs_native": {
+        "AP50_95": -0.0005499729070540527,
+        "AP50": -0.000667448562266304,
+        "AP75": -0.0014373736347296773,
+        "AR100": -0.00042978337848331716,
+        "AP_small_COCO": 0.0004219985281437022,
+        "AP_medium_COCO": 0.0009515616579122144,
+        "AP_large_COCO": -0.00062846851196946
+      },
+      "recall_paired_bootstrap95": {
+        "lt4": {
+          "difference_point": 0.0,
+          "ci95": [
+            0.0,
+            0.0
+          ],
+          "n_boot": 1000
+        },
+        "4to8": {
+          "difference_point": -0.007782101167315175,
+          "ci95": [
+            -0.0196078431372549,
+            0.0
+          ],
+          "n_boot": 1000
+        },
+        "8to16": {
+          "difference_point": -0.0023094688221709007,
+          "ci95": [
+            -0.00897943397943398,
+            0.0037004084463625143
+          ],
+          "n_boot": 1000
+        },
+        "16to32": {
+          "difference_point": -0.007989347536617843,
+          "ci95": [
+            -0.01673734647050884,
+            0.0
+          ],
+          "n_boot": 1000
+        },
+        "ge32": {
+          "difference_point": -0.002898550724637681,
+          "ci95": [
+            -0.007861944733323429,
+            0.0
+          ],
+          "n_boot": 1000
+        }
+      }
+    },
+    "ungated_0750": {
+      "coco_metrics": {
+        "AP50_95": 0.21517068875889805,
+        "AP50": 0.3938980346879264,
+        "AP75": 0.19945581605529084,
+        "AR100": 0.30415861470336486,
+        "AP_small_COCO": 0.07563644619062573,
+        "AP_medium_COCO": 0.27956872980675207,
+        "AP_large_COCO": 0.46121216231200457
+      },
+      "detections": 9067,
+      "effective_scale_recall_iou50": {
+        "lt4": {
+          "total_gt": 14,
+          "matched": 0,
+          "recall": 0.0,
+          "gained_vs_native": 0,
+          "lost_vs_native": 0
+        },
+        "4to8": {
+          "total_gt": 257,
+          "matched": 75,
+          "recall": 0.2918287937743191,
+          "gained_vs_native": 0,
+          "lost_vs_native": 5
+        },
+        "8to16": {
+          "total_gt": 866,
+          "matched": 593,
+          "recall": 0.684757505773672,
+          "gained_vs_native": 8,
+          "lost_vs_native": 14
+        },
+        "16to32": {
+          "total_gt": 751,
+          "matched": 611,
+          "recall": 0.8135818908122503,
+          "gained_vs_native": 4,
+          "lost_vs_native": 11
+        },
+        "ge32": {
+          "total_gt": 690,
+          "matched": 632,
+          "recall": 0.9159420289855073,
+          "gained_vs_native": 0,
+          "lost_vs_native": 3
+        }
+      },
+      "lost_examples_vs_native": [
+        {
+          "image_id": 19,
+          "annotation_id": 345,
+          "category_id": 1,
+          "effective_size": "16to32",
+          "likely_stage": "nms_or_score_ordering"
+        },
+        {
+          "image_id": 116,
+          "annotation_id": 1929,
+          "category_id": 9,
+          "effective_size": "8to16",
+          "likely_stage": "class_or_confidence_before_nms"
+        },
+        {
+          "image_id": 136,
+          "annotation_id": 2348,
+          "category_id": 9,
+          "effective_size": "16to32",
+          "likely_stage": "class_or_confidence_before_nms"
+        },
+        {
+          "image_id": 548,
+          "annotation_id": 10084,
+          "category_id": 9,
+          "effective_size": "8to16",
+          "likely_stage": "nms_or_score_ordering"
+        },
+        {
+          "image_id": 566,
+          "annotation_id": 10430,
+          "category_id": 9,
+          "effective_size": "8to16",
+          "likely_stage": "class_or_confidence_before_nms"
+        },
+        {
+          "image_id": 743,
+          "annotation_id": 13693,
+          "category_id": 9,
+          "effective_size": "16to32",
+          "likely_stage": "class_or_confidence_before_nms"
+        },
+        {
+          "image_id": 1022,
+          "annotation_id": 19129,
+          "category_id": 8,
+          "effective_size": "16to32",
+          "likely_stage": "class_or_confidence_before_nms"
+        },
+        {
+          "image_id": 1244,
+          "annotation_id": 23314,
+          "category_id": 8,
+          "effective_size": "8to16",
+          "likely_stage": "nms_or_score_ordering"
+        },
+        {
+          "image_id": 1253,
+          "annotation_id": 23504,
+          "category_id": 1,
+          "effective_size": "16to32",
+          "likely_stage": "class_or_confidence_before_nms"
+        },
+        {
+          "image_id": 1785,
+          "annotation_id": 33366,
+          "category_id": 4,
+          "effective_size": "4to8",
+          "likely_stage": "class_or_confidence_before_nms"
+        },
+        {
+          "image_id": 2022,
+          "annotation_id": 38014,
+          "category_id": 9,
+          "effective_size": "4to8",
+          "likely_stage": "class_or_confidence_before_nms"
+        },
+        {
+          "image_id": 2022,
+          "annotation_id": 38027,
+          "category_id": 1,
+          "effective_size": "16to32",
+          "likely_stage": "class_or_confidence_before_nms"
+        },
+        {
+          "image_id": 2171,
+          "annotation_id": 40779,
+          "category_id": 1,
+          "effective_size": "16to32",
+          "likely_stage": "class_or_confidence_before_nms"
+        },
+        {
+          "image_id": 2521,
+          "annotation_id": 47272,
+          "category_id": 1,
+          "effective_size": "8to16",
+          "likely_stage": "class_or_confidence_before_nms"
+        },
+        {
+          "image_id": 2911,
+          "annotation_id": 54456,
+          "category_id": 8,
+          "effective_size": "8to16",
+          "likely_stage": "nms_or_score_ordering"
+        },
+        {
+          "image_id": 2999,
+          "annotation_id": 56158,
+          "category_id": 9,
+          "effective_size": "8to16",
+          "likely_stage": "class_or_confidence_before_nms"
+        },
+        {
+          "image_id": 3033,
+          "annotation_id": 56759,
+          "category_id": 1,
+          "effective_size": "16to32",
+          "likely_stage": "class_or_confidence_before_nms"
+        },
+        {
+          "image_id": 3130,
+          "annotation_id": 58774,
+          "category_id": 1,
+          "effective_size": "16to32",
+          "likely_stage": "class_or_confidence_before_nms"
+        },
+        {
+          "image_id": 3300,
+          "annotation_id": 62066,
+          "category_id": 1,
+          "effective_size": "8to16",
+          "likely_stage": "nms_or_score_ordering"
+        },
+        {
+          "image_id": 3725,
+          "annotation_id": 70385,
+          "category_id": 4,
+          "effective_size": "8to16",
+          "likely_stage": "nms_or_score_ordering"
+        },
+        {
+          "image_id": 4366,
+          "annotation_id": 81718,
+          "category_id": 4,
+          "effective_size": "8to16",
+          "likely_stage": "class_or_confidence_before_nms"
+        },
+        {
+          "image_id": 6309,
+          "annotation_id": 117189,
+          "category_id": 1,
+          "effective_size": "16to32",
+          "likely_stage": "nms_or_score_ordering"
+        },
+        {
+          "image_id": 6459,
+          "annotation_id": 120133,
+          "category_id": 8,
+          "effective_size": "4to8",
+          "likely_stage": "nms_or_score_ordering"
+        },
+        {
+          "image_id": 7022,
+          "annotation_id": 130532,
+          "category_id": 1,
+          "effective_size": "ge32",
+          "likely_stage": "nms_or_score_ordering"
+        },
+        {
+          "image_id": 7123,
+          "annotation_id": 132303,
+          "category_id": 8,
+          "effective_size": "8to16",
+          "likely_stage": "nms_or_score_ordering"
+        },
+        {
+          "image_id": 7175,
+          "annotation_id": 133221,
+          "category_id": 8,
+          "effective_size": "8to16",
+          "likely_stage": "nms_or_score_ordering"
+        },
+        {
+          "image_id": 7277,
+          "annotation_id": 135182,
+          "category_id": 1,
+          "effective_size": "8to16",
+          "likely_stage": "class_or_confidence_before_nms"
+        },
+        {
+          "image_id": 7289,
+          "annotation_id": 135398,
+          "category_id": 8,
+          "effective_size": "4to8",
+          "likely_stage": "nms_or_score_ordering"
+        },
+        {
+          "image_id": 7330,
+          "annotation_id": 136208,
+          "category_id": 1,
+          "effective_size": "ge32",
+          "likely_stage": "nms_or_score_ordering"
+        },
+        {
+          "image_id": 7678,
+          "annotation_id": 142647,
+          "category_id": 4,
+          "effective_size": "8to16",
+          "likely_stage": "nms_or_score_ordering"
+        },
+        {
+          "image_id": 7847,
+          "annotation_id": 145689,
+          "category_id": 1,
+          "effective_size": "ge32",
+          "likely_stage": "nms_or_score_ordering"
+        },
+        {
+          "image_id": 7889,
+          "annotation_id": 146416,
+          "category_id": 1,
+          "effective_size": "16to32",
+          "likely_stage": "class_or_confidence_before_nms"
+        },
+        {
+          "image_id": 8422,
+          "annotation_id": 156728,
+          "category_id": 9,
+          "effective_size": "4to8",
+          "likely_stage": "nms_or_score_ordering"
+        }
+      ],
+      "delta_coco_vs_native": {
+        "AP50_95": -0.0017511671495828718,
+        "AP50": -0.0025785785280754703,
+        "AP75": -0.003105530134619283,
+        "AR100": -0.002657555869840511,
+        "AP_small_COCO": -0.002790068033782761,
+        "AP_medium_COCO": 0.000671174584698564,
+        "AP_large_COCO": -0.0027417707336870323
+      },
+      "recall_paired_bootstrap95": {
+        "lt4": {
+          "difference_point": 0.0,
+          "ci95": [
+            0.0,
+            0.0
+          ],
+          "n_boot": 1000
+        },
+        "4to8": {
+          "difference_point": -0.019455252918287938,
+          "ci95": [
+            -0.03560743067453519,
+            -0.004253538680673019
+          ],
+          "n_boot": 1000
+        },
+        "8to16": {
+          "difference_point": -0.006928406466512702,
+          "ci95": [
+            -0.01734121953141228,
+            0.0022779692625771748
+          ],
+          "n_boot": 1000
+        },
+        "16to32": {
+          "difference_point": -0.009320905459387484,
+          "ci95": [
+            -0.020487588286316135,
+            0.0011852252749441005
+          ],
+          "n_boot": 1000
+        },
+        "ge32": {
+          "difference_point": -0.004347826086956522,
+          "ci95": [
+            -0.009929430609284333,
+            0.0
+          ],
+          "n_boot": 1000
+        }
+      }
+    },
+    "ungated_1000": {
+      "coco_metrics": {
+        "AP50_95": 0.21491880259032123,
+        "AP50": 0.39244954799736187,
+        "AP75": 0.199263849443685,
+        "AR100": 0.3036377889655494,
+        "AP_small_COCO": 0.07494795747779004,
+        "AP_medium_COCO": 0.28067671738177496,
+        "AP_large_COCO": 0.46222233196440143
+      },
+      "detections": 8576,
+      "effective_scale_recall_iou50": {
+        "lt4": {
+          "total_gt": 14,
+          "matched": 0,
+          "recall": 0.0,
+          "gained_vs_native": 0,
+          "lost_vs_native": 0
+        },
+        "4to8": {
+          "total_gt": 257,
+          "matched": 73,
+          "recall": 0.2840466926070039,
+          "gained_vs_native": 0,
+          "lost_vs_native": 7
+        },
+        "8to16": {
+          "total_gt": 866,
+          "matched": 589,
+          "recall": 0.6801385681293303,
+          "gained_vs_native": 9,
+          "lost_vs_native": 19
+        },
+        "16to32": {
+          "total_gt": 751,
+          "matched": 602,
+          "recall": 0.8015978695073236,
+          "gained_vs_native": 4,
+          "lost_vs_native": 20
+        },
+        "ge32": {
+          "total_gt": 690,
+          "matched": 632,
+          "recall": 0.9159420289855073,
+          "gained_vs_native": 2,
+          "lost_vs_native": 5
+        }
+      },
+      "lost_examples_vs_native": [
+        {
+          "image_id": 19,
+          "annotation_id": 339,
+          "category_id": 1,
+          "effective_size": "ge32",
+          "likely_stage": "class_or_confidence_before_nms"
+        },
+        {
+          "image_id": 19,
+          "annotation_id": 345,
+          "category_id": 1,
+          "effective_size": "16to32",
+          "likely_stage": "nms_or_score_ordering"
+        },
+        {
+          "image_id": 116,
+          "annotation_id": 1929,
+          "category_id": 9,
+          "effective_size": "8to16",
+          "likely_stage": "class_or_confidence_before_nms"
+        },
+        {
+          "image_id": 136,
+          "annotation_id": 2348,
+          "category_id": 9,
+          "effective_size": "16to32",
+          "likely_stage": "class_or_confidence_before_nms"
+        },
+        {
+          "image_id": 332,
+          "annotation_id": 6065,
+          "category_id": 1,
+          "effective_size": "16to32",
+          "likely_stage": "nms_or_score_ordering"
+        },
+        {
+          "image_id": 548,
+          "annotation_id": 10084,
+          "category_id": 9,
+          "effective_size": "8to16",
+          "likely_stage": "nms_or_score_ordering"
+        },
+        {
+          "image_id": 566,
+          "annotation_id": 10430,
+          "category_id": 9,
+          "effective_size": "8to16",
+          "likely_stage": "class_or_confidence_before_nms"
+        },
+        {
+          "image_id": 743,
+          "annotation_id": 13693,
+          "category_id": 9,
+          "effective_size": "16to32",
+          "likely_stage": "class_or_confidence_before_nms"
+        },
+        {
+          "image_id": 1022,
+          "annotation_id": 19129,
+          "category_id": 8,
+          "effective_size": "16to32",
+          "likely_stage": "class_or_confidence_before_nms"
+        },
+        {
+          "image_id": 1026,
+          "annotation_id": 19234,
+          "category_id": 1,
+          "effective_size": "16to32",
+          "likely_stage": "nms_or_score_ordering"
+        },
+        {
+          "image_id": 1244,
+          "annotation_id": 23314,
+          "category_id": 8,
+          "effective_size": "8to16",
+          "likely_stage": "nms_or_score_ordering"
+        },
+        {
+          "image_id": 1253,
+          "annotation_id": 23504,
+          "category_id": 1,
+          "effective_size": "16to32",
+          "likely_stage": "class_or_confidence_before_nms"
+        },
+        {
+          "image_id": 1785,
+          "annotation_id": 33366,
+          "category_id": 4,
+          "effective_size": "4to8",
+          "likely_stage": "class_or_confidence_before_nms"
+        },
+        {
+          "image_id": 2022,
+          "annotation_id": 38014,
+          "category_id": 9,
+          "effective_size": "4to8",
+          "likely_stage": "class_or_confidence_before_nms"
+        },
+        {
+          "image_id": 2022,
+          "annotation_id": 38027,
+          "category_id": 1,
+          "effective_size": "16to32",
+          "likely_stage": "class_or_confidence_before_nms"
+        },
+        {
+          "image_id": 2154,
+          "annotation_id": 40523,
+          "category_id": 9,
+          "effective_size": "16to32",
+          "likely_stage": "class_or_confidence_before_nms"
+        },
+        {
+          "image_id": 2171,
+          "annotation_id": 40779,
+          "category_id": 1,
+          "effective_size": "16to32",
+          "likely_stage": "class_or_confidence_before_nms"
+        },
+        {
+          "image_id": 2303,
+          "annotation_id": 43193,
+          "category_id": 1,
+          "effective_size": "ge32",
+          "likely_stage": "class_or_confidence_before_nms"
+        },
+        {
+          "image_id": 2521,
+          "annotation_id": 47272,
+          "category_id": 1,
+          "effective_size": "8to16",
+          "likely_stage": "class_or_confidence_before_nms"
+        },
+        {
+          "image_id": 2911,
+          "annotation_id": 54456,
+          "category_id": 8,
+          "effective_size": "8to16",
+          "likely_stage": "nms_or_score_ordering"
+        },
+        {
+          "image_id": 2925,
+          "annotation_id": 54730,
+          "category_id": 9,
+          "effective_size": "8to16",
+          "likely_stage": "class_or_confidence_before_nms"
+        },
+        {
+          "image_id": 2999,
+          "annotation_id": 56158,
+          "category_id": 9,
+          "effective_size": "8to16",
+          "likely_stage": "class_or_confidence_before_nms"
+        },
+        {
+          "image_id": 3033,
+          "annotation_id": 56759,
+          "category_id": 1,
+          "effective_size": "16to32",
+          "likely_stage": "class_or_confidence_before_nms"
+        },
+        {
+          "image_id": 3033,
+          "annotation_id": 56769,
+          "category_id": 9,
+          "effective_size": "16to32",
+          "likely_stage": "class_or_confidence_before_nms"
+        },
+        {
+          "image_id": 3130,
+          "annotation_id": 58774,
+          "category_id": 1,
+          "effective_size": "16to32",
+          "likely_stage": "class_or_confidence_before_nms"
+        },
+        {
+          "image_id": 3300,
+          "annotation_id": 62066,
+          "category_id": 1,
+          "effective_size": "8to16",
+          "likely_stage": "nms_or_score_ordering"
+        },
+        {
+          "image_id": 3725,
+          "annotation_id": 70385,
+          "category_id": 4,
+          "effective_size": "8to16",
+          "likely_stage": "nms_or_score_ordering"
+        },
+        {
+          "image_id": 4330,
+          "annotation_id": 81145,
+          "category_id": 1,
+          "effective_size": "16to32",
+          "likely_stage": "class_or_confidence_before_nms"
+        },
+        {
+          "image_id": 4366,
+          "annotation_id": 81718,
+          "category_id": 4,
+          "effective_size": "8to16",
+          "likely_stage": "class_or_confidence_before_nms"
+        },
+        {
+          "image_id": 5240,
+          "annotation_id": 97644,
+          "category_id": 9,
+          "effective_size": "8to16",
+          "likely_stage": "class_or_confidence_before_nms"
+        },
+        {
+          "image_id": 6309,
+          "annotation_id": 117189,
+          "category_id": 1,
+          "effective_size": "16to32",
+          "likely_stage": "nms_or_score_ordering"
+        },
+        {
+          "image_id": 6459,
+          "annotation_id": 120133,
+          "category_id": 8,
+          "effective_size": "4to8",
+          "likely_stage": "nms_or_score_ordering"
+        },
+        {
+          "image_id": 6561,
+          "annotation_id": 121991,
+          "category_id": 8,
+          "effective_size": "8to16",
+          "likely_stage": "nms_or_score_ordering"
+        },
+        {
+          "image_id": 7022,
+          "annotation_id": 130532,
+          "category_id": 1,
+          "effective_size": "ge32",
+          "likely_stage": "nms_or_score_ordering"
+        },
+        {
+          "image_id": 7175,
+          "annotation_id": 133221,
+          "category_id": 8,
+          "effective_size": "8to16",
+          "likely_stage": "nms_or_score_ordering"
+        },
+        {
+          "image_id": 7277,
+          "annotation_id": 135159,
+          "category_id": 1,
+          "effective_size": "16to32",
+          "likely_stage": "nms_or_score_ordering"
+        },
+        {
+          "image_id": 7277,
+          "annotation_id": 135182,
+          "category_id": 1,
+          "effective_size": "8to16",
+          "likely_stage": "class_or_confidence_before_nms"
+        },
+        {
+          "image_id": 7289,
+          "annotation_id": 135398,
+          "category_id": 8,
+          "effective_size": "4to8",
+          "likely_stage": "nms_or_score_ordering"
+        },
+        {
+          "image_id": 7300,
+          "annotation_id": 135604,
+          "category_id": 1,
+          "effective_size": "16to32",
+          "likely_stage": "nms_or_score_ordering"
+        },
+        {
+          "image_id": 7330,
+          "annotation_id": 136208,
+          "category_id": 1,
+          "effective_size": "ge32",
+          "likely_stage": "nms_or_score_ordering"
+        },
+        {
+          "image_id": 7449,
+          "annotation_id": 138318,
+          "category_id": 9,
+          "effective_size": "8to16",
+          "likely_stage": "class_or_confidence_before_nms"
+        },
+        {
+          "image_id": 7454,
+          "annotation_id": 138375,
+          "category_id": 1,
+          "effective_size": "16to32",
+          "likely_stage": "nms_or_score_ordering"
+        },
+        {
+          "image_id": 7469,
+          "annotation_id": 138639,
+          "category_id": 8,
+          "effective_size": "4to8",
+          "likely_stage": "nms_or_score_ordering"
+        },
+        {
+          "image_id": 7678,
+          "annotation_id": 142647,
+          "category_id": 4,
+          "effective_size": "8to16",
+          "likely_stage": "nms_or_score_ordering"
+        },
+        {
+          "image_id": 7847,
+          "annotation_id": 145689,
+          "category_id": 1,
+          "effective_size": "ge32",
+          "likely_stage": "nms_or_score_ordering"
+        },
+        {
+          "image_id": 7889,
+          "annotation_id": 146416,
+          "category_id": 1,
+          "effective_size": "16to32",
+          "likely_stage": "class_or_confidence_before_nms"
+        },
+        {
+          "image_id": 8137,
+          "annotation_id": 151083,
+          "category_id": 8,
+          "effective_size": "4to8",
+          "likely_stage": "class_or_confidence_before_nms"
+        },
+        {
+          "image_id": 8138,
+          "annotation_id": 151105,
+          "category_id": 8,
+          "effective_size": "8to16",
+          "likely_stage": "nms_or_score_ordering"
+        },
+        {
+          "image_id": 8138,
+          "annotation_id": 151107,
+          "category_id": 9,
+          "effective_size": "16to32",
+          "likely_stage": "class_or_confidence_before_nms"
+        },
+        {
+          "image_id": 8329,
+          "annotation_id": 154730,
+          "category_id": 8,
+          "effective_size": "8to16",
+          "likely_stage": "class_or_confidence_before_nms"
+        },
+        {
+          "image_id": 8422,
+          "annotation_id": 156728,
+          "category_id": 9,
+          "effective_size": "4to8",
+          "likely_stage": "nms_or_score_ordering"
+        }
+      ],
+      "delta_coco_vs_native": {
+        "AP50_95": -0.0020030533181596977,
+        "AP50": -0.004027065218639991,
+        "AP75": -0.0032974967462251203,
+        "AR100": -0.003178381607655989,
+        "AP_small_COCO": -0.0034785567466184553,
+        "AP_medium_COCO": 0.001779162159721459,
+        "AP_large_COCO": -0.0017316010812901683
+      },
+      "recall_paired_bootstrap95": {
+        "lt4": {
+          "difference_point": 0.0,
+          "ci95": [
+            0.0,
+            0.0
+          ],
+          "n_boot": 1000
+        },
+        "4to8": {
+          "difference_point": -0.027237354085603113,
+          "ci95": [
+            -0.04725346831646044,
+            -0.010168632615666515
+          ],
+          "n_boot": 1000
+        },
+        "8to16": {
+          "difference_point": -0.011547344110854504,
+          "ci95": [
+            -0.023088263580365646,
+            0.0
+          ],
+          "n_boot": 1000
+        },
+        "16to32": {
+          "difference_point": -0.02130492676431425,
+          "ci95": [
+            -0.03438110652451519,
+            -0.009458822029576748
+          ],
+          "n_boot": 1000
+        },
+        "ge32": {
+          "difference_point": -0.004347826086956522,
+          "ci95": [
+            -0.012214207344118402,
+            0.0029154518950437317
+          ],
+          "n_boot": 1000
+        }
+      }
+    }
+  },
+  "first_image_direct_forward_parity": {
+    "native_max_abs": 0.0,
+    "pgsma_gated_1_max_abs": 0.0,
+    "tolerance": 2e-06
+  }
+}

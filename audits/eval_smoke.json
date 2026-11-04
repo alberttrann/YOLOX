@@ -1,0 +1,62 @@
+{
+  "device": "cuda",
+  "checkpoint": {
+    "source": "weights/yolox_s.pth",
+    "subkey": "model",
+    "matched_tensors": 456
+  },
+  "test_size": [
+    576,
+    1024
+  ],
+  "batches": [
+    {
+      "image_shape": [
+        1,
+        3,
+        576,
+        1024
+      ],
+      "box_objectness_exact_parity": true,
+      "max_class_probability_delta": 4.827976226806641e-06,
+      "output_shape": [
+        1,
+        12096,
+        14
+      ],
+      "candidate_counts": {
+        "native": [
+          155
+        ],
+        "pgsma": [
+          155
+        ]
+      }
+    },
+    {
+      "image_shape": [
+        1,
+        3,
+        576,
+        1024
+      ],
+      "box_objectness_exact_parity": true,
+      "max_class_probability_delta": 1.9073486328125e-06,
+      "output_shape": [
+        1,
+        12096,
+        14
+      ],
+      "candidate_counts": {
+        "native": [
+          85
+        ],
+        "pgsma": [
+          85
+        ]
+      }
+    }
+  ],
+  "status": "CHECKS_PASSED",
+  "note": "No AP claims: outputs are raw real-image inference + NMS smoke only."
+}

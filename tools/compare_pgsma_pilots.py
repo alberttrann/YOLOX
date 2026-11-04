@@ -1,0 +1,99 @@
+"""Read matched bounded-pilot results; never authorize the full 80-epoch run.
+
+Example: python -m tools.compare_pgsma_pilots audits/pilot_native_control audits/pilot_memory audits/pilot_pgsma --json audits/pilot_comparison.json
+"""
+from __future__ import annotations
+import argparse
+import json
+from pathlib import Path
+import sys
+
+from ._pgsma_pilot_core import atomic_json, native_recipe
+
+
+def load_run(folder):
+    folder=Path(folder)
+    payload=json.loads((folder/'result.json').read_text(encoding='utf8'))
+    if payload.get('status')!='CHECKS_PASSED':
+        raise RuntimeError(f'{folder}: incomplete or blocked pilot')
+    step=int(payload['steps_requested'])
+    initial=json.loads((folder/'clean_val_step_00000.json').read_text(encoding='utf8'))
+    final=json.loads((folder/f'clean_val_step_{step:05d}.json').read_text(encoding='utf8'))
+    return payload,initial,final
+
+
+def summarize_run(payload,initial,final):
+    primary='memory' if payload['variant'] in ('memory','memory_simota') else 'pgsma' if payload['variant'] in ('pgsma','pgsma_simota') else 'native'
+    results=final['metrics'];start=initial['metrics']
+    if primary not in results: raise RuntimeError('Missing selected inference mode in eval result')
+    if 'native' not in results: raise RuntimeError('Missing native inference baseline in eval result')
+    current=results[primary];native=results['native']
+    a=current['coco_metrics'];b=native['coco_metrics']
+    initial_ap=(start[primary]['coco_metrics'] if start[primary]['coco_metrics'] else None)
+    delta_ap={k:(a[k]-b[k] if a and b and a[k]>=0 and b[k]>=0 else None)
+              for k in ('AP50_95','AP50','AP75','AR100')}
+    delta_r={}
+    for scale,scale_stats in current['post_nms_recall_iou50_by_effective_min_side'].items():
+        r=scale_stats['recall_iou50'];rn=native['post_nms_recall_iou50_by_effective_min_side'][scale]['recall_iou50']
+        delta_r[scale]=r-rn if r is not None and rn is not None else None
+    return {'variant':payload['variant'],'native_recipe':native_recipe(payload['variant']),'train_steps':payload['steps_requested'],
+        'successful_native_updates':payload['successful_native_updates'],
+        'successful_semantic_updates':payload['successful_semantic_updates'],
+        'clean_subset_coco_final':a,'clean_subset_coco_native_final':b,
+        'selected_vs_native_AP_AR_delta':delta_ap,
+        'selected_vs_native_post_nms_recall_at_iou50_delta':delta_r,
+        'initial_AP50_95':initial_ap.get('AP50_95') if initial_ap else None,
+        'last_training_metrics':payload.get('last_telemetry'),
+        'first_batch_sha256':payload.get('first_training_batch_sha256'),
+        'training_batch_stream_sha256':payload.get('training_batch_stream_sha256'),
+        'native_state_sha256':payload.get('native_state_sha256')}
+
+
+def compare(dirs):
+    all_runs=[load_run(p) for p in dirs]
+    seeds={a['seed'] for a,_,_ in all_runs}
+    eval_keys={tuple(a['eval_indices']) for a,_,_ in all_runs}
+    val_digests={a.get('clean_val_json_sha256') for a,_,_ in all_runs}
+    input_shapes={tuple(a['input_size']) for a,_,_ in all_runs}
+    if len(seeds)!=1 or len(eval_keys)!=1 or len(val_digests)!=1 or len(input_shapes)!=1:
+        raise RuntimeError('Cannot compare pilots using different seeds, clean sets or input shapes')
+    results=[summarize_run(*item) for item in all_runs]
+    warnings=[]
+    hashes={s['training_batch_stream_sha256'] for s in results if s['training_batch_stream_sha256']}
+    if len(hashes)>1:
+        warnings.append('Data streams differ; do NOT attribute score differences solely to model variants')
+    source_groups={a['checkpoint']['sha256'] for a,_,_ in all_runs}
+    if len(source_groups)>1:
+        warnings.append('Different starting model checkpoints; this is not a paired initialization comparison')
+    lengths={a['steps_requested'] for a,_,_ in all_runs}
+    if len(lengths)>1:
+        warnings.append('Different update budgets; do not compare results as matched experiments')
+    native_states={s['native_state_sha256'] for s in results if s['native_state_sha256']}
+    if len(source_groups)==1 and len(hashes)==1 and len(native_states)>1:
+        recipes={item['native_recipe'] for item in results}
+        if len(recipes)==1:
+            warnings.append('Same native recipe and matched source/data but different final native state; audit optimizer/RNG isolation')
+        # Different assignment/loss recipes should yield different weights.
+        # Do not mark those differences as reproducibility failures.
+    return {'status':'CHECKS_PASSED' if not warnings else 'QUALIFICATION_WARNINGS',
+            'runs':results,'warnings':warnings,
+            'qualification':'PILOT_DIAGNOSTICS_ONLY_NOT_FINAL_MODEL_SELECTION',
+            'full_80_epoch_permission':False,
+            'notes':['COCO AP/AR reported for a small sampled clean-source image subset, not full validation',
+                     'Effective-size R@IoU.50 is a separate post-NMS recall diagnostic, not COCO AR',
+                     'For semantic causality compare same warmed checkpoint and same data-stream hash',
+                     'Repeated seeds/complete clean-val eval and held-out adverse/UAV tests remain necessary']}
+
+
+def main():
+    p=argparse.ArgumentParser(description=__doc__)
+    p.add_argument('runs',nargs='+')
+    p.add_argument('--json',default=None)
+    args=p.parse_args()
+    try:report=compare(args.runs)
+    except Exception as e:
+        report={'status':'BLOCKED','error':f'{type(e).__name__}: {e}'}
+    print(json.dumps(report,indent=2,allow_nan=False,default=str))
+    if args.json:atomic_json(args.json,report)
+    return 2 if report['status']=='BLOCKED' else 0
+if __name__=='__main__':sys.exit(main())

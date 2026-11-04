@@ -1,0 +1,156 @@
+{
+  "source": "weights/yolox_s.pth",
+  "source_subkey": "model",
+  "source_tensors": 462,
+  "model_tensors": 886,
+  "matched_tensors": 456,
+  "matched_elements": 8960473,
+  "coverage_by_prefix": {
+    "backbone.backbone.stem": {
+      "tensors": 6,
+      "expected_tensors": 6,
+      "elements": 3585,
+      "expected_elements": 3585,
+      "element_ratio": 1.0
+    },
+    "backbone.backbone.dark2": {
+      "tensors": 36,
+      "expected_tensors": 36,
+      "elements": 37894,
+      "expected_elements": 37894,
+      "element_ratio": 1.0
+    },
+    "backbone.backbone.dark3": {
+      "tensors": 60,
+      "expected_tensors": 60,
+      "elements": 232458,
+      "expected_elements": 232458,
+      "element_ratio": 1.0
+    },
+    "backbone.backbone.dark4": {
+      "tensors": 60,
+      "expected_tensors": 116,
+      "elements": 923658,
+      "expected_elements": 1660052,
+      "element_ratio": 0.556403
+    },
+    "backbone.backbone.dark5": {
+      "tensors": 48,
+      "expected_tensors": 80,
+      "elements": 3025928,
+      "expected_elements": 4384014,
+      "element_ratio": 0.690219
+    },
+    "backbone": {
+      "tensors": 354,
+      "expected_tensors": 731,
+      "elements": 7066683,
+      "expected_elements": 12098312,
+      "element_ratio": 0.584105
+    },
+    "head.stems": {
+      "tensors": 18,
+      "expected_tensors": 18,
+      "elements": 116227,
+      "expected_elements": 116227,
+      "element_ratio": 1.0
+    },
+    "head.cls_convs": {
+      "tensors": 36,
+      "expected_tensors": 36,
+      "elements": 887814,
+      "expected_elements": 887814,
+      "element_ratio": 1.0
+    },
+    "head.reg_convs": {
+      "tensors": 36,
+      "expected_tensors": 36,
+      "elements": 887814,
+      "expected_elements": 887814,
+      "element_ratio": 1.0
+    },
+    "head.cls_preds": {
+      "tensors": 0,
+      "expected_tensors": 6,
+      "elements": 0,
+      "expected_elements": 3483,
+      "element_ratio": 0.0
+    },
+    "head.reg_preds": {
+      "tensors": 6,
+      "expected_tensors": 6,
+      "elements": 1548,
+      "expected_elements": 1548,
+      "element_ratio": 1.0
+    },
+    "head.obj_preds": {
+      "tensors": 6,
+      "expected_tensors": 6,
+      "elements": 387,
+      "expected_elements": 387,
+      "element_ratio": 1.0
+    },
+    "head.pgsma_engine": {
+      "tensors": 0,
+      "expected_tensors": 47,
+      "elements": 0,
+      "expected_elements": 80171,
+      "element_ratio": 0.0
+    }
+  },
+  "shape_mismatch_examples": [
+    "head.cls_preds.0.weight",
+    "head.cls_preds.0.bias",
+    "head.cls_preds.1.weight",
+    "head.cls_preds.1.bias",
+    "head.cls_preds.2.weight",
+    "head.cls_preds.2.bias"
+  ],
+  "unexpected_examples": [],
+  "missing_examples": [
+    "backbone.backbone.dark4.1.dense_gate",
+    "backbone.backbone.dark4.1.ema.gamma",
+    "backbone.backbone.dark4.1.ema.gn.weight",
+    "backbone.backbone.dark4.1.ema.gn.bias",
+    "backbone.backbone.dark4.1.ema.conv1x1.weight",
+    "backbone.backbone.dark4.1.ema.conv1x1.bias",
+    "backbone.backbone.dark4.1.ema.conv3x3.weight",
+    "backbone.backbone.dark4.1.ema.conv3x3.bias",
+    "backbone.backbone.dark4.1.dense_local.cv1.conv.weight",
+    "backbone.backbone.dark4.1.dense_local.cv1.bn.weight",
+    "backbone.backbone.dark4.1.dense_local.cv1.bn.bias",
+    "backbone.backbone.dark4.1.dense_local.cv1.bn.running_mean",
+    "backbone.backbone.dark4.1.dense_local.cv1.bn.running_var",
+    "backbone.backbone.dark4.1.dense_local.cv1.bn.num_batches_tracked",
+    "backbone.backbone.dark4.1.dense_local.cv2.conv.weight",
+    "backbone.backbone.dark4.1.dense_local.cv2.bn.weight",
+    "backbone.backbone.dark4.1.dense_local.cv2.bn.bias",
+    "backbone.backbone.dark4.1.dense_local.cv2.bn.running_mean",
+    "backbone.backbone.dark4.1.dense_local.cv2.bn.running_var",
+    "backbone.backbone.dark4.1.dense_local.cv2.bn.num_batches_tracked",
+    "backbone.backbone.dark4.1.dense_local.m.0.conv1.conv.weight",
+    "backbone.backbone.dark4.1.dense_local.m.0.conv1.bn.weight",
+    "backbone.backbone.dark4.1.dense_local.m.0.conv1.bn.bias",
+    "backbone.backbone.dark4.1.dense_local.m.0.conv1.bn.running_mean",
+    "backbone.backbone.dark4.1.dense_local.m.0.conv1.bn.running_var",
+    "backbone.backbone.dark4.1.dense_local.m.0.conv1.bn.num_batches_tracked",
+    "backbone.backbone.dark4.1.dense_local.m.0.conv2.conv.weight",
+    "backbone.backbone.dark4.1.dense_local.m.0.conv2.bn.weight",
+    "backbone.backbone.dark4.1.dense_local.m.0.conv2.bn.bias",
+    "backbone.backbone.dark4.1.dense_local.m.0.conv2.bn.running_mean",
+    "backbone.backbone.dark4.1.dense_local.m.0.conv2.bn.running_var",
+    "backbone.backbone.dark4.1.dense_local.m.0.conv2.bn.num_batches_tracked",
+    "backbone.backbone.dark4.1.dense_local.m.1.conv1.conv.weight",
+    "backbone.backbone.dark4.1.dense_local.m.1.conv1.bn.weight",
+    "backbone.backbone.dark4.1.dense_local.m.1.conv1.bn.bias"
+  ],
+  "blockers": [
+    "backbone.backbone.dark4: only 0.556403 element-weight coverage (minimum 0.85)",
+    "backbone.backbone.dark5: only 0.690219 element-weight coverage (minimum 0.85)"
+  ],
+  "warnings": [
+    "6 same-key incompatible tensors (may be COCO class head mismatch)"
+  ],
+  "status": "BLOCKED",
+  "note": "COCO 80-class head mismatch and new PG-SMA tensors are expected; verify dark2/dark3/dark4/dark5 weights, not just total checkpoint coverage."
+}

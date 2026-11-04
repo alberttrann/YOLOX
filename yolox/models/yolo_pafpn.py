@@ -8,7 +8,7 @@ import torch.nn as nn
 from .darknet import CSPDarknet
 from .network_blocks import BaseConv
 from .tribrid_neck import C2f_Tribrid
-from .ttt_modules import mHC_AttnRes_SPI
+from .pgsma_spi import SPIResidual
 
 
 class YOLOPAFPN(nn.Module):
@@ -66,7 +66,7 @@ class YOLOPAFPN(nn.Module):
         c_p5 = int(in_channels[2] * width)            # 512
 
         # 1. Sub-Pixel Phase Injection (SPI) Highway
-        self.spi_highway = mHC_AttnRes_SPI(in_channels_dark2=c_dark2, out_channels_p3=c_p3)
+        self.spi_highway = SPIResidual(in_channels_dark2=c_dark2, out_channels_p3=c_p3)
 
         self.upsample = nn.Upsample(scale_factor=2, mode="nearest")
 
@@ -85,7 +85,7 @@ class YOLOPAFPN(nn.Module):
             shortcut=False,
             depthwise=depthwise,
             act=act,
-            saliency_floor=0.35,
+            saliency_floor=0.0,
         )
 
         # Top-down fusion: C3_p3 (P3 Level: floor = 0.15 provides high sparsity for micro targets)
@@ -96,7 +96,7 @@ class YOLOPAFPN(nn.Module):
             shortcut=False,
             depthwise=depthwise,
             act=act,
-            saliency_floor=0.15,
+            saliency_floor=0.0,
         )
 
         # Bottom-up fusion: C3_n3 (N4 Level: floor = 0.35 protects 32-64px vehicle semantics)
@@ -107,7 +107,7 @@ class YOLOPAFPN(nn.Module):
             shortcut=False,
             depthwise=depthwise,
             act=act,
-            saliency_floor=0.35,
+            saliency_floor=0.0,
         )
 
         # Bottom-up fusion: C3_n4 (N5 Level: floor = 0.80 ensures macro trucks/buses retain presence)
@@ -118,7 +118,7 @@ class YOLOPAFPN(nn.Module):
             shortcut=False,
             depthwise=depthwise,
             act=act,
-            saliency_floor=0.80,
+            saliency_floor=0.0,
         )
 
     def forward(self, input, ttt_prob=None):

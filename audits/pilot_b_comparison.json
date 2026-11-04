@@ -1,0 +1,142 @@
+{
+  "status": "QUALIFICATION_WARNINGS",
+  "runs": [
+    {
+      "variant": "native_simota",
+      "train_steps": 512,
+      "successful_native_updates": 512,
+      "successful_semantic_updates": 0,
+      "clean_subset_coco_final": {
+        "AP50_95": 0.1964549779732227,
+        "AP50": 0.37312254703415526,
+        "AP75": 0.15254163758025496,
+        "AR100": 0.30661448109643147,
+        "AP_small_COCO": 0.0731467178081429,
+        "AP_medium_COCO": 0.26390373099079034,
+        "AP_large_COCO": 0.40996299778347495
+      },
+      "clean_subset_coco_native_final": {
+        "AP50_95": 0.1964549779732227,
+        "AP50": 0.37312254703415526,
+        "AP75": 0.15254163758025496,
+        "AR100": 0.30661448109643147,
+        "AP_small_COCO": 0.0731467178081429,
+        "AP_medium_COCO": 0.26390373099079034,
+        "AP_large_COCO": 0.40996299778347495
+      },
+      "selected_vs_native_AP_AR_delta": {
+        "AP50_95": 0.0,
+        "AP50": 0.0,
+        "AP75": 0.0,
+        "AR100": 0.0
+      },
+      "selected_vs_native_post_nms_recall_at_iou50_delta": {
+        "lt4": 0.0,
+        "4to8": 0.0,
+        "8to16": 0.0,
+        "16to32": 0.0,
+        "ge32": 0.0
+      },
+      "initial_AP50_95": 0.02515121912292858,
+      "last_training_metrics": {
+        "step": 512,
+        "native_loss": 5.071510314941406,
+        "native_grad_norm_before_clip": 31.308195114135742,
+        "native_step_success": true,
+        "scaler_scale": 1024.0,
+        "valid_gt": 88,
+        "assignments": {
+          "num_fg_total": 389,
+          "num_gt_total": 88,
+          "uncovered_gt": 0,
+          "core_positives": 0,
+          "candidate_edges": 0
+        },
+        "pos_per_level": {
+          "P3": 267,
+          "P4": 112,
+          "P5": 10
+        },
+        "semantic_step": null,
+        "semantic_utility": null
+      },
+      "first_batch_sha256": "838b9cc525aa31b2396b4b3a998ad72b6e4f5a58a48d145bc1f283488f5a94ac",
+      "training_batch_stream_sha256": "2ca2966e23e8b2114e241487879e6913eb8ac43d76ff0a8d90eaa9aef859a77f",
+      "native_state_sha256": "dbda8cbe9fc798c5e3e9da5f4c6d6401efc5bef237b77907b7180ec032829128"
+    },
+    {
+      "variant": "native_scpa",
+      "train_steps": 512,
+      "successful_native_updates": 512,
+      "successful_semantic_updates": 0,
+      "clean_subset_coco_final": {
+        "AP50_95": 0.17227617914127258,
+        "AP50": 0.35280506278138646,
+        "AP75": 0.1473418015427267,
+        "AR100": 0.2839210815126797,
+        "AP_small_COCO": 0.07710224907053402,
+        "AP_medium_COCO": 0.23593963562589534,
+        "AP_large_COCO": 0.3416735756067578
+      },
+      "clean_subset_coco_native_final": {
+        "AP50_95": 0.17227617914127258,
+        "AP50": 0.35280506278138646,
+        "AP75": 0.1473418015427267,
+        "AR100": 0.2839210815126797,
+        "AP_small_COCO": 0.07710224907053402,
+        "AP_medium_COCO": 0.23593963562589534,
+        "AP_large_COCO": 0.3416735756067578
+      },
+      "selected_vs_native_AP_AR_delta": {
+        "AP50_95": 0.0,
+        "AP50": 0.0,
+        "AP75": 0.0,
+        "AR100": 0.0
+      },
+      "selected_vs_native_post_nms_recall_at_iou50_delta": {
+        "lt4": 0.0,
+        "4to8": 0.0,
+        "8to16": 0.0,
+        "16to32": 0.0,
+        "ge32": 0.0
+      },
+      "initial_AP50_95": 0.02515121912292858,
+      "last_training_metrics": {
+        "step": 512,
+        "native_loss": 6.191546440124512,
+        "native_grad_norm_before_clip": 29.64520835876465,
+        "native_step_success": true,
+        "scaler_scale": 1024.0,
+        "valid_gt": 88,
+        "assignments": {
+          "num_fg_total": 347,
+          "num_gt_total": 88,
+          "uncovered_gt": 0,
+          "core_positives": 88,
+          "candidate_edges": 1056
+        },
+        "pos_per_level": {
+          "P3": 267,
+          "P4": 53,
+          "P5": 27
+        },
+        "semantic_step": null,
+        "semantic_utility": null
+      },
+      "first_batch_sha256": "838b9cc525aa31b2396b4b3a998ad72b6e4f5a58a48d145bc1f283488f5a94ac",
+      "training_batch_stream_sha256": "2ca2966e23e8b2114e241487879e6913eb8ac43d76ff0a8d90eaa9aef859a77f",
+      "native_state_sha256": "d07a2a9ef0ef6084376337c879894c7ea6539358fde1d780ae5974fad2c801ab"
+    }
+  ],
+  "warnings": [
+    "Native state hashes differ despite same checkpoint/data; investigate numeric or RNG isolation"
+  ],
+  "qualification": "PILOT_DIAGNOSTICS_ONLY_NOT_FINAL_MODEL_SELECTION",
+  "full_80_epoch_permission": false,
+  "notes": [
+    "COCO AP/AR reported for a small sampled clean-source image subset, not full validation",
+    "Effective-size R@IoU.50 is a separate post-NMS recall diagnostic, not COCO AR",
+    "For semantic causality compare same warmed checkpoint and same data-stream hash",
+    "Repeated seeds/complete clean-val eval and held-out adverse/UAV tests remain necessary"
+  ]
+}

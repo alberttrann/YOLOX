@@ -143,26 +143,34 @@ class Trainer:
         targets = targets.to(self.data_type)
         targets.requires_grad = False
         inps, targets = self.exp.preprocess(inps, targets, self.input_size)
+        if inps.ndim != 4 or inps.shape[1] != 4:
+            raise RuntimeError('PG-SMA training expected 4-channel RGB+validity batch')
+        valid_image_mask = inps[:, 3:4] > 0.5
+        inps = inps[:, :3].contiguous()
         data_end_time = time.time()
-        # LR currently resident in the optimizer is the LR used by THIS step.
-        # YOLOX updates the scheduler after optimizer.step(), so the console LR is
-        # technically the next-step LR unless we record both explicitly.
-        lr_used = float(self.optimizer.param_groups[0]["lr"])
-        telemetry_iter = self.progress_in_iter + 1
-        # Rich assignment telemetry is expensive enough that we explicitly enable
-        # it only on telemetry iterations. Normal iterations keep the exact same
-        # matching algorithm but skip diagnostic reductions/histograms.
-        if hasattr(self, "telemetry"):
-            model_ref_for_telemetry = self.model.module if self.is_distributed else self.model
-            head_for_telemetry = getattr(model_ref_for_telemetry, "head", None)
-            if head_for_telemetry is not None and hasattr(head_for_telemetry, "collect_assignment_telemetry"):
-                head_for_telemetry.collect_assignment_telemetry = self.telemetry.should_record(telemetry_iter)
 
         # 2. Forward pass under mixed precision
         with torch.cuda.amp.autocast(enabled=self.amp_training):
-            outputs = self.model(inps, targets)
+            outputs = self.model(inps, targets, valid_image_mask=valid_image_mask)
 
         loss = outputs["total_loss"]
+
+        # Semantic objective uses the same native feature and weight snapshot.
+        # It has an independent optimizer, FP32 backward, gradient clipping and
+        # nonfinite step gate; semantic failure cannot skip the native update.
+        model_ref = self.model.module if self.is_distributed else self.model
+        from .pgsma_step import semantic_optimizer_step
+        if torch.isfinite(outputs["total_loss"]).all() and self.exp.pgsma_variant != 'native':
+            with torch.cuda.amp.autocast(enabled=False):
+                semantic_success, semantic_metrics = semantic_optimizer_step(
+                    model_ref, self.semantic_optimizer,
+                    seed=1000003 * (self.progress_in_iter + 1) + 17,
+                    correction_mode=self.exp.pgsma_variant)
+            if not semantic_success:
+                logger.warning("PG-SMA independent optimizer skip: {}", semantic_metrics)
+            for k,v in semantic_metrics.items():
+                if isinstance(v,(float,int)):
+                    outputs['pg_'+k] = outputs['total_loss'].new_tensor(v)
 
         # 3. Numerical Stability Guard with Component Diagnostics and VRAM Purge
         if torch.isnan(loss) or torch.isinf(loss):
@@ -182,49 +190,42 @@ class Trainer:
             self.optimizer.zero_grad(set_to_none=True)
             raise FloatingPointError("Non-finite forward loss; optimizer update forbidden")
 
+        # Semantic gradients belong to the semantic optimizer, whose step already
+        # completed above. Clear them before the native backward and telemetry.
+        # Native gradient clipping must NEVER include semantic parameters.
+        self.semantic_optimizer.zero_grad(set_to_none=True)
+
         # 4. Backward pass
         self.optimizer.zero_grad()
         self.scaler.scale(loss).backward()
 
-        # 5. Gradient Unscaling & pre-clip telemetry capture.
+        # 5. Gradient Unscaling & Telemetry Hook (Pre-step gradient flow logging)
         self.scaler.unscale_(self.optimizer)
-        pre_grad_state = (
-            self.telemetry.capture_gradient_state(telemetry_iter)
-            if hasattr(self, "telemetry") else None
-        )
+        if hasattr(self, "telemetry"):
+            self.telemetry.record_gradient_flow(self.epoch + 1, self.progress_in_iter + 1)
 
         # 6. Distinguish recoverable AMP LOSS-SCALE overflow from persistent
         # FP32 backward failure. Never scrub or step with invalid gradients.
-        named_grads = [(n, p.grad) for n, p in self.model.named_parameters() if p.grad is not None]
+        # Parameter ownership is defined by the native optimizer's param groups,
+        # not by model.parameters(): PG-SMA parameters are in the same module.
+        native_params = [p for group in self.optimizer.param_groups
+                         for p in group['params'] if p.requires_grad]
+        native_ids = {id(p) for p in native_params}
+        named_grads = [(n, p.grad) for n, p in self.model.named_parameters()
+                       if id(p) in native_ids and p.grad is not None]
         invalid_names = [n for n, g in named_grads if not torch.isfinite(g).all().item()]
         if invalid_names and not self.amp_training:
             logger.error("FP32 backward invalid at epoch={} iter={}: {}",
                          self.epoch + 1, self.iter + 1, invalid_names[:25])
             raise FloatingPointError("Persistent FP32 backward failure")
-        clip_threshold = 10.0
-        grad_norm_value = None
-        clip_coefficient = None
-        post_grad_state = None
         if not invalid_names:
             grad_norm = torch.nn.utils.clip_grad_norm_(
-                self.model.parameters(), max_norm=clip_threshold, error_if_nonfinite=True
+                native_params, max_norm=10.0, error_if_nonfinite=True
             )
             if not torch.isfinite(grad_norm):
                 raise FloatingPointError("Total gradient norm non-finite despite finite individual gradients")
-            grad_norm_value = float(grad_norm.detach().float().item())
-            clip_coefficient = min(1.0, clip_threshold / (grad_norm_value + 1e-12))
-            if hasattr(self, "telemetry"):
-                post_grad_state = self.telemetry.capture_gradient_state(telemetry_iter)
 
-        if hasattr(self, "telemetry"):
-            self.telemetry.record_gradient_flow(
-                self.epoch + 1, telemetry_iter,
-                pre_grad_state, post_grad_state,
-                clip_threshold=clip_threshold,
-                clip_norm_returned=grad_norm_value,
-            )
-
-        snapshot = self.telemetry.snapshot_parameter_updates(telemetry_iter) if hasattr(self, "telemetry") else None
+        snapshot = self.telemetry.snapshot_parameter_updates(self.progress_in_iter + 1) if hasattr(self, "telemetry") else None
         # GradScaler recorded found_inf during unscale_. The scaler handles the
         # optimizer skip and halves the loss scale, without modifying parameters.
         old_scale = self.scaler.get_scale()
@@ -259,16 +260,17 @@ class Trainer:
 
         if hasattr(self, "telemetry"):
             self.telemetry.record_parameter_updates(
-                self.epoch + 1, telemetry_iter, snapshot, did_step,
-                lr_used=lr_used, clip_coefficient=clip_coefficient,
+                self.epoch + 1, self.progress_in_iter + 1, snapshot, did_step
             )
-        del snapshot
 
         # 10. Learning Rate Schedule Update
         lr = self.lr_scheduler.update_lr(self.progress_in_iter + 1)
         for param_group in self.optimizer.param_groups:
             param_group["lr"] = lr
-        lr_next = float(lr)
+        base_lr = self.exp.basic_lr_per_img * self.args.batch_size
+        semantic_factor = lr / max(base_lr, 1e-12)
+        for param_group in self.semantic_optimizer.param_groups:
+            param_group['lr'] = self.exp.semantic_lr * semantic_factor
 
         iter_end_time = time.time()
 
@@ -286,32 +288,17 @@ class Trainer:
 
         # 12. Offline Structured JSONL Telemetry Logging
         if hasattr(self, "telemetry"):
-            runtime_state = {
-                "lr_used": lr_used,
-                "amp_scale_before": float(old_scale),
-                "amp_scale_after": float(new_scale),
-                "optimizer_step": bool(did_step),
-                "amp_skipped_steps_total": int(self.amp_skipped_steps),
-                "pre_clip_total_grad_norm": grad_norm_value,
-                "clip_threshold": clip_threshold,
-                "clip_coefficient": clip_coefficient,
-                "was_clipped": bool(clip_coefficient is not None and clip_coefficient < 0.999999),
-            }
             self.telemetry.record_iteration_losses(
-                self.epoch + 1, telemetry_iter, lr_next, self.outputs, runtime=runtime_state
+                self.epoch + 1, self.progress_in_iter + 1, lr, self.outputs
             )
-
-            model_ref = self.model.module if self.is_distributed else self.model
-            head = getattr(model_ref, "head", None)
-            assignment_stats = getattr(head, "last_assignment_stats", None)
-            if assignment_stats:
+            if "num_fg" in self.outputs:
                 self.telemetry.record_simota_assignment(
-                    self.epoch + 1, telemetry_iter, assignment_stats
+                    self.epoch + 1, self.progress_in_iter + 1,
+                    self.outputs["num_fg_total"], num_gt=self.outputs["num_gt_total"]
                 )
-            self.telemetry.record_architecture_state(self.epoch + 1, telemetry_iter)
 
         # Explicit RAM reclamation
-        del inps, targets, outputs, loss
+        del inps, targets, valid_image_mask, outputs, loss
 
     def before_train(self):
         logger.info("args: {}".format(self.args))
@@ -332,8 +319,16 @@ class Trainer:
                 count = sum(p.numel() for n, p in model.named_parameters() if n.startswith(prefix))
                 logger.info("PARAMETER BUCKET prefix={} count={}", prefix, count)
 
-        # 2. Solver initialization
+        # 2. Solver initialization. Native and semantic optimizers are disjoint.
+        if not getattr(self.exp, 'allow_full_training', False):
+            raise RuntimeError('vNext.3 full training is preflight-blocked. Run verification suite '
+                               'and repair upstream YOLOX data collation before enabling it.')
+        if self.is_distributed:
+            raise NotImplementedError('PG-SMA semantic DDP gradient synchronization has not been '
+                                      'verified. Use -d 1 for integration tests.')
         self.optimizer = self.exp.get_optimizer(self.args.batch_size)
+        self.semantic_optimizer = torch.optim.AdamW(model.semantic_parameters(),
+            lr=float(self.exp.semantic_lr), weight_decay=0.0)
 
         # 3. Checkpoint resumption
         model = self.resume_train(model)
@@ -588,6 +583,11 @@ class Trainer:
             state_dict = ckpt["model"] if "model" in ckpt else ckpt
             model.load_state_dict(state_dict)
             self.optimizer.load_state_dict(ckpt["optimizer"])
+            if not ckpt.get('semantic_optimizer'):
+                raise RuntimeError('Cannot resume vNext.3 without semantic optimizer state')
+            if ckpt.get('pgsma_variant') != self.exp.pgsma_variant:
+                raise RuntimeError('Cannot resume with changed PG-SMA variant')
+            self.semantic_optimizer.load_state_dict(ckpt['semantic_optimizer'])
             self.best_ap = ckpt.get("best_ap", 0.0)
             if ckpt.get("scaler") is not None:
                 self.scaler.load_state_dict(ckpt["scaler"])
@@ -700,6 +700,9 @@ class Trainer:
                 "model": raw_model.state_dict(),  # Raw model matching optimizer states!
                 "ema_model": self.ema_model.ema.state_dict() if self.use_model_ema else None,
                 "optimizer": self.optimizer.state_dict(),
+                "semantic_optimizer": self.semantic_optimizer.state_dict(),
+                "semantic_step": int(raw_model.semantic.semantic_step.item()),
+                "pgsma_variant": self.exp.pgsma_variant,
                 "best_ap": self.best_ap,
                 "curr_ap": ap,
                 "scaler": self.scaler.state_dict(),

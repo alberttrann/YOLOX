@@ -1,0 +1,271 @@
+{
+  "experiment": "tdevnext_vnext3_pgsma_isolated",
+  "input_size": [
+    576,
+    1024
+  ],
+  "configured_num_classes": 9,
+  "configured_mosaic_prob": 0.5,
+  "configured_mixup_prob": 0.0,
+  "configured_allow_full_training": false,
+  "static": {
+    "train": {
+      "path": "D:\\YOLOX-3RD\\bdd100k\\bdd100k\\bdd100k\\images\\annotations\\tde_train_clean_coco.json",
+      "images": 59114,
+      "annotations": 1096033,
+      "categories": {
+        "1": "car",
+        "2": "bus",
+        "3": "truck",
+        "4": "person",
+        "5": "rider",
+        "6": "bike",
+        "7": "motor",
+        "8": "traffic light",
+        "9": "traffic sign"
+      },
+      "category_ids": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9
+      ],
+      "crowd": 0,
+      "invalid_ann": 0,
+      "outside_boxes": 0,
+      "under_4px_original": 1859,
+      "under_8px_original": 49730,
+      "max_non_crowd_annotations_per_image": 91,
+      "top_image_counts": [
+        [
+          40557,
+          91
+        ],
+        [
+          28131,
+          88
+        ],
+        [
+          52716,
+          85
+        ],
+        [
+          54254,
+          84
+        ],
+        [
+          6068,
+          80
+        ],
+        [
+          11109,
+          79
+        ]
+      ],
+      "mean_non_crowd_annotations_per_image": 18.541,
+      "sample_missing_image_files": [],
+      "issues": []
+    },
+    "clean_val": {
+      "path": "D:\\YOLOX-3RD\\bdd100k\\bdd100k\\bdd100k\\images\\annotations\\tde_val_clean_coco.json",
+      "images": 8480,
+      "annotations": 157822,
+      "categories": {
+        "1": "car",
+        "2": "bus",
+        "3": "truck",
+        "4": "person",
+        "5": "rider",
+        "6": "bike",
+        "7": "motor",
+        "8": "traffic light",
+        "9": "traffic sign"
+      },
+      "category_ids": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9
+      ],
+      "crowd": 0,
+      "invalid_ann": 0,
+      "outside_boxes": 0,
+      "under_4px_original": 261,
+      "under_8px_original": 7135,
+      "max_non_crowd_annotations_per_image": 66,
+      "top_image_counts": [
+        [
+          3117,
+          66
+        ],
+        [
+          991,
+          65
+        ],
+        [
+          1918,
+          65
+        ],
+        [
+          6068,
+          63
+        ],
+        [
+          3129,
+          61
+        ],
+        [
+          8366,
+          61
+        ]
+      ],
+      "mean_non_crowd_annotations_per_image": 18.6111,
+      "sample_missing_image_files": [],
+      "issues": []
+    },
+    "adverse_test": {
+      "path": "D:\\YOLOX-3RD\\bdd100k\\bdd100k\\bdd100k\\images\\annotations\\tde_test_adverse_coco.json",
+      "images": 12269,
+      "annotations": 218294,
+      "categories": {
+        "1": "car",
+        "2": "bus",
+        "3": "truck",
+        "4": "person",
+        "5": "rider",
+        "6": "bike",
+        "7": "motor",
+        "8": "traffic light",
+        "9": "traffic sign"
+      },
+      "category_ids": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9
+      ],
+      "crowd": 0,
+      "invalid_ann": 0,
+      "outside_boxes": 0,
+      "under_4px_original": 434,
+      "under_8px_original": 10115,
+      "max_non_crowd_annotations_per_image": 77,
+      "top_image_counts": [
+        [
+          10606,
+          77
+        ],
+        [
+          7953,
+          66
+        ],
+        [
+          6354,
+          62
+        ],
+        [
+          4539,
+          61
+        ],
+        [
+          10414,
+          60
+        ],
+        [
+          7670,
+          59
+        ]
+      ],
+      "mean_non_crowd_annotations_per_image": 17.7923,
+      "sample_missing_image_files": [],
+      "issues": []
+    }
+  },
+  "loader": {
+    "no_aug": {
+      "dataset_type": "COCODataset",
+      "contains_mosaic_wrapper": false,
+      "batch_shape": [
+        2,
+        3,
+        576,
+        1024
+      ],
+      "label_shape": [
+        2,
+        364,
+        5
+      ],
+      "valid_annotations": 52,
+      "per_image": [
+        {
+          "count": 35,
+          "min_width": 8.099993705749512,
+          "min_height": 8.099994659423828,
+          "under_4px": 0
+        },
+        {
+          "count": 17,
+          "min_width": 7.934696197509766,
+          "min_height": 7.93469762802124,
+          "under_4px": 0
+        }
+      ],
+      "out_of_canvas_boxes": 0,
+      "mosaic_flag": false
+    },
+    "mosaic_requested": {
+      "dataset_type": "COCODataset",
+      "contains_mosaic_wrapper": false,
+      "batch_shape": [
+        2,
+        3,
+        576,
+        1024
+      ],
+      "label_shape": [
+        2,
+        364,
+        5
+      ],
+      "valid_annotations": 44,
+      "per_image": [
+        {
+          "count": 27,
+          "min_width": 6.749995231628418,
+          "min_height": 5.399996757507324,
+          "under_4px": 0
+        },
+        {
+          "count": 17,
+          "min_width": 8.196050643920898,
+          "min_height": 6.147038459777832,
+          "under_4px": 0
+        }
+      ],
+      "out_of_canvas_boxes": 0,
+      "mosaic_flag": true
+    }
+  },
+  "blockers": [
+    "Mosaic configured but training loader is not using MosaicDetection; sampler flag alone is insufficient",
+    "Valid-content masks do not propagate from image/loader into native head"
+  ],
+  "warnings": [],
+  "status": "BLOCKED"
+}

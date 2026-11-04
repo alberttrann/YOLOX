@@ -1,0 +1,85 @@
+{
+  "device": "cuda",
+  "amp": true,
+  "torch_version": "2.0.1+cu118",
+  "scaler_api": "torch.cuda.amp.grad_scaler.GradScaler",
+  "real_batch": {
+    "image_shape": [
+      1,
+      4,
+      576,
+      1024
+    ],
+    "target_shape": [
+      1,
+      364,
+      5
+    ],
+    "gt": [
+      {
+        "count": 21,
+        "min_width": 10.299336433410645,
+        "min_height": 6.179601669311523,
+        "under_4px": 0
+      }
+    ],
+    "dataset_type": "MosaicDetection",
+    "mosaic_enabled": false,
+    "mosaic_probability": 0.5,
+    "mosaic_forced": false,
+    "image_sha256_24": "1abd116e389bbf51bbc357d4",
+    "labels_sha256_24": "590986c33c061537d79f41cf",
+    "valid_mask_ratio": 1.0,
+    "has_explicit_validity_mask": true
+  },
+  "checkpoint": {
+    "source": "weights/yolox_s.pth",
+    "subkey": "model",
+    "matched_tensors": 456,
+    "dark2_ratio": 1.0
+  },
+  "native_loss_control": 12.194568634033203,
+  "native_loss_with_semantic": 12.194568634033203,
+  "native_loss_absdiff": 0.0,
+  "native_assignments": {
+    "num_fg_total": 84,
+    "num_gt_total": 21,
+    "uncovered_gt": 0,
+    "core_positives": 21,
+    "candidate_edges": 252
+  },
+  "pos_per_level": {
+    "P3": 60,
+    "P4": 18,
+    "P5": 6
+  },
+  "teacher_P5_note": "P5 has matched positives",
+  "semantic_step": {
+    "prototype": 13.095521926879883,
+    "teacher": 0.00047818609164096415,
+    "candidate": 7.255078315734863,
+    "gate": 7.255078315734863,
+    "candidate_improvement": 0.0,
+    "reason": "success"
+  },
+  "native_grad_diff": {
+    "max_abs": 0.0,
+    "more_than_1e-5": [],
+    "count_over_1e-5": 0
+  },
+  "native_parameter_and_buffer_diff": {
+    "max_abs": 0.0,
+    "more_than_1e-5": [],
+    "count_over_1e-5": 0
+  },
+  "momentum_buffer_max_absdiff": 0.0,
+  "native_scaler_scale_control": 32768.0,
+  "native_scaler_scale_with_semantic": 32768.0,
+  "peak_gpu_allocated_bytes": 1545483264,
+  "limitations": [
+    "one real batch is not a full-dataset fidelity proof",
+    "no DDP (bundle is single-GPU only)",
+    "actual gradient parity is subject to CUDA deterministic tolerance"
+  ],
+  "status": "CHECKS_PASSED"
+}

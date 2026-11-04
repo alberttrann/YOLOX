@@ -1,0 +1,124 @@
+{
+  "step": 16,
+  "variant": "pgsma_simota",
+  "metrics": {
+    "native": {
+      "images": 16,
+      "image_ids": [
+        662,
+        852,
+        1286,
+        2191,
+        2737,
+        3324,
+        3402,
+        4247,
+        4474,
+        4619,
+        5035,
+        6541,
+        6579,
+        6755,
+        7200,
+        7436
+      ],
+      "detections": 1918,
+      "post_nms_recall_iou50_by_effective_min_side": {
+        "lt4": {
+          "matched": 0,
+          "total_gt": 4,
+          "recall_iou50": 0.0
+        },
+        "4to8": {
+          "matched": 13,
+          "total_gt": 34,
+          "recall_iou50": 0.38235294117647056
+        },
+        "8to16": {
+          "matched": 90,
+          "total_gt": 110,
+          "recall_iou50": 0.8181818181818182
+        },
+        "16to32": {
+          "matched": 100,
+          "total_gt": 114,
+          "recall_iou50": 0.8771929824561403
+        },
+        "ge32": {
+          "matched": 89,
+          "total_gt": 95,
+          "recall_iou50": 0.9368421052631579
+        }
+      },
+      "note": "Source-clean COCO image SUBSET only; per-min-side R@.5 is NOT COCO AR.",
+      "coco_metrics": {
+        "AP50_95": 0.24792553520402782,
+        "AP50": 0.4868483910580162,
+        "AP75": 0.20435119351439326,
+        "AR100": 0.36181351704070036,
+        "AP_small_COCO": 0.19257247071075453,
+        "AP_medium_COCO": 0.3524762165991113,
+        "AP_large_COCO": 0.46738569873880886
+      }
+    },
+    "pgsma": {
+      "images": 16,
+      "image_ids": [
+        662,
+        852,
+        1286,
+        2191,
+        2737,
+        3324,
+        3402,
+        4247,
+        4474,
+        4619,
+        5035,
+        6541,
+        6579,
+        6755,
+        7200,
+        7436
+      ],
+      "detections": 1850,
+      "post_nms_recall_iou50_by_effective_min_side": {
+        "lt4": {
+          "matched": 0,
+          "total_gt": 4,
+          "recall_iou50": 0.0
+        },
+        "4to8": {
+          "matched": 13,
+          "total_gt": 34,
+          "recall_iou50": 0.38235294117647056
+        },
+        "8to16": {
+          "matched": 89,
+          "total_gt": 110,
+          "recall_iou50": 0.8090909090909091
+        },
+        "16to32": {
+          "matched": 98,
+          "total_gt": 114,
+          "recall_iou50": 0.8596491228070176
+        },
+        "ge32": {
+          "matched": 89,
+          "total_gt": 95,
+          "recall_iou50": 0.9368421052631579
+        }
+      },
+      "note": "Source-clean COCO image SUBSET only; per-min-side R@.5 is NOT COCO AR.",
+      "coco_metrics": {
+        "AP50_95": 0.24819831121833008,
+        "AP50": 0.48696328990888,
+        "AP75": 0.20372727750210767,
+        "AR100": 0.36262095993655785,
+        "AP_small_COCO": 0.18988884254887523,
+        "AP_medium_COCO": 0.3537112337443613,
+        "AP_large_COCO": 0.4682171635652632
+      }
+    }
+  }
+}

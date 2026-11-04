@@ -1,0 +1,56 @@
+{
+  "variant": "memory_simota",
+  "steps_requested": 16,
+  "seed": 20261104,
+  "input_size": [
+    576,
+    1024
+  ],
+  "test_size": [
+    576,
+    1024
+  ],
+  "class_count": 9,
+  "native_lr": 0.0003125,
+  "semantic_lr": 0.001,
+  "checkpoint": {
+    "checkpoint": "audits\\pilot_b_simota\\pilot_last.pth",
+    "sha256": "802c254e11a59788b816a2b3f8ea1507e16f137ff4401b06d9e4d6fc25e53ff3",
+    "matched_tensors": 886,
+    "shape_mismatches": [],
+    "is_pilot_warmstart": true
+  },
+  "warmstart": true,
+  "native_recipe": "simota_per_positive",
+  "mosaic_enabled": true,
+  "mosaic_prob": 0.5,
+  "eval_images": 16,
+  "eval_indices": [
+    661,
+    851,
+    1285,
+    2190,
+    2736,
+    3323,
+    3401,
+    4246,
+    4473,
+    4618,
+    5034,
+    6540,
+    6578,
+    6754,
+    7199,
+    7435
+  ],
+  "clean_val_json_sha256": "bb78f2f5d0d9159eba5ee021fa89b2347429897a8b31c7cbd78cede846f5a164",
+  "limitations": [
+    "single GPU, single-process only",
+    "no full 80-epoch schedule",
+    "fixed training input shape",
+    "no full-trainer EMA",
+    "pilot COCO metrics use subset images",
+    "semantic utility uses source-feature perturbations",
+    "no adverse-set evaluation"
+  ]
+}

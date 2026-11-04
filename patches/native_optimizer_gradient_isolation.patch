@@ -1,0 +1,38 @@
+--- a/yolox/core/trainer.py
++++ b/yolox/core/trainer.py
+@@ -190,6 +190,11 @@
+             self.optimizer.zero_grad(set_to_none=True)
+             raise FloatingPointError("Non-finite forward loss; optimizer update forbidden")
+ 
++        # Semantic gradients belong to the semantic optimizer, whose step already
++        # completed above. Clear them before the native backward and telemetry.
++        # Native gradient clipping must NEVER include semantic parameters.
++        self.semantic_optimizer.zero_grad(set_to_none=True)
++
+         # 4. Backward pass
+         self.optimizer.zero_grad()
+         self.scaler.scale(loss).backward()
+@@ -201,7 +206,13 @@
+ 
+         # 6. Distinguish recoverable AMP LOSS-SCALE overflow from persistent
+         # FP32 backward failure. Never scrub or step with invalid gradients.
+-        named_grads = [(n, p.grad) for n, p in self.model.named_parameters() if p.grad is not None]
++        # Parameter ownership is defined by the native optimizer's param groups,
++        # not by model.parameters(): PG-SMA parameters are in the same module.
++        native_params = [p for group in self.optimizer.param_groups
++                         for p in group['params'] if p.requires_grad]
++        native_ids = {id(p) for p in native_params}
++        named_grads = [(n, p.grad) for n, p in self.model.named_parameters()
++                       if id(p) in native_ids and p.grad is not None]
+         invalid_names = [n for n, g in named_grads if not torch.isfinite(g).all().item()]
+         if invalid_names and not self.amp_training:
+             logger.error("FP32 backward invalid at epoch={} iter={}: {}",
+@@ -209,7 +220,7 @@
+             raise FloatingPointError("Persistent FP32 backward failure")
+         if not invalid_names:
+             grad_norm = torch.nn.utils.clip_grad_norm_(
+-                self.model.parameters(), max_norm=10.0, error_if_nonfinite=True
++                native_params, max_norm=10.0, error_if_nonfinite=True
+             )
+             if not torch.isfinite(grad_norm):
+                 raise FloatingPointError("Total gradient norm non-finite despite finite individual gradients")

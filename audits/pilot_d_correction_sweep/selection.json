@@ -1,0 +1,93 @@
+{
+  "selected": "native",
+  "rules": "AP and AR nonregression; COCO small/medium/large AP >= native-.005; effective-bin R@0.5 >= native-.005 for each bin with >=30 GTs; maximize dAP+.5*dAR+.1*dAP75",
+  "rankings": [
+    {
+      "key": "gated_0250",
+      "eligible": false,
+      "reasons": [
+        "AP50_95_regression"
+      ],
+      "objective_delta": 1.2942758305475865e-05
+    },
+    {
+      "key": "gated_0500",
+      "eligible": false,
+      "reasons": [
+        "AP50_95_regression",
+        "AR100_regression",
+        "4to8_R0p5_regression",
+        "16to32_R0p5_regression"
+      ],
+      "objective_delta": -0.0008914314833596976
+    },
+    {
+      "key": "gated_0750",
+      "eligible": false,
+      "reasons": [
+        "AP50_95_regression",
+        "AR100_regression",
+        "4to8_R0p5_regression",
+        "8to16_R0p5_regression",
+        "16to32_R0p5_regression"
+      ],
+      "objective_delta": -0.003390428368003756
+    },
+    {
+      "key": "gated_1000",
+      "eligible": false,
+      "reasons": [
+        "AP50_95_regression",
+        "AR100_regression",
+        "4to8_R0p5_regression",
+        "8to16_R0p5_regression",
+        "16to32_R0p5_regression"
+      ],
+      "objective_delta": -0.003915945559044687
+    },
+    {
+      "key": "ungated_0250",
+      "eligible": false,
+      "reasons": [
+        "AP50_95_regression"
+      ],
+      "objective_delta": -5.072675920800296e-06
+    },
+    {
+      "key": "ungated_0500",
+      "eligible": false,
+      "reasons": [
+        "AP50_95_regression",
+        "AR100_regression",
+        "4to8_R0p5_regression",
+        "16to32_R0p5_regression"
+      ],
+      "objective_delta": -0.000908601959768679
+    },
+    {
+      "key": "ungated_0750",
+      "eligible": false,
+      "reasons": [
+        "AP50_95_regression",
+        "AR100_regression",
+        "4to8_R0p5_regression",
+        "8to16_R0p5_regression",
+        "16to32_R0p5_regression"
+      ],
+      "objective_delta": -0.003390498097965056
+    },
+    {
+      "key": "ungated_1000",
+      "eligible": false,
+      "reasons": [
+        "AP50_95_regression",
+        "AR100_regression",
+        "4to8_R0p5_regression",
+        "8to16_R0p5_regression",
+        "16to32_R0p5_regression"
+      ],
+      "objective_delta": -0.003921993796610204
+    }
+  ],
+  "fallback_to_native": true
+}

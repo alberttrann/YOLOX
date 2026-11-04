@@ -1,0 +1,65 @@
+{
+  "step": 0,
+  "metrics": {
+    "native": {
+      "images": 16,
+      "image_ids": [
+        662,
+        852,
+        1286,
+        2191,
+        2737,
+        3324,
+        3402,
+        4247,
+        4474,
+        4619,
+        5035,
+        6541,
+        6579,
+        6755,
+        7200,
+        7436
+      ],
+      "detections": 3048,
+      "post_nms_recall_iou50_by_effective_min_side": {
+        "lt4": {
+          "matched": 0,
+          "total_gt": 4,
+          "recall_iou50": 0.0
+        },
+        "4to8": {
+          "matched": 2,
+          "total_gt": 34,
+          "recall_iou50": 0.058823529411764705
+        },
+        "8to16": {
+          "matched": 33,
+          "total_gt": 110,
+          "recall_iou50": 0.3
+        },
+        "16to32": {
+          "matched": 49,
+          "total_gt": 114,
+          "recall_iou50": 0.4298245614035088
+        },
+        "ge32": {
+          "matched": 65,
+          "total_gt": 95,
+          "recall_iou50": 0.6842105263157895
+        }
+      },
+      "note": "Source-clean COCO image SUBSET only; per-min-side R@.5 is NOT COCO AR.",
+      "coco_metrics": {
+        "AP50_95": 0.0622663873479027,
+        "AP50": 0.09583005175677888,
+        "AP75": 0.05429266144357289,
+        "AR100": 0.21453034262485482,
+        "AP_small_COCO": 0.0348423419896631,
+        "AP_medium_COCO": 0.07565435983834728,
+        "AP_large_COCO": 0.2833021272720994
+      }
+    }
+  },
+  "variant": "native_scpa"
+}

@@ -1,0 +1,168 @@
+{
+  "status": "CHECKS_PASSED",
+  "training_performed": false,
+  "checkpoint": {
+    "checkpoint": "audits\\pilot_b_simota\\pilot_last.pth",
+    "sha256": "802c254e11a59788b816a2b3f8ea1507e16f137ff4401b06d9e4d6fc25e53ff3",
+    "matched_tensors": 886,
+    "shape_mismatches": [],
+    "is_pilot_warmstart": true
+  },
+  "seed": 20261104,
+  "batches": 16,
+  "input_size": [
+    576,
+    1024
+  ],
+  "same_native_logits_max_abs_difference": 0.0,
+  "simota": {
+    "batches": 16,
+    "total_gt": 626,
+    "covered_gt": 619,
+    "total_positives": 3350,
+    "mean_positive_iou": 0.7263792009495977,
+    "fraction_positive_iou_lt_0p1": 0.0008955223880597015,
+    "fraction_positive_iou_lt_0p3": 0.011044776119402985,
+    "mean_positives_per_gt": 5.3514376996805115,
+    "core_positives": 0,
+    "levels": {
+      "P3": {
+        "positives": 2165,
+        "mean_positive_iou": 0.6754312017498061,
+        "fraction_iou_lt_0p1": 0.0013856812933025404
+      },
+      "P4": {
+        "positives": 1069,
+        "mean_positive_iou": 0.8136434421235986,
+        "fraction_iou_lt_0p1": 0.0
+      },
+      "P5": {
+        "positives": 116,
+        "mean_positive_iou": 0.8730764471251389,
+        "fraction_iou_lt_0p1": 0.0
+      }
+    },
+    "sizes": {
+      "lt4": {
+        "gt": 6,
+        "covered_gt": 6,
+        "coverage_fraction": 1.0,
+        "mean_positives_per_gt": 1.0,
+        "mean_positive_iou": 0.1557598866832753,
+        "fraction_iou_lt_0p1": 0.3333333333333333
+      },
+      "4to8": {
+        "gt": 69,
+        "covered_gt": 64,
+        "coverage_fraction": 0.927536231884058,
+        "mean_positives_per_gt": 2.1739130434782608,
+        "mean_positive_iou": 0.4986701086660226,
+        "fraction_iou_lt_0p1": 0.006666666666666667
+      },
+      "8to16": {
+        "gt": 224,
+        "covered_gt": 222,
+        "coverage_fraction": 0.9910714285714286,
+        "mean_positives_per_gt": 4.357142857142857,
+        "mean_positive_iou": 0.6420307739133961,
+        "fraction_iou_lt_0p1": 0.0
+      },
+      "16to32": {
+        "gt": 169,
+        "covered_gt": 169,
+        "coverage_fraction": 1.0,
+        "mean_positives_per_gt": 5.85207100591716,
+        "mean_positive_iou": 0.707293380123419,
+        "fraction_iou_lt_0p1": 0.0
+      },
+      "ge32": {
+        "gt": 158,
+        "covered_gt": 158,
+        "coverage_fraction": 1.0,
+        "mean_positives_per_gt": 7.7784810126582276,
+        "mean_positive_iou": 0.8393002750186827,
+        "fraction_iou_lt_0p1": 0.0
+      }
+    },
+    "coverage_fraction": 0.9888178913738019,
+    "uncovered_gt": 7
+  },
+  "scpa": {
+    "batches": 16,
+    "total_gt": 626,
+    "covered_gt": 626,
+    "total_positives": 2501,
+    "mean_positive_iou": 0.5842648383761729,
+    "fraction_positive_iou_lt_0p1": 0.06917233106757296,
+    "fraction_positive_iou_lt_0p3": 0.15913634546181527,
+    "mean_positives_per_gt": 3.9952076677316293,
+    "core_positives": 626,
+    "levels": {
+      "P3": {
+        "positives": 1892,
+        "mean_positive_iou": 0.5748762852545772,
+        "fraction_iou_lt_0p1": 0.05179704016913319
+      },
+      "P4": {
+        "positives": 511,
+        "mean_positive_iou": 0.6534470895965039,
+        "fraction_iou_lt_0p1": 0.08414872798434442
+      },
+      "P5": {
+        "positives": 98,
+        "mean_positive_iou": 0.4047855953780972,
+        "fraction_iou_lt_0p1": 0.32653061224489793
+      }
+    },
+    "sizes": {
+      "lt4": {
+        "gt": 6,
+        "covered_gt": 6,
+        "coverage_fraction": 1.0,
+        "mean_positives_per_gt": 4.0,
+        "mean_positive_iou": 0.08564894194326673,
+        "fraction_iou_lt_0p1": 0.6666666666666666
+      },
+      "4to8": {
+        "gt": 69,
+        "covered_gt": 69,
+        "coverage_fraction": 1.0,
+        "mean_positives_per_gt": 3.971014492753623,
+        "mean_positive_iou": 0.32190936067044723,
+        "fraction_iou_lt_0p1": 0.20437956204379562
+      },
+      "8to16": {
+        "gt": 224,
+        "covered_gt": 224,
+        "coverage_fraction": 1.0,
+        "mean_positives_per_gt": 3.9955357142857144,
+        "mean_positive_iou": 0.5402968556988287,
+        "fraction_iou_lt_0p1": 0.05921787709497207
+      },
+      "16to32": {
+        "gt": 169,
+        "covered_gt": 169,
+        "coverage_fraction": 1.0,
+        "mean_positives_per_gt": 4.0,
+        "mean_positive_iou": 0.6448528109030169,
+        "fraction_iou_lt_0p1": 0.004437869822485207
+      },
+      "ge32": {
+        "gt": 158,
+        "covered_gt": 158,
+        "coverage_fraction": 1.0,
+        "mean_positives_per_gt": 4.0,
+        "mean_positive_iou": 0.7144010407832463,
+        "fraction_iou_lt_0p1": 0.07120253164556962
+      }
+    },
+    "coverage_fraction": 1.0,
+    "uncovered_gt": 0
+  },
+  "limitations": [
+    "Predictions frozen at ONE trained native checkpoint",
+    "Metrics are assignment IoU and coverage, NOT detection AP/AR",
+    "Not a full-source annotation provenance audit",
+    "No training, gradient or optimizer updates"
+  ]
+}

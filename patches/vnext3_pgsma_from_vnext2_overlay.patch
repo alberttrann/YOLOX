@@ -1,0 +1,1651 @@
+diff --git a/docs/verification_protocol.md b/docs/verification_protocol.md
+new file mode 100644
+index 0000000..dc35b31
+--- /dev/null
++++ b/docs/verification_protocol.md
+@@ -0,0 +1,46 @@
++# Verification protocol and research acceptance — vNext.3 + PG-SMA
++
++## Structural acceptance
++
++| Gate | Test | Hard pass |
++|---|---|---|
++| 0.1 | Native disabled-semantic identity | Same raw box/obj/class outputs for same model/weights |
++| 0.2 | Native/semantic optimizer isolation | Identical native parameter update, BN buffers, optimizer momentum, assignments, and native EMA with/without semantic update |
++| 0.3 | Predictor activation | Nonzero candidate/teacher gradient to zero-init terminal; downstream hidden/gate gradients on subsequent steps |
++| 0.4 | Prototype scores | Permutation-invariant within class, finite normalized vectors, meaningful K=1/BG BCE |
++| 0.5 | Alignment and gate | Identity correction zero, |delta logit| <= budget, no test-time state change, per-image batch independence |
++| 0.6 | SCPA | Maximum cardinality on enumerated graph, one GT per anchor, protected core, no out-of-envelope forced match, explicit budget/ineligible reporting |
++| 0.7 | Data | No dropped labels after mosaic/transform/collate, crowd/ignore safety, correct GT pixel-size stratification, valid padding masks |
++| 0.8 | Dynamic inputs | Supported stride-aligned H/W; no grid-cache stale shape, no Python shape specialization in export graph |
++| 0.9 | AMP and resume | Independent native/semantic skip logic; teacher EMA after successful semantic steps; consistent raw/EMA checkpoints |
++
++## Experimental falsification (do not infer from unit tests)
++
++| Component | Compare against | Evidence required |
++|---|---|---|
++| SCPA | Native SimOTA under fixed loss | GT coverage and actual micro/medium/macro detection improve; training cost acceptable |
++| Per-GT loss reduction | SCPA + native loss reduction | More balanced size-gradient attribution and AP/AR, no noisy-micro overfitting |
++| SPI | Same native model with zero-gate | Extra micro evidence without sacrificing medium/large localization; memory/latency justified |
++| Tribrid global/context | Same model with branch off | Useful conditional context without masked small-object feature loss |
++| Prototypes | Native-only | Hard-negative/class discrimination and clean/shift AP, including K=1 |
++| Local prediction | Center-only and spatially shuffled neighbors | True context improves detection-grounded corrections |
++| JEPA auxiliary | No consistency loss | Better held-out perturbation/adverse detection, not merely lower cosine loss |
++| PG-SMA | Separately trained memory-only calibration | Improved class ranking with no scale-specific harms |
++| Gate | Ungated candidate | Helpful acceptance and harmful rejection; no perpetual shutoff |
++| Direct vs retraction | Same source-trained semantic foundation | Better AP/AR/false-positive and edge cost; not assumed by geometry |
++| IoU loss | Native YOLOX IoU | AP75, box geometry and micro/medium/macro gradient scaling |
++
++## Clean-only protocol
++
++Training gradients from clean labeled source and source-derived semantic perturbations only. Clean validation and held-out source perturbation families for iteration. Unseen adverse datasets (ACDC, DAWN, ExDark, BDD adverse) and UAV scenarios kept separate by taxonomy; use genuinely fresh evaluation for final claims. Previously inspected ACDC subsets are diagnostics, not unbiased hyperparameter-selection sets.
++
++## Nine-criterion scoring
++
++- AP50:95; AP50; AP75; AR100; AP/AR-small, medium and large.
++- Additional **input-pixel** micro bins and continuous AP/AR versus target width/area (COCO small alone is too coarse for UAV).
++- Native-only and corrected predictions at *every checkpoint*; per-scale positive count and unmatched GT reasons; pre-NMS candidate recall, post-NMS recall, score-versus-IoU correlation and false-positive counts.
++- Track 80-epoch trajectories, checkpoint/EMA/optimizer drift, gate acceptance, correction magnitude by level, prototype mode occupancy, class confusion and teacher representation drift.
++- Pre-register meaningful non-inferiority margins using paired intervals and multiple seeds. A 0.001 AP difference is not automatically evidence.
++- Target hardware: ONNX checker, ONNX-runtime parity, TensorRT compilation/profile/parity, P50/P95 latency, peak VRAM and full preprocess/inference/NMS timing. Runtime 4K cannot be guaranteed from FLOPs.
++
++**Hard rule:** A component failing to demonstrate task benefit against the correct ablation is not part of the final vNext.3 detector. Structural correctness, all-scale performance and transfer are separate gates; no component may inherit a claim from another's test result.
+diff --git a/docs/verification_results.md b/docs/verification_results.md
+new file mode 100644
+index 0000000..82c6809
+--- /dev/null
++++ b/docs/verification_results.md
+@@ -0,0 +1,36 @@
++# Verification results — local environment, 2026-11-03
++
++## Evidence actually obtained
++
++- Python 3.13 / PyTorch 2.10.0+cpu, no CUDA runtime available.
++- `python -m pytest -q tests` → **14 passed, 2 deprecation warnings** (warnings originate from archived `losses.py` using `torch.cuda.amp.autocast`).
++- `git apply --check patches/vnext3_pgsma_from_vnext2_overlay.patch` against an exact copy of the archived source overlay → **passed**.
++- `python tools/install_overlay.py --repo <pristine archived overlay> --check` → **passed**.
++- `python -m compileall -q overlay tools` → **passed** (before packaging; generated cache files omitted).
++
++### Tested code paths
++
++1. Exact maximum-cardinality core matching and known recoverable conflict; no double-owned anchor.
++2. Candidate-budget exhaustion and refusal to assign an out-of-envelope, geometrically unrepresentable GT.
++3. SCPA aligned-IoU sanity and empty-GT handling.
++4. PG-SMA identity at predictor init, correction bounds, finite outputs, native/memory/PG-SMA mode invocation.
++5. First semantic optimizer step and subsequent gate activation.
++6. Separate semantic gradients from native classification-feature/weight gradients.
++7. Individually checked objective-to-parameter gradient ownership.
++8. One-class foreground/background loss and prototype-mode permutation invariance.
++9. Per-image inference independence and half-input numerical finiteness.
++10. Native PAFPN/head full synthetic forward/backward, 2 distinct synthetic GT labels.
++11. Full native SGD optimizer update and native parameter/buffer parity with and without a simultaneous separate semantic update.
++12. SPI zero-gate exact identity and nonzero gate-opening gradient.
++13. Dynamic 64×96 / 96×64 / 128×128 synthetic shape checks, and small-map contextual attention.
++14. Full overlay compiles and matches the original archived patch base.
++
++## NOT tested / not claimed
++
++- Genuine upstream `yolo_head.py`: isolated tests use a compatible test double, not your actual installed head.
++- Complete data transform/MosaicDetection/collator correctness; ignored/crowd labels, variable aspect-bucket samples, valid-padding masks and oriented boxes.
++- Real pretrained checkpoint matching, actual BDD100K/ACDC/UAV AP, AR, score ranking, NMS, or 80-epoch stability.
++- CUDA/AMP, gradient scaler, DDP, resume with a real checkpoint, actual device memory, ONNX-runtime or TensorRT export/parity/latency.
++- All 9 scientific performance requirements remain **empirical acceptance gates**.
++
++**Full training is deliberately disabled in the new experiment configuration.**
+diff --git a/exps/default/tde_yolox_s_pgsma.py b/exps/default/tde_yolox_s_pgsma.py
+new file mode 100644
+index 0000000..6ec2dba
+--- /dev/null
++++ b/exps/default/tde_yolox_s_pgsma.py
+@@ -0,0 +1,130 @@
++"""Isolated vNext.3 experiment; inherits dataset paths from local vNext.2 exp.
++
++IMPORTANT: the vNext.2 data pipeline still uses fixed-capacity labels. Use
++`tools/audit_pgsma_integration.py` before any real-data run; this experiment
++fails early on dataset overflow where `get_dataset` can inspect counts.
++"""
++import os
++import json
++import torch
++from exps.default.tde_yolox_s import Exp as VNext2Exp
++
++
++class Exp(VNext2Exp):
++    def __init__(self):
++        super().__init__()
++        self.exp_name = 'tdevnext_vnext3_pgsma_isolated'
++        self.enable_ttt = False
++        self.enable_legacy_ttt = False
++        self.enable_memory = False
++        self.enable_memory_aux = False
++        self.enable_proto_aux = False
++        self.enable_intra_aux = False
++        self.enable_rec_aux = False
++        self.enable_afford_aux = False
++        self.enable_backbone_attention = False  # optional extras remain ablations
++        self.regression_loss_type = 'iou'  # OIoU is a separate ablation
++        self.use_baseline_assignments = False
++        self.pgsma_dim = 64
++        self.pgsma_modes = 4
++        self.pgsma_correction = 'direct'
++        self.pgsma_variant = 'pgsma'  # or 'memory' for a separately trained control
++        self.scpa = True
++        self.per_gt_normalization = False
++        self.semantic_lr = 0.001
++        # NO unverified long training should be started with this setting;
++        # run all preflight probes and data-pipeline overflow audit first.
++        self.allow_full_training = False
++
++    def get_model(self):
++        if 'model' in self.__dict__ and self.model is not None:
++            return self.model
++        from yolox.models.pgsma_head import PGSMAHead
++        from yolox.models.pgsma_model import PGSMAYOLOX
++        from yolox.models.yolo_pafpn import YOLOPAFPN
++        from yolox.models.tribrid_neck import C2f_Tribrid
++        from yolox.models.network_blocks import C2fA
++        from yolox.models.darknet import CSPDarknet
++        neck = YOLOPAFPN(self.depth,self.width,in_channels=[256,512,1024], act=self.act,
++            pretrained_compatible_dark2=True, ttt_residual_adapter=False)
++        # The archived YOLOPAFPN creates its own CSPDarknet; no duplicate backbone.
++        head = PGSMAHead(self.num_classes,self.width,loss_type=self.regression_loss_type,
++            assignment='scpa' if self.scpa else 'baseline',
++            per_gt_normalization=self.per_gt_normalization)
++        model = PGSMAYOLOX(neck,head,self.num_classes,self.width,self.pgsma_dim,
++                           self.pgsma_modes,self.pgsma_correction)
++        for block in model.modules():
++            if isinstance(block, C2f_Tribrid):
++                block.enable_global_context = self.enable_global_context
++                block.enable_dense_local = self.enable_dense_local
++            if isinstance(block, C2fA):
++                block.enable_attention = self.enable_backbone_attention
++                block.enable_dense_local = self.enable_dense_local
++        model.head.initialize_biases(1e-2)
++        model.set_inference_mode(self.pgsma_variant)
++        self.model = model
++        return model
++
++    def random_resize(self, data_loader, epoch, rank, is_distributed):
++        # Keep configured aspect ratio rather than silently switching square UAV
++        # inputs back to the inherited driving-specific rectangular presets.
++        import random
++        import torch.distributed as dist
++        device = 'cuda' if torch.cuda.is_available() else 'cpu'
++        shape = torch.zeros(2, device=device, dtype=torch.long)
++        if rank == 0:
++            factor = random.choice((0.875, 1.0, 1.125)) if (
++                self.multiscale_range > 0 and epoch < self.max_epoch-self.no_aug_epochs) else 1.0
++            h = max(32, round(self.input_size[0] * factor / 32) * 32)
++            w = max(32, round(self.input_size[1] * factor / 32) * 32)
++            shape[0]=h;shape[1]=w
++        if is_distributed: dist.broadcast(shape,src=0)
++        return int(shape[0]),int(shape[1])
++
++    def get_optimizer(self, batch_size):
++        if 'optimizer' in self.__dict__:
++            return self.optimizer
++        model = self.get_model()
++        lr = self.basic_lr_per_img * batch_size
++        decay=[]; no_decay=[]
++        for name, p in model.named_parameters():
++            if not p.requires_grad or name.startswith('head.pgsma_engine.'):
++                continue
++            if ('bias' in name or p.ndim <= 1 or 'norm' in name or 'gn.' in name):
++                no_decay.append(p)
++            else:
++                decay.append(p)
++        self.optimizer = torch.optim.SGD([
++            {'params':decay,'weight_decay':self.weight_decay},
++            {'params':no_decay,'weight_decay':0}],
++            lr=lr,momentum=self.momentum,nesterov=True)
++        return self.optimizer
++
++    def get_dataset(self, cache=False, cache_type='ram'):
++        from yolox.data import COCODataset, TrainTransform
++        # Conservative padded batching: bound raw annotations plus 4-image
++        # mosaic + optional mixup fifth source, rather than silently drop GTs.
++        # This is NOT ragged collation or heterogeneous aspect-bucket support.
++        max_count = 0
++        if os.path.isfile(self.train_ann):
++            with open(self.train_ann, encoding='utf8') as fd:
++                ann = json.load(fd)['annotations']
++            from collections import Counter
++            counts = Counter(a['image_id'] for a in ann if not a.get('iscrowd', 0))
++            max_count = max(counts.values(), default=0)
++        else:
++            raise FileNotFoundError('Training annotation JSON required for lossless-capacity audit: '
++                                    +str(self.train_ann))
++        multiplier = 5 if self.enable_mixup else 4
++        capacity = max(160, max_count * multiplier)
++        if capacity > 4096:
++            raise RuntimeError('Padded annotation capacity exceeds safety envelope: '+str(capacity)
++                               +'. Implement real ragged collation; do not truncate.')
++        self.annotation_capacity = capacity
++        dataset = COCODataset(
++            data_dir=self.data_dir, json_file=self.train_ann, name='',
++            img_size=self.input_size,
++            preproc=TrainTransform(max_labels=capacity, flip_prob=self.flip_prob,
++                                  hsv_prob=self.hsv_prob), cache=cache, cache_type=cache_type)
++        dataset.cache=cache; dataset.cache_type=cache_type
++        return dataset
+diff --git a/tools/audit_pgsma_gradient_routes.py b/tools/audit_pgsma_gradient_routes.py
+new file mode 100644
+index 0000000..be87ade
+--- /dev/null
++++ b/tools/audit_pgsma_gradient_routes.py
+@@ -0,0 +1,52 @@
++"""Real-checkout semantic gradient-route probe: no full detector training.
++
++Reports level-by-level predictor candidate/JEPA gradient magnitudes/cosines.
++Run with the *actual* upstream YOLOX source (not the bundled test double).
++"""
++import argparse
++import json
++import torch
++
++
++def main():
++    p=argparse.ArgumentParser()
++    p.add_argument('--device',default='cpu')
++    p.add_argument('--height',type=int,default=96)
++    p.add_argument('--width',type=int,default=128)
++    p.add_argument('--batch',type=int,default=2)
++    args=p.parse_args()
++    if args.height%32 or args.width%32:
++        raise ValueError('Height and width must be divisible by 32')
++    from exps.default.tde_yolox_s_pgsma import Exp
++    exp=Exp();model=exp.get_model().to(args.device).train()
++    torch.manual_seed(71)
++    images=torch.randn(args.batch,3,args.height,args.width,device=args.device)
++    labels=torch.zeros(args.batch,8,5,device=args.device)
++    for b in range(args.batch):
++        labels[b,0]=torch.tensor([b%exp.num_classes,args.width*.5,
++                                   args.height*.5,16,12],device=args.device)
++    native=model(images,labels)
++    sem=model.semantic_losses(seed=3001)
++    result={'native_loss':float(native['total_loss'].detach()),
++            'semantic_losses':{k:float(v.detach()) for k,v in sem.items()},
++            'levels':{}}
++    for i,predictor in enumerate(model.semantic.predictors):
++        params=list(predictor.parameters())
++        grads={}
++        for name in ('teacher','candidate'):
++            raw=torch.autograd.grad(sem[name],params,retain_graph=True,allow_unused=True)
++            grads[name]=[torch.zeros_like(p) if g is None else g.detach() for p,g in zip(params,raw)]
++        c=grads['candidate'];j=grads['teacher']
++        dot=sum((x*y).sum() for x,y in zip(c,j)).item()
++        cn=sum(x.square().sum() for x in c).sqrt().item()
++        jn=sum(x.square().sum() for x in j).sqrt().item()
++        result['levels'][f'P{i+3}']={'candidate_grad_norm':cn,
++            'teacher_grad_norm':jn,'gradient_cosine':dot/(cn*jn+1e-16),
++            'terminal_candidate_grad_norm':c[-2].norm().item()}
++    print(json.dumps(result,indent=2))
++    if not all(torch.isfinite(v) for v in sem.values()):
++        raise FloatingPointError('Nonfinite semantic objective')
++    if not any(row['terminal_candidate_grad_norm']>1e-12 for row in result['levels'].values()):
++        raise RuntimeError('No useful candidate gradient to any predictor terminal layer')
++
++if __name__=='__main__':main()
+diff --git a/tools/audit_pgsma_integration.py b/tools/audit_pgsma_integration.py
+new file mode 100644
+index 0000000..aeb2554
+--- /dev/null
++++ b/tools/audit_pgsma_integration.py
+@@ -0,0 +1,82 @@
++"""Run INSIDE the user's complete YOLOX checkout after applying overlay.
++
++No 80-epoch training. Exercises genuine upstream head/data dependencies and
++checks native identity, semantic onset, one training step, dynamic shapes.
++"""
++import argparse
++import copy
++import json
++import os
++import sys
++import torch
++
++
++def audit(checkpoint=None, device='cpu'):
++    from exps.default.tde_yolox_s_pgsma import Exp
++    e=Exp();model=e.get_model().to(device)
++    model.head.inference_semantic_mode='pgsma'
++    results={'device':device,'class_count':model.num_classes,
++             'registered_params':sum(p.numel() for p in model.parameters()),
++             'native_params':sum(p.numel() for p in model.native_parameters()),
++             'semantic_params':sum(p.numel() for p in model.semantic_parameters())}
++    if checkpoint:
++        ckpt=torch.load(checkpoint,map_location='cpu',weights_only=False)
++        source=ckpt.get('model',ckpt)
++        target=model.state_dict()
++        matched={k:v for k,v in source.items() if k in target and target[k].shape==v.shape}
++        # Baseline COCO checkpoint heads differ in class count. Print coverage by prefix.
++        model.load_state_dict(matched, strict=False)
++        results['checkpoint_coverage']={
++            prefix:{'matched':sum(k.startswith(prefix) for k in matched),
++                    'expected':sum(k.startswith(prefix) for k in target)}
++            for prefix in ('backbone.backbone.stem','backbone.backbone.dark2',
++                           'backbone.backbone.dark3','backbone.backbone.dark4',
++                           'backbone.backbone.dark5','backbone.C3_',
++                           'head.cls_convs','head.reg_convs')}
++        if results['checkpoint_coverage']['backbone.backbone.dark2']['matched']==0:
++            raise RuntimeError('No pretrained dark2 weights matched. Check checkpoint mapping.')
++    assert not any('mask_token' in k or 'memory_banks' in k for k in model.state_dict())
++    torch.manual_seed(15)
++    model.train()
++    x=torch.randn(2,3,64,96,device=device)
++    y=torch.zeros(2,8,5,device=device)
++    y[0,0]=torch.tensor([0,20,20,12,10],device=device)
++    y[1,0]=torch.tensor([min(1,e.num_classes-1),48,30,10,12],device=device)
++    native=model(x,y)
++    results['native_loss']=float(native['total_loss'].detach())
++    results['coverage']={k:int(native[k]) for k in ('num_fg_total','num_gt_total',
++                                                   'uncovered_gt','core_positives')}
++    assert results['coverage']['uncovered_gt']==0,results
++    assert torch.isfinite(native['total_loss'])
++    sem=model.semantic_losses(seed=101)
++    results['semantic_losses']={k:float(v.detach()) for k,v in sem.items()}
++    assert all(torch.isfinite(v) for v in sem.values())
++    (sem['prototype']+sem['candidate']+sem['gate']+sem['teacher']).backward()
++    assert all(p.grad is None for p in model.native_parameters()),'Semantic touched native gradients'
++    model.zero_grad(set_to_none=True)
++    native['total_loss'].backward()
++    assert all(p.grad is None for p in model.semantic_parameters()),'Native touched semantic gradients'
++    assert any(p.grad is not None for p in model.native_parameters())
++    model.eval(); shapes=((64,96),(96,64),(128,128))
++    for height,width in shapes:
++        x=torch.randn(1,3,height,width,device=device)
++        with torch.no_grad():
++            model.set_inference_mode('native');n=model(x)
++            model.set_inference_mode('pgsma');p=model(x)
++        assert n.shape==p.shape and torch.isfinite(p).all()
++        if int(model.semantic.semantic_step)==0:
++            assert (n-p).abs().max()<1e-3, 'Initial PG-SMA not an identity'
++        results.setdefault('shape_checks',[]).append([height,width,list(p.shape)])
++    # A real optimizer-state equivalence test is included in the isolated
++    # synthetic suite. Repeat on CUDA + AMP on the exact target checkout.
++    results['status']='synthetic-upstream-preflight-pass'
++    return results
++
++
++if __name__=='__main__':
++    p=argparse.ArgumentParser()
++    p.add_argument('--checkpoint',default=None)
++    p.add_argument('--device',default='cpu')
++    args=p.parse_args()
++    result=audit(args.checkpoint,args.device)
++    print(json.dumps(result,indent=2))
+diff --git a/tools/export_pgsma_onnx.py b/tools/export_pgsma_onnx.py
+new file mode 100644
+index 0000000..d2fb39b
+--- /dev/null
++++ b/tools/export_pgsma_onnx.py
+@@ -0,0 +1,38 @@
++"""Optional real-repo ONNX export probe (requires ONNX and full YOLOX).
++
++Raw output parity probe only. TRT inference, NMS and real edge benchmarking
++are separate mandatory user-hardware gates; no latency claims here.
++"""
++import argparse
++import torch
++
++
++def main():
++    p=argparse.ArgumentParser()
++    p.add_argument('--mode',choices=['pgsma','native','memory'],default='pgsma')
++    p.add_argument('--output',default='vnext3_pgsma.onnx')
++    p.add_argument('--height',type=int,default=576)
++    p.add_argument('--width',type=int,default=1024)
++    p.add_argument('--checkpoint',required=True)
++    args=p.parse_args()
++    if args.height%32 or args.width%32:
++        raise ValueError('Input dimensions must be multiples of 32')
++    try:
++        import onnx
++    except ImportError as exc:
++        raise RuntimeError('Install ONNX first; export cannot be verified here') from exc
++    from exps.default.tde_yolox_s_pgsma import Exp
++    exp=Exp();model=exp.get_model()
++    ckpt=torch.load(args.checkpoint,map_location='cpu',weights_only=False)
++    model.load_state_dict(ckpt['ema_model'] if ckpt.get('ema_model') else ckpt['model'],strict=True)
++    model.eval();model.set_inference_mode(args.mode)
++    inp=torch.randn(1,3,args.height,args.width)
++    with torch.no_grad(): reference=model(inp)
++    torch.onnx.export(model,inp,args.output,input_names=['images'],
++       output_names=['detections'],dynamic_axes={'images':{0:'batch',2:'height',3:'width'},
++                'detections':{0:'batch',1:'anchors'}},opset_version=17)
++    onnx.checker.check_model(onnx.load(args.output))
++    print('ONNX checker passed. Native PyTorch output:',tuple(reference.shape))
++    print('NOT YET VERIFIED: ONNX runtime parity, TensorRT build, dynamic profiles, NMS, latency.')
++
++if __name__=='__main__': main()
+diff --git a/tools/install_overlay.py b/tools/install_overlay.py
+new file mode 100644
+index 0000000..eb896cf
+--- /dev/null
++++ b/tools/install_overlay.py
+@@ -0,0 +1,70 @@
++"""Conservative vNext.3 installer. Defaults to dry-run; refuses conflicts.
++
++Use `--check` before `--apply`. Backups of existing files are created on
++explicit apply, and files different from the archived base are never overwritten.
++"""
++import argparse
++import hashlib
++import json
++import shutil
++from datetime import datetime
++from pathlib import Path
++
++
++def sha256(path):
++    return hashlib.sha256(path.read_bytes()).hexdigest()
++
++
++def main():
++    cli=argparse.ArgumentParser()
++    cli.add_argument('--repo',required=True,type=Path)
++    mode=cli.add_mutually_exclusive_group(required=True)
++    mode.add_argument('--check',action='store_true')
++    mode.add_argument('--apply',action='store_true')
++    args=cli.parse_args()
++    bundle=Path(__file__).resolve().parents[1]
++    source=bundle/'overlay'
++    manifest=json.loads((bundle/'manifest.json').read_text())
++    repo=args.repo.resolve()
++    if not repo.is_dir() or not (repo/'yolox/models/engram_head.py').is_file():
++        raise SystemExit('The target must be an existing full YOLOX/vNext.2 checkout')
++    changes=[]; conflicts=[]
++    for f in sorted(source.rglob('*.py')):
++        relative=f.relative_to(source)
++        dest=repo/relative
++        prior=manifest['archived_sha256'].get(str(relative).replace('\\','/'))
++        if dest.exists():
++            digest=sha256(dest)
++            if digest==sha256(f):
++                changes.append((f,dest,'already-installed'))
++            elif prior and digest==prior:
++                changes.append((f,dest,'replace-archived'))
++            else:
++                conflicts.append(str(relative))
++        else:
++            if prior:
++                conflicts.append(str(relative)+' (archived baseline expected but file missing)')
++            else:
++                changes.append((f,dest,'new'))
++    for _,dst,operation in changes:
++        print(f'{operation:18s} {dst.relative_to(repo)}')
++    if conflicts:
++        print('\nCONFLICTS. NOT overwriting user hotfixes:')
++        for item in conflicts: print('  ',item)
++        raise SystemExit(2)
++    if args.apply:
++        backup=repo/('vnext3_pgsma_backup_'+datetime.now().strftime('%Y%m%d_%H%M%S'))
++        for src,dst,operation in changes:
++            if operation=='already-installed':continue
++            if operation=='replace-archived':
++                saved=backup/dst.relative_to(repo)
++                saved.parent.mkdir(parents=True,exist_ok=True)
++                shutil.copy2(dst,saved)
++            dst.parent.mkdir(parents=True,exist_ok=True)
++            shutil.copy2(src,dst)
++        print('\nInstallation complete. Backup directory:',backup)
++        print('Full training remains OFF until real checkout preflight and data audit pass.')
++    else:
++        print('\nDry run only. No files changed.')
++
++if __name__=='__main__':main()
+diff --git a/yolox/core/pgsma_step.py b/yolox/core/pgsma_step.py
+new file mode 100644
+index 0000000..22220bb
+--- /dev/null
++++ b/yolox/core/pgsma_step.py
+@@ -0,0 +1,70 @@
++"""Separate FP32 semantic optimizer step; does not touch native optimizer/state.
++
++`model` has completed one native forward and cached a *detached* feature snapshot.
++Run this BEFORE updating the native parameters so its native counterfactual uses
++consistent pre-update classifier weights.
++"""
++import torch
++
++
++def semantic_optimizer_step(model, optimizer, seed, correction_mode='pgsma',
++                            max_grad_norm=10.0, protect_candidate=True):
++    optimizer.zero_grad(set_to_none=True)
++    losses = model.semantic_losses(seed=seed, correction_mode=correction_mode)
++    total = losses['prototype'] + losses['candidate'] + losses['gate']
++    if not torch.isfinite(total).all():
++        optimizer.zero_grad(set_to_none=True)
++        return False, {'reason': 'nonfinite-semantic-main'}
++    # Only the candidate objective updates the predictors within `total`.
++    # Record that gradient before adding the teacher objective.
++    total.backward(retain_graph=bool(protect_candidate))
++    predictors = list(model.semantic.predictors.parameters())
++    main_grad = {id(p):p.grad.detach().clone() if p.grad is not None else None
++                 for p in predictors}
++    if protect_candidate:
++        teacher = losses['teacher']
++        if not torch.isfinite(teacher):
++            optimizer.zero_grad(set_to_none=True)
++            return False, {'reason': 'nonfinite-semantic-teacher'}
++        teacher.backward()
++        # Project teacher gradients against candidate gradients across the
++        # entire predictor parameter group (not independently per tensor).
++        dot = teacher.new_zeros(()); main_sq = teacher.new_zeros(())
++        j_sq = teacher.new_zeros(())
++        for p in predictors:
++            m = main_grad[id(p)]
++            if m is None:
++                continue
++            j = p.grad - m
++            dot = dot + (m*j).sum()
++            main_sq = main_sq + m.square().sum()
++            j_sq = j_sq + j.square().sum()
++        # Objective priority: teacher update cannot oppose candidate to first
++        # order, and cannot exceed candidate grad norm (unless main == zero).
++        if main_sq.item() > 1e-20:
++            coefficient = torch.minimum(dot / main_sq.clamp(min=1e-20), dot.new_zeros(()))
++            j_projected_sq = (j_sq - 2*coefficient*dot + coefficient.square()*main_sq).clamp(min=0)
++            scale = (main_sq.sqrt() / j_projected_sq.sqrt().clamp(min=1e-12)).clamp(max=1)
++            for p in predictors:
++                m = main_grad[id(p)]
++                if m is None: continue
++                j = p.grad - m
++                p.grad = m + (j - coefficient*m)*scale
++        else:
++            # No meaningful candidate gradient: don't spend predictor
++            # capacity exclusively chasing a potentially weak proxy.
++            for p in predictors:
++                p.grad = main_grad[id(p)]
++    else:
++        losses['teacher'].backward()
++    params = [p for p in model.semantic.parameters() if p.requires_grad]
++    if any(p.grad is not None and not torch.isfinite(p.grad).all() for p in params):
++        optimizer.zero_grad(set_to_none=True)
++        return False, {'reason': 'nonfinite-semantic-gradient'}
++    torch.nn.utils.clip_grad_norm_(params, max_norm=max_grad_norm, error_if_nonfinite=True)
++    optimizer.step()
++    model.semantic.update_teacher()
++    model.semantic.semantic_step.add_(1)
++    metrics = {k:float(v.detach().item()) for k,v in losses.items()}
++    metrics['reason']='success'
++    return True, metrics
+diff --git a/yolox/core/trainer.py b/yolox/core/trainer.py
+index 913b099..32189ae 100644
+--- a/yolox/core/trainer.py
++++ b/yolox/core/trainer.py
+@@ -151,6 +151,23 @@ class Trainer:
+ 
+         loss = outputs["total_loss"]
+ 
++        # Semantic objective uses the same native feature and weight snapshot.
++        # It has an independent optimizer, FP32 backward, gradient clipping and
++        # nonfinite step gate; semantic failure cannot skip the native update.
++        model_ref = self.model.module if self.is_distributed else self.model
++        from .pgsma_step import semantic_optimizer_step
++        if torch.isfinite(outputs["total_loss"]).all() and self.exp.pgsma_variant != 'native':
++            with torch.cuda.amp.autocast(enabled=False):
++                semantic_success, semantic_metrics = semantic_optimizer_step(
++                    model_ref, self.semantic_optimizer,
++                    seed=1000003 * (self.progress_in_iter + 1) + 17,
++                    correction_mode=self.exp.pgsma_variant)
++            if not semantic_success:
++                logger.warning("PG-SMA independent optimizer skip: {}", semantic_metrics)
++            for k,v in semantic_metrics.items():
++                if isinstance(v,(float,int)):
++                    outputs['pg_'+k] = outputs['total_loss'].new_tensor(v)
++
+         # 3. Numerical Stability Guard with Component Diagnostics and VRAM Purge
+         if torch.isnan(loss) or torch.isinf(loss):
+             logger.error(
+@@ -235,6 +252,10 @@ class Trainer:
+         lr = self.lr_scheduler.update_lr(self.progress_in_iter + 1)
+         for param_group in self.optimizer.param_groups:
+             param_group["lr"] = lr
++        base_lr = self.exp.basic_lr_per_img * self.args.batch_size
++        semantic_factor = lr / max(base_lr, 1e-12)
++        for param_group in self.semantic_optimizer.param_groups:
++            param_group['lr'] = self.exp.semantic_lr * semantic_factor
+ 
+         iter_end_time = time.time()
+ 
+@@ -283,8 +304,16 @@ class Trainer:
+                 count = sum(p.numel() for n, p in model.named_parameters() if n.startswith(prefix))
+                 logger.info("PARAMETER BUCKET prefix={} count={}", prefix, count)
+ 
+-        # 2. Solver initialization
++        # 2. Solver initialization. Native and semantic optimizers are disjoint.
++        if not getattr(self.exp, 'allow_full_training', False):
++            raise RuntimeError('vNext.3 full training is preflight-blocked. Run verification suite '
++                               'and repair upstream YOLOX data collation before enabling it.')
++        if self.is_distributed:
++            raise NotImplementedError('PG-SMA semantic DDP gradient synchronization has not been '
++                                      'verified. Use -d 1 for integration tests.')
+         self.optimizer = self.exp.get_optimizer(self.args.batch_size)
++        self.semantic_optimizer = torch.optim.AdamW(model.semantic_parameters(),
++            lr=float(self.exp.semantic_lr), weight_decay=0.0)
+ 
+         # 3. Checkpoint resumption
+         model = self.resume_train(model)
+@@ -539,6 +568,11 @@ class Trainer:
+             state_dict = ckpt["model"] if "model" in ckpt else ckpt
+             model.load_state_dict(state_dict)
+             self.optimizer.load_state_dict(ckpt["optimizer"])
++            if not ckpt.get('semantic_optimizer'):
++                raise RuntimeError('Cannot resume vNext.3 without semantic optimizer state')
++            if ckpt.get('pgsma_variant') != self.exp.pgsma_variant:
++                raise RuntimeError('Cannot resume with changed PG-SMA variant')
++            self.semantic_optimizer.load_state_dict(ckpt['semantic_optimizer'])
+             self.best_ap = ckpt.get("best_ap", 0.0)
+             if ckpt.get("scaler") is not None:
+                 self.scaler.load_state_dict(ckpt["scaler"])
+@@ -651,6 +685,9 @@ class Trainer:
+                 "model": raw_model.state_dict(),  # Raw model matching optimizer states!
+                 "ema_model": self.ema_model.ema.state_dict() if self.use_model_ema else None,
+                 "optimizer": self.optimizer.state_dict(),
++                "semantic_optimizer": self.semantic_optimizer.state_dict(),
++                "semantic_step": int(raw_model.semantic.semantic_step.item()),
++                "pgsma_variant": self.exp.pgsma_variant,
+                 "best_ap": self.best_ap,
+                 "curr_ap": ap,
+                 "scaler": self.scaler.state_dict(),
+diff --git a/yolox/models/darknet.py b/yolox/models/darknet.py
+index c72c045..1e528c1 100644
+--- a/yolox/models/darknet.py
++++ b/yolox/models/darknet.py
+@@ -16,7 +16,6 @@ from .network_blocks import (
+     ResLayer,
+     SPPBottleneck,
+ )
+-from .ttt_modules import TTTAdaptiveStage
+ 
+ 
+ class Darknet(nn.Module):
+@@ -148,14 +147,8 @@ class CSPDarknet(nn.Module):
+             ),
+         )
+ 
+-        self.dark2 = TTTAdaptiveStage(
+-            dark2_base,
+-            in_channels=base_channels * 2,
+-            init_ttt_lr=ttt_lr,
+-            noise_std=ttt_noise_std,
+-            mask_ratio=ttt_mask_ratio,
+-            residual_adapter=ttt_residual_adapter,
+-        )
++        # vNext.3: native BN-compatible dark2, without a registered TTT stage.
++        self.dark2 = dark2_base
+ 
+         # 2. Stage 2 (dark3, Stride 8): Standard BatchNorm2d CSP Layer
+         self.dark3 = nn.Sequential(
+@@ -204,39 +197,8 @@ class CSPDarknet(nn.Module):
+         x = self.stem(x)
+         outputs["stem"] = x
+ 
+-        # New forward, clear reconstruction loss ONCE before the adapted/static split.
+-        # Never clear inside dark2(run_ttt=False): the static subbatch comes second.
+-        self.dark2.current_rec_loss = x.new_zeros(())
+-
+-        # Step 1: Full-batch native dark2 forward ONCE (preserves normal BN
+-        # statistics), then optional feature-space TTT on a subset of its output.
+-        if getattr(self.dark2, 'residual_adapter', False):
+-            native = self.dark2.backbone_stage(x)
+-            if not self.training:
+-                x = self.dark2.forward_from_features(native, run_ttt=(ttt_prob is None or ttt_prob > 0))
+-            else:
+-                prob = ttt_prob if ttt_prob is not None else 0.0
+-                b = native.shape[0]
+-                if prob <= 0:
+-                    x = native
+-                elif b == 1:
+-                    x = self.dark2.forward_from_features(native, run_ttt=True)
+-                else:
+-                    b_meta = max(1, min(b, int(round(b * prob))))
+-                    x_meta = self.dark2.forward_from_features(native[:b_meta], run_ttt=True)
+-                    x = torch.cat((x_meta, native[b_meta:]), dim=0) if b_meta < b else x_meta
+-        elif not self.training:
+-            x = self.dark2(x, run_ttt=(ttt_prob is None or ttt_prob > 0.0))
+-        else:
+-            prob = ttt_prob if ttt_prob is not None else 0.0
+-            b = x.shape[0]
+-            if prob <= 0.0 or b <= 1:
+-                x = self.dark2(x, run_ttt=(prob > 0.5) if b == 1 else False)
+-            else:
+-                b_meta = max(1, min(b - 1, int(round(b * prob))))
+-                x_meta = self.dark2(x[:b_meta], run_ttt=True)
+-                x_static = self.dark2(x[b_meta:], run_ttt=False)
+-                x = torch.cat([x_meta, x_static], dim=0)
++        # One native dark2 forward; no test-time reconstruction.
++        x = self.dark2(x)
+ 
+         outputs["dark2"] = x  # Expose dark2 for the SPI Highway
+ 
+diff --git a/yolox/models/pgsma.py b/yolox/models/pgsma.py
+new file mode 100644
+index 0000000..ebcec72
+--- /dev/null
++++ b/yolox/models/pgsma.py
+@@ -0,0 +1,277 @@
++"""Prototype-Grounded Semantic Manifold Alignment for YOLOX classification towers.
++
++No test-time state mutation or autograd. Training losses are *semantic-only*;
++caller MUST use a separate optimizer and detached native features, and validate
++full native optimizer-step parity. Exact identity at initialized predictor output.
++"""
++from __future__ import annotations
++
++import copy
++import math
++from contextlib import nullcontext
++import torch
++from torch import nn
++from torch.nn import functional as F
++
++
++def _norm(x, dim=1):
++    # Unlike normalize(x,eps), zero input is explicitly invalid and will be
++    # suppressed in the correction gate instead of posing as a sphere point.
++    magnitude = torch.linalg.vector_norm(x.float(), dim=dim, keepdim=True)
++    return x.float() / magnitude.clamp(min=1e-6), magnitude > 1e-6
++
++
++class LocalPredictor(nn.Module):
++    def __init__(self, d):
++        super().__init__()
++        self.dw = nn.Conv2d(d, d, 3, padding=1, groups=d)
++        self.mix = nn.Conv2d(d, d, 1)
++        self.out = nn.Conv2d(d, d, 1)
++        nn.init.zeros_(self.out.weight)
++        nn.init.zeros_(self.out.bias)
++
++    def forward(self, z):
++        return self.out(F.silu(self.mix(F.silu(self.dw(z)))))
++
++
++class PGSMA(nn.Module):
++    """Class-conditional semantic score differences, not a replacement detector.
++
++    Inputs at the AFTER-classification-tower interface are `[B,C,H,W]`.
++    `forward_levels` returns corrected *raw* logits, unchanged objectness and
++    regression being the responsibility of the caller. All reductions and
++    prototype similarities use FP32; no `[N,K,M,D]` broadcast is allocated.
++    """
++    def __init__(self, classes, channels=128, dim=64, modes=4, levels=3,
++                 logit_budget=2.0, correction='direct'):
++        super().__init__()
++        if classes < 1 or dim < 2 or modes < 1 or not (0 < logit_budget < 20):
++            raise ValueError('Invalid semantic dimensions or logit budget')
++        if correction not in ('direct', 'retraction'):
++            raise ValueError('correction must be direct or retraction')
++        self.classes = int(classes)
++        self.dim = int(dim)
++        self.modes = int(modes)
++        self.levels = int(levels)
++        self.budget = float(logit_budget)
++        self.correction = correction
++        self.projectors = nn.ModuleList([nn.Conv2d(channels, dim, 1) for _ in range(levels)])
++        self.teacher_projectors = copy.deepcopy(self.projectors)
++        for p in self.teacher_projectors.parameters(): p.requires_grad_(False)
++        self.predictors = nn.ModuleList([LocalPredictor(dim) for _ in range(levels)])
++        # Fixed uniform component measures. Learned occupancy is a separate ablation.
++        self.prototypes = nn.Parameter(F.normalize(torch.randn(classes, modes, dim), dim=-1))
++        self.log_concentration = nn.Parameter(torch.tensor(math.log(math.expm1(4.0))))
++        self.log_gain = nn.Parameter(torch.zeros(levels))
++        # Gate sees native cls, obj, prototype logits and movement evidence.
++        self.gates = nn.ModuleList([
++            nn.Sequential(nn.Conv2d(classes * 3 + 1, 16, 1), nn.SiLU(), nn.Conv2d(16, 1, 1))
++            for _ in range(levels)
++        ])
++        for gate in self.gates:
++            nn.init.zeros_(gate[-1].weight)
++            nn.init.zeros_(gate[-1].bias)  # sigmoid(0) = 0.5, NOT closed
++        # Separate, trainable scalar for a *genuine* memory-only ablation.
++        self.memory_gain = nn.Parameter(torch.zeros(levels))
++        self.register_buffer('semantic_step', torch.tensor(0, dtype=torch.long))
++
++    @property
++    def concentration(self):
++        return F.softplus(self.log_concentration.float()).clamp(min=1e-3, max=30.0)
++
++    @torch.no_grad()
++    def update_teacher(self, decay=0.99):
++        for ema, src in zip(self.teacher_projectors.parameters(), self.projectors.parameters()):
++            ema.lerp_(src, 1.0 - float(decay))
++        for ema, src in zip(self.teacher_projectors.buffers(), self.projectors.buffers()):
++            ema.copy_(src)
++
++    def _prototype_scores(self, z, frozen=False):
++        p = self.prototypes.detach() if frozen else self.prototypes
++        p = F.normalize(p.float(), dim=-1).reshape(-1, self.dim, 1, 1)
++        # conv2d [B,K*M,H,W], no NxKxMxD expansion
++        sims = F.conv2d(z.float(), p) * (self.concentration.detach() if frozen else self.concentration)
++        b, _, h, w = sims.shape
++        scores = sims.reshape(b, self.classes, self.modes, h, w)
++        return torch.logsumexp(scores, dim=2) - math.log(self.modes)
++
++    def _project(self, i, h, frozen=False):
++        if frozen:
++            # Parameters are held constant in the candidate loss; preserve
++            # downstream derivatives through the predictor output.
++            z = F.conv2d(h.float(), self.projectors[i].weight.detach().float(),
++                         self.projectors[i].bias.detach().float())
++        else:
++            z = self.projectors[i](h.float())
++        return _norm(z)
++
++    def _candidate(self, i, h, cls_logit, obj_logit, mode='pgsma',
++                   freeze_reference=True, train_gate=True):
++        z, valid = self._project(i, h, frozen=freeze_reference)
++        s = self._prototype_scores(z, frozen=freeze_reference)
++        if mode == 'memory':
++            # Meaningful baseline, distinct from disabling z -> r movement.
++            # Separate calibration is learned on source labels.
++            delta = self.budget * torch.tanh(self.memory_gain[i] * s / self.budget)
++            r = z
++        else:
++            raw = z + self.predictors[i](z)
++            r, valid_r = _norm(raw)
++            valid = valid & valid_r
++            if self.correction == 'retraction':
++                tangent = r - (z * r).sum(dim=1, keepdim=True) * z
++                aligned, valid_a = _norm(z + tangent)
++                valid = valid & valid_a
++            else:
++                aligned = r
++            sc = self._prototype_scores(aligned, frozen=freeze_reference)
++            gain = F.softplus(self.log_gain[i].float())  # positive nonzero at init
++            delta = self.budget * torch.tanh(gain * (sc - s) / self.budget)
++        evidence = torch.cat([cls_logit.detach().float(),
++                              obj_logit.detach().float(),
++                              s.detach(), delta.detach().abs()], dim=1)
++        gate_in = evidence if train_gate else evidence.detach()
++        gate = torch.sigmoid(self.gates[i](gate_in))
++        # For ill-defined embedding input, force zero update.
++        delta = delta * valid.to(delta.dtype)
++        return {'delta': delta, 'gate': gate, 'z': z, 'r': r,
++                'score': s, 'valid': valid}
++
++    def forward_levels(self, features, native_logits, objectness, mode='pgsma',
++                       accept=True, collect=False):
++        if mode not in ('pgsma', 'native', 'memory'):
++            raise ValueError(mode)
++        if not (len(features) == len(native_logits) == len(objectness) == self.levels):
++            raise ValueError('Wrong number of pyramid levels')
++        results = []; diagnostics = []
++        for i, (h, cls, obj) in enumerate(zip(features, native_logits, objectness)):
++            if mode == 'native':
++                results.append(cls)
++                continue
++            # This is an inference function; caller must ensure semantic gradients
++            # cannot update native parameters in training.
++            d = self._candidate(i, h.detach(), cls.detach(), obj.detach(), mode)
++            adjustment = d['delta'] * (d['gate'] if accept else 1.0)
++            results.append(cls + adjustment.to(dtype=cls.dtype))
++            if collect: diagnostics.append({k: v.detach() for k, v in d.items()})
++        return (results, diagnostics) if collect else results
++
++    @staticmethod
++    def _flatten(level_tensors):
++        return torch.cat([t.float().flatten(2).transpose(1, 2) for t in level_tensors], dim=1)
++
++    @staticmethod
++    def _sample_losses(logits, fg_ids, fg_labels, fg_quality, gt_uid,
++                       bg_ids, hard_class=False):
++        """Instance-balanced positives plus separately mean-normalized negatives."""
++        nclass = logits.shape[-1]
++        flat = logits.reshape(-1, nclass)
++        zero = flat.sum() * 0.0
++        pos = zero
++        if fg_ids.numel():
++            pred = flat[fg_ids]
++            label = F.one_hot(fg_labels.long(), nclass).float()
++            if not hard_class:
++                label = label * fg_quality[:, None].float()
++            per_pos = F.binary_cross_entropy_with_logits(pred, label, reduction='none').sum(-1)
++            _, inverse, counts = torch.unique(gt_uid, sorted=True, return_inverse=True,
++                                              return_counts=True)
++            pos = (per_pos / counts[inverse]).sum() / max(int(counts.numel()), 1)
++        neg = zero
++        if bg_ids.numel():
++            neg = F.softplus(flat[bg_ids]).sum(-1).mean()
++        return pos, neg
++
++    @staticmethod
++    def _perturb(features, seed):
++        """Source-feature perturbation with independent RNG and no spatial erasure.
++
++        Mild channel-gain and local smoothing; does not certify weather realism.
++        The strength envelope is a *pilot hypothesis*, not an OOD-tuned schedule.
++        """
++        result = []
++        for i, feat in enumerate(features):
++            g = torch.Generator(device=feat.device)
++            g.manual_seed(int(seed) + i * 100003)
++            b, c, _, _ = feat.shape
++            gain_noise = torch.randn((b, c, 1, 1), device=feat.device,
++                                     generator=g, dtype=torch.float32)
++            gain = (1 + 0.08 * gain_noise).clamp(min=0.70, max=1.30)
++            rho = torch.rand((b, 1, 1, 1), device=feat.device, generator=g)
++            rho = 0.20 * rho
++            blurred = F.avg_pool2d(feat.float(), 3, stride=1, padding=1)
++            result.append((feat.float() * (1 - rho) + blurred * rho) * gain)
++        return result
++
++    def semantic_losses(self, features, native_classifier_weights,
++                        native_logits, objectness, match, seed=17,
++                        prototype_weight=1.0, teacher_weight=0.1,
++                        candidate_weight=1.0, gate_weight=1.0,
++                        negative_weight=1.0, correction_mode='pgsma'):
++        """Independent semantic loss stream. No gradients into native parameters.
++
++        match: dict of `fg_ids, fg_labels, fg_quality, gt_uid, bg_ids` where ids
++        refer to flattened `[B,concat(P3,P4,P5),...]` feature layout.
++        Native classifier weights are `(weight,bias)` pairs and are detached.
++        The head must create match from *native* assignments only.
++        """
++        features = [f.detach() for f in features]
++        clss = [x.detach() for x in native_logits]
++        objs = [x.detach() for x in objectness]
++        fg = match['fg_ids'].long(); bg = match['bg_ids'].long()
++        lab = match['fg_labels'].long(); quality = match['fg_quality'].float().detach()
++        uid = match['gt_uid'].long()
++        clean_scores = []
++        for i, feat in enumerate(features):
++            z, _ = self._project(i, feat)
++            clean_scores.append(self._prototype_scores(z))
++        scored = self._flatten(clean_scores)
++        proto_p, proto_n = self._sample_losses(scored, fg, lab, quality, uid, bg, True)
++        loss_proto = proto_p + float(negative_weight) * proto_n
++
++        perturb = self._perturb(features, seed)
++        native_pert_logits = []
++        candidate_deltas = []
++        gates = []
++        predicted = []
++        clean_teacher = []
++        for i, feat in enumerate(perturb):
++            w, bias = native_classifier_weights[i]
++            native_pert_logits.append(F.conv2d(feat, w.detach().float(),
++                                               bias.detach().float() if bias is not None else None))
++            with torch.no_grad():
++                teacher_z, _ = _norm(self.teacher_projectors[i](features[i].float()))
++            clean_teacher.append(teacher_z)
++            d = self._candidate(i, feat, native_pert_logits[-1], objs[i],
++                                freeze_reference=True, mode=correction_mode)
++            candidate_deltas.append(d['delta'])
++            gates.append(d['gate'])
++            predicted.append(d['r'])
++
++        pert_native = self._flatten(native_pert_logits)
++        delta = self._flatten(candidate_deltas)
++        gated = self._flatten(gates) * delta.detach()
++        candidate = pert_native.detach() + delta
++        final = pert_native.detach() + gated
++        cp, cn = self._sample_losses(candidate, fg, lab, quality, uid, bg, False)
++        gp, gn = self._sample_losses(final, fg, lab, quality, uid, bg, False)
++        loss_candidate = cp + float(negative_weight) * cn
++        loss_gate = gp + float(negative_weight) * gn
++
++        if fg.numel():
++            pred_flat = self._flatten(predicted)
++            target_flat = self._flatten(clean_teacher).detach()
++            discrepancy = 1 - F.cosine_similarity(pred_flat.reshape(-1, self.dim)[fg],
++                                                   target_flat.reshape(-1, self.dim)[fg], dim=-1)
++            _, inv, counts = torch.unique(uid, sorted=True, return_inverse=True, return_counts=True)
++            loss_jepa = (discrepancy / counts[inv]).sum() / counts.numel()
++        else:
++            loss_jepa = sum(t.sum() * 0 for t in predicted)
++
++        return {
++            'prototype': loss_proto * float(prototype_weight),
++            'teacher': loss_jepa * float(teacher_weight),
++            'candidate': loss_candidate * float(candidate_weight),
++            'gate': loss_gate * float(gate_weight),
++            'candidate_improvement': (self._sample_losses(pert_native, fg, lab, quality, uid, bg, False)[0] - cp).detach(),
++        }
+diff --git a/yolox/models/pgsma_head.py b/yolox/models/pgsma_head.py
+new file mode 100644
+index 0000000..c352b6f
+--- /dev/null
++++ b/yolox/models/pgsma_head.py
+@@ -0,0 +1,226 @@
++"""vNext.3 native-preserving head. Requires upstream YOLOX + archived TDE head.
++
++Unlike Engram/FiLM, PG-SMA never enters box/objectness/classifier towers.
++The former Engram parameters are *removed*, not left registered and unused.
++"""
++import torch
++from torch import nn
++from torch.nn import functional as F
++
++from .engram_head import TDE_Head
++from .losses import IOUloss
++from .scpa import scpa_assign
++
++
++class PGSMAHead(TDE_Head):
++    def __init__(self, num_classes, width=0.5, in_channels=(256, 512, 1024),
++                 act='silu', loss_type='iou', assignment='scpa',
++                 per_gt_normalization=False):
++        super().__init__(num_classes=num_classes, width=width,
++                         in_channels=list(in_channels), act=act, loss_type=loss_type)
++        if assignment not in ('scpa', 'baseline'):
++            raise ValueError(assignment)
++        self.assignment = assignment
++        self.use_baseline_assignments = (assignment == 'baseline')
++        self.per_gt_normalization = bool(per_gt_normalization)
++        self.iou_loss = IOUloss(reduction='none', loss_type=loss_type)
++        self.enable_memory_restoration = False
++        for old in ('memory_banks','latent_projectors','spatial_smoothers',
++                    'memory_proj_back','memory_norms','mem_gate','gamma_reg'):
++            if hasattr(self, old): delattr(self, old)
++        self.pgsma_cache = None
++        self.last_assignment_stats = {}
++        self.scpa_initial_candidates = 12
++        self.scpa_max_candidates = 128
++        self.scpa_extra_positives = 3
++
++    def forward(self, xin, labels=None, imgs=None, valid_anchor_mask=None):
++        outputs = []
++        origin_preds = []
++        x_shifts = []; y_shifts = []; expanded_strides = []
++        features = []; native_cls = []; native_obj = []
++        for k, (cls_conv, reg_conv, stride, x) in enumerate(zip(
++                self.cls_convs, self.reg_convs, self.strides, xin)):
++            stem = self.stems[k](x)
++            reg_feat = reg_conv(stem)
++            cls_feat = cls_conv(stem)
++            reg_output = self.reg_preds[k](reg_feat)
++            obj_output = self.obj_preds[k](reg_feat)
++            cls_output = self.cls_preds[k](cls_feat)
++            features.append(cls_feat.detach())
++            native_cls.append(cls_output.detach())
++            native_obj.append(obj_output.detach())
++            if self.training:
++                raw = torch.cat([reg_output, obj_output, cls_output], dim=1)
++                encoded, grid = self.get_output_and_grid(raw, k, stride, xin[0].type())
++                outputs.append(encoded)
++                x_shifts.append(grid[:, :, 0]); y_shifts.append(grid[:, :, 1])
++                expanded_strides.append(grid.new_full((1, grid.shape[1]), stride))
++                if self.use_l1:
++                    b, _, h, w = reg_output.shape
++                    origin_preds.append(reg_output.view(b, 1, 4, h, w).permute(
++                        0, 1, 3, 4, 2).reshape(b, -1, 4))
++            else:
++                outputs.append(reg_output)
++        if self.training:
++            # Training-only cache; do not mutate module state with feature
++            # tensors during inference or ONNX export.
++            self.pgsma_cache = {'features': features, 'native_cls': native_cls,
++                                'native_obj': native_obj, 'match': None}
++            if labels is None:
++                raise ValueError('Native training requires labels')
++            return self._native_losses(torch.cat(outputs, dim=1), labels,
++                                       x_shifts, y_shifts, expanded_strides,
++                                       origin_preds, valid_anchor_mask)
++        mode = getattr(self, 'inference_semantic_mode', 'pgsma')
++        if hasattr(self, 'pgsma_engine'):
++            corrected = self.pgsma_engine.forward_levels(
++                features, native_cls, native_obj, mode=mode)
++        else:
++            corrected = native_cls
++        # Shape-safe per-level decoding; no self.hw / stale Python grid cache.
++        flat_levels=[]
++        for reg, obj, cls, stride in zip(outputs, native_obj, corrected, self.strides):
++            b, _, h, w = reg.shape
++            raw = torch.cat([reg, obj.sigmoid(), cls.sigmoid()],dim=1)
++            pred = raw.flatten(start_dim=2).transpose(1,2)
++            if self.decode_in_inference:
++                yy, xx = torch.meshgrid(torch.arange(h,device=reg.device),
++                                        torch.arange(w,device=reg.device),indexing='ij')
++                grid = torch.stack((xx,yy),dim=-1).reshape(1,-1,2).to(pred.dtype)
++                xy = (pred[...,:2]+grid)*stride
++                wh = torch.exp(pred[...,2:4].clamp(min=-5,max=7))*stride
++                pred = torch.cat([xy,wh,pred[...,4:]],dim=-1)
++            flat_levels.append(pred)
++        return torch.cat(flat_levels,dim=1)
++
++    def _native_losses(self, outputs, labels, x_shift, y_shift, strides,
++                       origin_preds, valid_anchor_mask):
++        # SCPA requires detached predictions; native gradients only through losses.
++        bsz, total, _ = outputs.shape
++        bboxes = outputs[..., :4].float()
++        obj = outputs[..., 4:5].float()
++        cls = outputs[..., 5:].float()
++        xshift = torch.cat(x_shift, dim=1).float().to(bboxes.device)
++        yshift = torch.cat(y_shift, dim=1).float().to(bboxes.device)
++        stride = torch.cat(strides, dim=1).float().to(bboxes.device)
++        centers = torch.stack(((xshift[0]+.5)*stride[0], (yshift[0]+.5)*stride[0]), dim=1)
++        targets_bbox = []; predictions_bbox = []; cls_target = []; cls_pred = []
++        obj_target = torch.zeros_like(obj)
++        flat_pos = []; flat_lab = []; flat_quality = []; flat_uid = []
++        fg_mask = torch.zeros((bsz, total), device=bboxes.device, dtype=torch.bool)
++        total_gt = 0; uncovered = 0; edge_total = 0; core_count = 0
++        for b in range(bsz):
++            image_labels = labels[b] if torch.is_tensor(labels) else labels[b]
++            image_labels = image_labels.float().to(bboxes.device)
++            valid_gt = ((image_labels[:, 3] > 0) & (image_labels[:, 4] > 0) &
++                        torch.isfinite(image_labels).all(dim=1))
++            boxes = image_labels[valid_gt, 1:5]
++            classes = image_labels[valid_gt, 0].long()
++            n_gt = len(boxes)
++            if classes.numel() and ((classes < 0).any() or (classes >= self.num_classes).any()):
++                raise ValueError('Class ID out of valid configured taxonomy')
++            if valid_anchor_mask is None:
++                valid_anchors = torch.ones(total, device=bboxes.device, dtype=torch.bool)
++            else:
++                valid_anchors = valid_anchor_mask[b].to(device=bboxes.device, dtype=torch.bool)
++            if self.assignment == 'scpa':
++                match = scpa_assign(boxes, classes, bboxes[b], cls[b], obj[b],
++                                    centers, stride[0], valid_anchors,
++                                    self.scpa_initial_candidates,
++                                    self.scpa_max_candidates,
++                                    self.scpa_extra_positives)
++                ai = match.anchor_indices; gi = match.gt_indices
++                quality = match.matched_ious
++                uncovered += match.uncovered_gt.numel(); edge_total += match.candidate_edges
++                core_count += int(match.core.sum().item())
++            else:
++                # Explicit scientific control. Native YOLOX matching API.
++                if n_gt:
++                    (matched_cls, mask, quality, gi, _nfg) = super().get_assignments(
++                        b, n_gt, boxes, classes, bboxes[b], stride, xshift, yshift,
++                        cls, obj)
++                    ai = torch.nonzero(mask, as_tuple=False).flatten()
++                else:
++                    ai = torch.empty(0, device=bboxes.device, dtype=torch.long)
++                    gi = ai; quality = bboxes.new_empty(0)
++            ai = ai.long(); gi = gi.long(); quality = quality.float().detach()
++            if ai.numel():
++                if not valid_anchors[ai].all():
++                    raise RuntimeError('Positive assigned on invalid/padded region')
++                fg_mask[b, ai] = True
++                obj_target[b, ai] = 1.0  # consistent binary objectness protocol
++                targets_bbox.append(boxes[gi]); predictions_bbox.append(bboxes[b, ai])
++                target = F.one_hot(classes[gi], self.num_classes).float() * quality[:, None]
++                cls_target.append(target)
++                cls_pred.append(cls[b, ai])
++                flat_pos.append(ai + b * total)
++                flat_lab.append(classes[gi]); flat_quality.append(quality)
++                flat_uid.append(gi + total_gt)
++            total_gt += n_gt
++        n_fg = sum(len(x) for x in flat_pos)
++        empty = torch.empty(0, dtype=torch.long, device=bboxes.device)
++        fg_ids = torch.cat(flat_pos) if flat_pos else empty
++        self.pgsma_cache['match'] = {
++            'fg_ids': fg_ids.detach(),
++            'fg_labels': torch.cat(flat_lab).detach() if flat_lab else empty,
++            'fg_quality': torch.cat(flat_quality).detach() if flat_quality else bboxes.new_empty(0),
++            'gt_uid': torch.cat(flat_uid).detach() if flat_uid else empty,
++            # hard-negative selection based on detached native objectness only;
++            # no hidden semantic influence on source labels.
++            'bg_ids': self._hard_background(obj.detach(), fg_mask, valid_anchor_mask),
++        }
++        self.last_assignment_stats = dict(num_fg_total=n_fg, num_gt_total=total_gt,
++                                          uncovered_gt=uncovered, core_positives=core_count,
++                                          candidate_edges=edge_total)
++        zero = obj.sum() * 0.0
++        if n_fg:
++            per_iou = self.iou_loss(torch.cat(predictions_bbox, 0), torch.cat(targets_bbox, 0))
++            per_cls = F.binary_cross_entropy_with_logits(torch.cat(cls_pred, 0),
++                                                           torch.cat(cls_target, 0), reduction='none').sum(-1)
++            if self.per_gt_normalization:
++                uid = self.pgsma_cache['match']['gt_uid']
++                _, inv, counts = torch.unique(uid, sorted=True, return_inverse=True, return_counts=True)
++                denom = max(int(counts.numel()), 1)
++                iou_loss = (per_iou / counts[inv]).sum() / denom
++                cls_loss = (per_cls / counts[inv]).sum() / denom
++            else:
++                iou_loss = per_iou.sum() / n_fg
++                cls_loss = per_cls.sum() / n_fg
++        else:
++            iou_loss = zero; cls_loss = zero
++        # Keep ordinary YOLOX objectness scaling as a controlled baseline.
++        obj_loss = F.binary_cross_entropy_with_logits(obj, obj_target, reduction='none').sum() / max(n_fg, 1)
++        l1_loss = zero
++        if self.use_l1 and n_fg:
++            origin = torch.cat(origin_preds, 1).float()
++            # Build raw regression targets using standard anchor-grid transform.
++            reg_t = torch.cat(targets_bbox, 0)
++            pos_mask = fg_mask.reshape(-1)
++            target_l1 = self.get_l1_target(reg_t.new_zeros((n_fg,4)), reg_t,
++                    stride.expand(bsz,-1).reshape(-1)[pos_mask],
++                    xshift.expand(bsz,-1).reshape(-1)[pos_mask],
++                    yshift.expand(bsz,-1).reshape(-1)[pos_mask])
++            l1_loss = self.l1_loss(origin.reshape(-1,4)[pos_mask], target_l1).sum() / n_fg
++        loss = 5.0 * iou_loss + obj_loss + cls_loss + l1_loss
++        return {'total_loss': loss, 'det_loss': loss, 'iou_loss': 5.0 * iou_loss,
++                'conf_loss': obj_loss, 'cls_loss': cls_loss, 'l1_loss': l1_loss,
++                'num_fg': n_fg / max(total_gt, 1), 'num_fg_total': n_fg,
++                'num_gt_total': total_gt, 'uncovered_gt': uncovered,
++                'core_positives': core_count}
++
++    @staticmethod
++    def _hard_background(obj, positives, valid_mask, max_neg=256):
++        b, n, _ = obj.shape
++        mask = ~positives
++        if valid_mask is not None:
++            mask &= valid_mask.to(mask.device).bool()
++        # Per-image top-k of hardest native objectness background anchors.
++        out=[]
++        for i in range(b):
++            ids = torch.nonzero(mask[i], as_tuple=False).flatten()
++            if ids.numel():
++                k = min(max_neg, ids.numel())
++                chosen = torch.topk(obj[i, ids, 0], k=k, sorted=False).indices
++                out.append(ids[chosen] + i*n)
++        return torch.cat(out).detach() if out else torch.empty(0, device=obj.device,dtype=torch.long)
+diff --git a/yolox/models/pgsma_model.py b/yolox/models/pgsma_model.py
+new file mode 100644
+index 0000000..02eedca
+--- /dev/null
++++ b/yolox/models/pgsma_model.py
+@@ -0,0 +1,57 @@
++"""vNext.3 top-level model. Native loss and semantic loss are intentionally distinct."""
++from torch import nn
++from .yolo_pafpn import YOLOPAFPN
++from .pgsma_head import PGSMAHead
++from .pgsma import PGSMA
++
++
++class PGSMAYOLOX(nn.Module):
++    def __init__(self, backbone=None, head=None, num_classes=9, width=.5,
++                 semantic_dim=64, semantic_modes=4, correction='direct'):
++        super().__init__()
++        self.backbone = backbone if backbone is not None else YOLOPAFPN(.33, width,
++            pretrained_compatible_dark2=True, ttt_residual_adapter=False)
++        self.head = head if head is not None else PGSMAHead(num_classes, width=width)
++        self.head.pgsma_engine = PGSMA(num_classes, channels=int(width*256),
++                                      dim=semantic_dim, modes=semantic_modes,
++                                      correction=correction)
++        self.num_classes = num_classes
++        self.enable_semantic_training = True
++
++    @property
++    def semantic(self):
++        return self.head.pgsma_engine
++
++    def native_parameters(self):
++        return (p for n,p in self.named_parameters() if 'head.pgsma_engine.' not in n)
++
++    def semantic_parameters(self):
++        return self.semantic.parameters()
++
++    def forward(self, x, targets=None):
++        # dark2 reconstruction TTT is explicitly disabled in both modes.
++        # Existing dark2 wrapper remains only for checkpoint compatibility;
++        # the new experiment creates it with residual_adapter=False.
++        fpn = self.backbone(x, ttt_prob=0.0)
++        if self.training:
++            return self.head(fpn, targets, x)
++        return self.head(fpn)
++
++    def semantic_losses(self, seed=17, correction_mode='pgsma', **kwargs):
++        if correction_mode == 'memory':
++            kwargs.setdefault('teacher_weight', 0.0)
++        cache = self.head.pgsma_cache
++        if cache is None or cache.get('match') is None:
++            raise RuntimeError('Run a native training forward before semantic_losses')
++        weights = [(m.weight, m.bias) for m in self.head.cls_preds]
++        return self.semantic.semantic_losses(cache['features'], weights,
++                     cache['native_cls'], cache['native_obj'],
++                     cache['match'], seed=seed, correction_mode=correction_mode, **kwargs)
++
++    def set_inference_mode(self, mode='pgsma'):
++        if mode not in ('pgsma','native','memory'):
++            raise ValueError(mode)
++        self.head.inference_semantic_mode = mode
++
++    def set_meta_training_state(self, epoch, max_epochs):
++        self.head.set_epoch_state(epoch, max_epochs)
+diff --git a/yolox/models/pgsma_spi.py b/yolox/models/pgsma_spi.py
+new file mode 100644
+index 0000000..9462477
+--- /dev/null
++++ b/yolox/models/pgsma_spi.py
+@@ -0,0 +1,28 @@
++"""Exact identity SPI at init; lossless stride-4 folding, no weather-specific clipping."""
++import torch
++from torch import nn
++from torch.nn import functional as F
++
++
++class SPIResidual(nn.Module):
++    def __init__(self, in_channels_dark2=64, out_channels_p3=128):
++        super().__init__()
++        channels = in_channels_dark2 * 4
++        self.unshuffle = nn.PixelUnshuffle(2)
++        self.local = nn.Conv2d(channels, channels, 3, padding=1,
++                               groups=channels, bias=False)
++        self.project = nn.Sequential(
++            nn.Conv2d(channels, out_channels_p3, 1, bias=False),
++            nn.GroupNorm(min(8, out_channels_p3), out_channels_p3),
++            nn.SiLU(),
++        )
++        self.gate = nn.Parameter(torch.zeros(()))
++
++    def forward(self, dark2, p3):
++        h, w = dark2.shape[-2:]
++        if h % 2 or w % 2:
++            raise ValueError('SPI requires even stride-4 spatial dimensions')
++        contribution = self.project(self.local(self.unshuffle(dark2)))
++        if contribution.shape != p3.shape:
++            raise ValueError('SPI/P3 alignment mismatch')
++        return p3 + torch.tanh(self.gate) * contribution
+diff --git a/yolox/models/scpa.py b/yolox/models/scpa.py
+new file mode 100644
+index 0000000..c254493
+--- /dev/null
++++ b/yolox/models/scpa.py
+@@ -0,0 +1,183 @@
++"""SCPA: geometry-first sparse, coverage-preserving training assignment.
++
++This module is independent of YOLOX and never runs during inference.
++Coverage is exact *on the enumerated bipartite graph*. Search-budget exhaustion is
++reported and is not a statement that an object is physically unrepresentable.
++"""
++from __future__ import annotations
++
++from collections import deque
++from dataclasses import dataclass
++from typing import List
++import torch
++
++
++@dataclass
++class Assignment:
++    anchor_indices: torch.Tensor  # long, unique, ordered by anchor
++    gt_indices: torch.Tensor      # long, local per-image GT index
++    matched_ious: torch.Tensor    # float, detached
++    core: torch.Tensor            # bool: protected coverage match
++    uncovered_gt: torch.Tensor    # long indices, if any
++    budget_exhausted: bool
++    candidate_edges: int
++    uncovered_reasons: tuple = ()
++
++
++def maximum_matching(adjacency: List[List[int]], num_anchors: int):
++    """Exact Hopcroft-Karp maximum cardinality. Returns GT->anchor (-1 if lost)."""
++    n = len(adjacency)
++    left = [-1] * n
++    right = [-1] * num_anchors
++    dist = [0] * n
++    infinity = n + 1
++
++    def bfs():
++        q = deque()
++        found = False
++        for g in range(n):
++            if left[g] == -1:
++                dist[g] = 0
++                q.append(g)
++            else:
++                dist[g] = infinity
++        while q:
++            g = q.popleft()
++            for a in adjacency[g]:
++                partner = right[a]
++                if partner < 0:
++                    found = True
++                elif dist[partner] == infinity:
++                    dist[partner] = dist[g] + 1
++                    q.append(partner)
++        return found
++
++    def dfs(g):
++        for a in adjacency[g]:
++            partner = right[a]
++            if partner == -1 or (dist[partner] == dist[g] + 1 and dfs(partner)):
++                right[a] = g
++                left[g] = a
++                return True
++        dist[g] = infinity
++        return False
++
++    while bfs():
++        for g in range(n):
++            if left[g] == -1:
++                dfs(g)
++    return left
++
++
++def aligned_iou_xywh(pred: torch.Tensor, gt: torch.Tensor):
++    """Paired IoU for boxes in cx,cy,w,h. Finite for zero-area predictions."""
++    pmin = pred[:, :2] - pred[:, 2:].clamp(min=0) / 2
++    pmax = pred[:, :2] + pred[:, 2:].clamp(min=0) / 2
++    gmin = gt[:, :2] - gt[:, 2:].clamp(min=0) / 2
++    gmax = gt[:, :2] + gt[:, 2:].clamp(min=0) / 2
++    inter = (torch.minimum(pmax, gmax) - torch.maximum(pmin, gmin)).clamp(min=0).prod(-1)
++    pa = pred[:, 2:].clamp(min=0).prod(-1)
++    ga = gt[:, 2:].clamp(min=0).prod(-1)
++    return inter / (pa + ga - inter).clamp(min=1e-8)
++
++
++@torch.no_grad()
++def scpa_assign(gt_boxes, gt_classes, pred_boxes, cls_logits, obj_logits,
++                centers, strides, valid_mask=None, initial_candidates=12,
++                max_candidates=128, extra_per_gt=3, cost_iou_weight=3.0):
++    """Exact max-cardinality cover on a geometry-eligible *sparse* graph.
++
++    Eligible if an anchor is within the GT's own half-extent plus ONE grid
++    stride in both axes. This is a dimensionless geometric representability
++    envelope, not a weather- or category-specific match score. Out-of-envelope
++    matches are never fabricated to increase nominal coverage.
++    """
++    device = pred_boxes.device
++    n_gt = int(gt_boxes.shape[0]); n_all = int(pred_boxes.shape[0])
++    empty = torch.empty(0, device=device, dtype=torch.long)
++    if valid_mask is None:
++        valid_mask = torch.ones(n_all, device=device, dtype=torch.bool)
++    valid = torch.nonzero(valid_mask, as_tuple=False).flatten()
++    if n_gt == 0 or valid.numel() == 0:
++        reason = tuple('no_valid_anchor' for _ in range(n_gt))
++        return Assignment(empty, empty, pred_boxes.new_empty(0),
++                          torch.empty(0, device=device, dtype=torch.bool),
++                          torch.arange(n_gt, device=device), False, 0, reason)
++    if (gt_boxes[:, 2:] <= 0).any() or not torch.isfinite(gt_boxes).all():
++        raise ValueError('All input GT boxes must have finite positive width/height')
++    if not (1 <= int(initial_candidates) <= int(max_candidates)):
++        raise ValueError('Require 1 <= initial_candidates <= max_candidates')
++    gt_boxes = gt_boxes.float()
++    boxes = pred_boxes.detach().float()
++    ctr = centers[valid].float()
++    st = strides[valid].float().flatten().clamp(min=1)
++    # Memory-bounded candidate generation: stream GTs rather than allocate
++    # a [num_GT, num_anchors, 2] matrix on high-density 4K UAV scenes.
++    n_valid = valid.numel()
++    max_budget = min(int(max_candidates), n_valid)
++    width = min(int(initial_candidates), max_budget)
++    candidate_rows = []
++    count_eligible = []
++    for g in range(n_gt):
++        delta = (ctr - gt_boxes[g, :2]).abs()
++        envelope = gt_boxes[g, 2:4] * 0.5 + st[:, None]
++        eligible = (delta <= envelope).all(dim=-1)
++        local_ids = torch.nonzero(eligible, as_tuple=False).flatten()
++        n_eligible = int(local_ids.numel())
++        count_eligible.append(n_eligible)
++        if n_eligible:
++            scale = torch.maximum(gt_boxes[g, 2:4], st[local_ids,None])
++            distances = ((delta[local_ids] / scale)**2).sum(-1)
++            k = min(max_budget, n_eligible)
++            ordering = torch.topk(distances,k,largest=False,sorted=True).indices
++            candidate_rows.append(local_ids[ordering].cpu().tolist())
++        else:
++            candidate_rows.append([])
++
++    def adjacency_for(w):
++        return [row[:w] for row in candidate_rows]
++
++    while True:
++        adjacency = adjacency_for(width)
++        core = maximum_matching(adjacency, n_valid)
++        if all(a >= 0 for a in core) or width == max_budget:
++            break
++        # Expansion is only useful while there are additional eligible edges.
++        if not any(count_eligible[g] > width for g,a in enumerate(core) if a < 0):
++            break
++        width = min(max_budget,max(width+1,width*2))
++
++    # Preserve sparse core matches, then add nonstealing extra positives ordered
++    # by detached native matching cost. No NxGT dense pairwise IoU matrix.
++    chosen = {a:(g,True) for g,a in enumerate(core) if a>=0}
++    per_gt_count = [int(a>=0) for a in core]
++    edge_list = [(g,int(a)) for g,row in enumerate(adjacency) for a in row]
++    if edge_list:
++        pair_g = torch.tensor([g for g,a in edge_list],device=device,dtype=torch.long)
++        pair_local = torch.tensor([a for g,a in edge_list],device=device,dtype=torch.long)
++        pair_a = valid[pair_local]
++        ious = aligned_iou_xywh(boxes[pair_a],gt_boxes[pair_g])
++        cp = torch.sigmoid(cls_logits.detach().float()[pair_a,gt_classes.long()[pair_g]])
++        op = torch.sigmoid(obj_logits.detach().float().reshape(-1)[pair_a])
++        cost = -torch.log((cp*op).clamp(min=1e-8))+float(cost_iou_weight)*(1-ious)
++        if not torch.isfinite(cost).all():
++            raise FloatingPointError('Nonfinite SCPA candidate costs')
++        for e in torch.argsort(cost,stable=True).cpu().tolist():
++            g,loc=edge_list[e]
++            if loc in chosen or per_gt_count[g]>=1+max(0,int(extra_per_gt)):
++                continue
++            chosen[loc]=(g,False)
++            per_gt_count[g]+=1
++    ordered_chosen = sorted(chosen)
++    ids = valid[torch.tensor(ordered_chosen,device=device,dtype=torch.long)]
++    gt_ids = torch.tensor([chosen[a][0] for a in ordered_chosen],device=device,dtype=torch.long)
++    core_flags = torch.tensor([chosen[a][1] for a in ordered_chosen],device=device,dtype=torch.bool)
++    quality = aligned_iou_xywh(boxes[ids],gt_boxes[gt_ids]) if ids.numel() else boxes.new_empty(0)
++    uncovered = [g for g,a in enumerate(core) if a<0]
++    reasons = tuple('no_eligible_geometry' if count_eligible[g]==0
++                    else ('candidate_budget_exhausted' if count_eligible[g]>width
++                          else 'infeasible_on_enumerated_graph') for g in uncovered)
++    return Assignment(ids,gt_ids,quality,core_flags,
++                      torch.tensor(uncovered,device=device,dtype=torch.long),
++                      any(r=='candidate_budget_exhausted' for r in reasons),
++                      len(edge_list),reasons)
+diff --git a/yolox/models/ttt_modules.py b/yolox/models/ttt_modules.py
+index 9782528..91578cc 100644
+--- a/yolox/models/ttt_modules.py
++++ b/yolox/models/ttt_modules.py
+@@ -513,16 +513,10 @@ class SafeSimAM(nn.Module):
+         b, c, h, w = x.shape
+         x_f32 = x.float()
+ 
+-        if h <= 4 or w <= 4:
+-            # Fallback for profiling tensors or extreme bottlenecks
+-            x_mean = x_f32.mean(dim=[-2, -1], keepdim=True)
+-        else:
+-            # Coarse 4x4 regional anchor grid bilinearly interpolated to (H, W)
+-            # Provides localized contrast baseline without any sliding-window workspace buffers
+-            grid_h = min(4, h)
+-            grid_w = min(4, w)
+-            coarse_mean = F.adaptive_avg_pool2d(x_f32, (grid_h, grid_w))
+-            x_mean = F.interpolate(coarse_mean, size=(h, w), mode="bilinear", align_corners=False)
++        # Fixed shape-safe regional operator; avoids branch-specialized ONNX
++        # graphs for tiny maps. Original 4x4 adaptive variant is an ablation.
++        x_mean = F.avg_pool2d(x_f32, kernel_size=7, stride=1, padding=3,
++                              count_include_pad=False)
+ 
+         # Centered difference relative to regional baseline
+         diff = x_f32 - x_mean
+@@ -582,9 +576,9 @@ class UnifiedRCA(nn.Module):
+             torch.var(x, dim=[-2, -1], unbiased=False, keepdim=True), min=1e-8
+         )
+         x_std_val = torch.sqrt(x_var_val)
+-        x_clipped = torch.clamp(
+-            x, min=x_mean_val - 3.0 * x_std_val, max=x_mean_val + 3.0 * x_std_val
+-        )
++        # vNext.3 removes unconditional apparent-glare clipping: extreme
++        # feature evidence may correspond to real tiny objects.
++        x_clipped = x
+ 
+         # 2. Augment with mean and max intensity prior
+         z_mean = torch.mean(x_clipped.float(), dim=1, keepdim=True).to(x.dtype)
+@@ -593,11 +587,11 @@ class UnifiedRCA(nn.Module):
+         x_aug = torch.cat([x_clipped, z], dim=1)
+ 
+         # 3. 1D Directional Orthogonal Gates (Adaptive pools naturally handle any h, w >= 1)
+-        x_h = 0.5 * F.adaptive_avg_pool2d(x_aug, (h, 1)) + 0.5 * F.adaptive_max_pool2d(x_aug, (h, 1))
++        x_h = 0.5 * x_aug.mean(dim=-1, keepdim=True) + 0.5 * x_aug.amax(dim=-1, keepdim=True)
+         feat_h = self.act(self.gn_h(self.conv_h_in(x_h)))
+         gate_h = torch.sigmoid(self.conv_h(feat_h))
+ 
+-        x_w = 0.5 * F.adaptive_avg_pool2d(x_aug, (1, w)) + 0.5 * F.adaptive_max_pool2d(x_aug, (1, w))
++        x_w = 0.5 * x_aug.mean(dim=-2, keepdim=True) + 0.5 * x_aug.amax(dim=-2, keepdim=True)
+         feat_w = self.act(self.gn_w(self.conv_w_in(x_w)))
+         gate_w = torch.sigmoid(self.conv_w(feat_w))
+ 
+@@ -822,14 +816,9 @@ class ContinuousSaliencyAttention(nn.Module):
+         local_var = patch_var.mean(dim=1, keepdim=True).view(B, 1, 1, N)
+         s_edge_robust = s_edge * (1.0 + torch.tanh(local_var.clamp(min=0.0)))
+ 
+-        # DYNAMIC ENVELOPE POOLING: Adapts kernel and padding safely to H and W
+-        if H <= 8 or W <= 8:
+-            # Fall back to global spatial mean on micro/profiling maps
+-            macro_feat = x.mean(dim=[-2, -1], keepdim=True).expand(-1, -1, H, W)
+-        else:
+-            k_macro = min(15, H if H % 2 != 0 else H - 1, W if W % 2 != 0 else W - 1)
+-            pad_macro = k_macro // 2
+-            macro_feat = F.avg_pool2d(x, kernel_size=k_macro, stride=1, padding=pad_macro)
++        # Export-stable shape-independent regional pooling.
++        macro_feat = F.avg_pool2d(x, kernel_size=15, stride=1, padding=7,
++                                  count_include_pad=False)
+ 
+         s_macro = torch.sigmoid(self.macro_conv(macro_feat)).view(B, self.num_heads, 1, N)
+ 
+diff --git a/yolox/models/yolo_pafpn.py b/yolox/models/yolo_pafpn.py
+index 04d5c5b..2876e98 100644
+--- a/yolox/models/yolo_pafpn.py
++++ b/yolox/models/yolo_pafpn.py
+@@ -8,7 +8,7 @@ import torch.nn as nn
+ from .darknet import CSPDarknet
+ from .network_blocks import BaseConv
+ from .tribrid_neck import C2f_Tribrid
+-from .ttt_modules import mHC_AttnRes_SPI
++from .pgsma_spi import SPIResidual
+ 
+ 
+ class YOLOPAFPN(nn.Module):
+@@ -66,7 +66,7 @@ class YOLOPAFPN(nn.Module):
+         c_p5 = int(in_channels[2] * width)            # 512
+ 
+         # 1. Sub-Pixel Phase Injection (SPI) Highway
+-        self.spi_highway = mHC_AttnRes_SPI(in_channels_dark2=c_dark2, out_channels_p3=c_p3)
++        self.spi_highway = SPIResidual(in_channels_dark2=c_dark2, out_channels_p3=c_p3)
+ 
+         self.upsample = nn.Upsample(scale_factor=2, mode="nearest")
+ 
+@@ -85,7 +85,7 @@ class YOLOPAFPN(nn.Module):
+             shortcut=False,
+             depthwise=depthwise,
+             act=act,
+-            saliency_floor=0.35,
++            saliency_floor=0.0,
+         )
+ 
+         # Top-down fusion: C3_p3 (P3 Level: floor = 0.15 provides high sparsity for micro targets)
+@@ -96,7 +96,7 @@ class YOLOPAFPN(nn.Module):
+             shortcut=False,
+             depthwise=depthwise,
+             act=act,
+-            saliency_floor=0.15,
++            saliency_floor=0.0,
+         )
+ 
+         # Bottom-up fusion: C3_n3 (N4 Level: floor = 0.35 protects 32-64px vehicle semantics)
+@@ -107,7 +107,7 @@ class YOLOPAFPN(nn.Module):
+             shortcut=False,
+             depthwise=depthwise,
+             act=act,
+-            saliency_floor=0.35,
++            saliency_floor=0.0,
+         )
+ 
+         # Bottom-up fusion: C3_n4 (N5 Level: floor = 0.80 ensures macro trucks/buses retain presence)
+@@ -118,7 +118,7 @@ class YOLOPAFPN(nn.Module):
+             shortcut=False,
+             depthwise=depthwise,
+             act=act,
+-            saliency_floor=0.80,
++            saliency_floor=0.0,
+         )
+ 
+     def forward(self, input, ttt_prob=None):

@@ -1,0 +1,111 @@
+{
+  "variant": "memory_simota",
+  "steps_requested": 16,
+  "seed": 20261104,
+  "input_size": [
+    576,
+    1024
+  ],
+  "test_size": [
+    576,
+    1024
+  ],
+  "class_count": 9,
+  "native_lr": 0.0003125,
+  "semantic_lr": 0.001,
+  "checkpoint": {
+    "checkpoint": "audits\\pilot_b_simota\\pilot_last.pth",
+    "sha256": "802c254e11a59788b816a2b3f8ea1507e16f137ff4401b06d9e4d6fc25e53ff3",
+    "matched_tensors": 886,
+    "shape_mismatches": [],
+    "is_pilot_warmstart": true
+  },
+  "warmstart": true,
+  "native_recipe": "simota_per_positive",
+  "mosaic_enabled": true,
+  "mosaic_prob": 0.5,
+  "eval_images": 16,
+  "eval_indices": [
+    661,
+    851,
+    1285,
+    2190,
+    2736,
+    3323,
+    3401,
+    4246,
+    4473,
+    4618,
+    5034,
+    6540,
+    6578,
+    6754,
+    7199,
+    7435
+  ],
+  "clean_val_json_sha256": "bb78f2f5d0d9159eba5ee021fa89b2347429897a8b31c7cbd78cede846f5a164",
+  "limitations": [
+    "single GPU, single-process only",
+    "no full 80-epoch schedule",
+    "fixed training input shape",
+    "no full-trainer EMA",
+    "pilot COCO metrics use subset images",
+    "semantic utility uses source-feature perturbations",
+    "no adverse-set evaluation"
+  ],
+  "status": "CHECKS_PASSED",
+  "native_state_sha256": "2f927d8a0c2710b252138a9b56c6c550cfc9f8d40085530b611d0029a5fc98dd",
+  "training_batch_stream_sha256": "fdcaaae5530c2a511168dbe88945be94ede6af1b31a16ad901661f95e03e2df9",
+  "successful_native_updates": 16,
+  "successful_semantic_updates": 16,
+  "amp_skips": 0,
+  "first_training_batch_sha256": "838b9cc525aa31b2396b4b3a998ad72b6e4f5a58a48d145bc1f283488f5a94ac",
+  "seconds_elapsed": 11.42,
+  "last_telemetry": {
+    "step": 16,
+    "native_loss": 4.801975727081299,
+    "native_grad_norm_before_clip": 43.48290252685547,
+    "native_step_success": true,
+    "scaler_scale": 1024.0,
+    "valid_gt": 43,
+    "assignments": {
+      "num_fg_total": 209,
+      "num_gt_total": 43,
+      "uncovered_gt": 0,
+      "core_positives": 0,
+      "candidate_edges": 0,
+      "covered_gt": 43,
+      "coverage_source": "derived_from_unique_gt_uid",
+      "positive_iou_mean": 0.6925950050354004,
+      "positive_iou_lt_0p1": 0,
+      "positive_iou_lt_0p3": 3
+    },
+    "pos_per_level": {
+      "P3": 132,
+      "P4": 74,
+      "P5": 3
+    },
+    "semantic_step": {
+      "prototype": 7.847965717315674,
+      "teacher": 0.0,
+      "candidate": 1.7204598188400269,
+      "gate": 1.721561074256897,
+      "candidate_improvement": -2.7358531951904297e-05,
+      "reason": "success"
+    },
+    "semantic_utility": {
+      "candidate_fg_improvement": -2.8312206268310547e-05,
+      "candidate_bg_improvement": 0.002734363079071045,
+      "candidate_total_improvement": 0.0027060508728027344,
+      "gate_fg_improvement": -1.3232231140136719e-05,
+      "gate_bg_improvement": 0.0014525651931762695,
+      "gate_total_improvement": 0.0014393329620361328,
+      "mean_abs_candidate_delta": 0.0065688262693583965,
+      "mean_gate_acceptance": 0.5156927108764648,
+      "max_abs_candidate_delta": 0.02019200660288334,
+      "mean_baseline_foreground_loss": 0.8285720944404602,
+      "mean_baseline_background_loss": 0.8942179679870605
+    }
+  },
+  "clean_validation": "subset_only"
+}
