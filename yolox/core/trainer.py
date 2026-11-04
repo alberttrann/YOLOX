@@ -327,7 +327,8 @@ class Trainer:
             raise NotImplementedError('PG-SMA semantic DDP gradient synchronization has not been '
                                       'verified. Use -d 1 for integration tests.')
         self.optimizer = self.exp.get_optimizer(self.args.batch_size)
-        self.semantic_optimizer = torch.optim.AdamW(model.semantic_parameters(),
+        self.semantic_optimizer = torch.optim.AdamW(
+            [p for p in model.semantic_parameters() if p.requires_grad],
             lr=float(self.exp.semantic_lr), weight_decay=0.0)
 
         # 3. Checkpoint resumption

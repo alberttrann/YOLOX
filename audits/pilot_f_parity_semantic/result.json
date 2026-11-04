@@ -1,0 +1,126 @@
+{
+  "variant": "pgsma_simota",
+  "steps_requested": 64,
+  "seed": 20261107,
+  "input_size": [
+    576,
+    1024
+  ],
+  "test_size": [
+    576,
+    1024
+  ],
+  "class_count": 9,
+  "native_lr": 0.0003125,
+  "semantic_lr": 0.001,
+  "checkpoint": {
+    "checkpoint": "audits\\pilot_b_simota\\pilot_last.pth",
+    "sha256": "802c254e11a59788b816a2b3f8ea1507e16f137ff4401b06d9e4d6fc25e53ff3",
+    "matched_tensors": 839,
+    "shape_mismatches": [
+      "head.pgsma_engine.gates.0.0.weight",
+      "head.pgsma_engine.gates.1.0.weight",
+      "head.pgsma_engine.gates.2.0.weight"
+    ],
+    "is_pilot_warmstart": true
+  },
+  "warmstart": true,
+  "native_recipe": "simota_per_positive",
+  "semantic_recipe": "source_dualview_fg_guard_halo_utility_gate_v2",
+  "mosaic_enabled": true,
+  "mosaic_prob": 0.5,
+  "eval_images": 16,
+  "eval_indices": [
+    70,
+    77,
+    904,
+    1557,
+    1828,
+    2319,
+    2632,
+    3117,
+    3583,
+    4362,
+    4596,
+    5367,
+    5913,
+    7622,
+    7914,
+    8346
+  ],
+  "clean_val_json_sha256": "bb78f2f5d0d9159eba5ee021fa89b2347429897a8b31c7cbd78cede846f5a164",
+  "limitations": [
+    "single GPU, single-process only",
+    "no full 80-epoch schedule",
+    "fixed training input shape",
+    "no full-trainer EMA",
+    "pilot COCO metrics use subset images",
+    "semantic utility uses source-feature perturbations",
+    "no adverse-set evaluation"
+  ],
+  "status": "CHECKS_PASSED",
+  "native_state_sha256": "d90fdd530605db12eef475f2d4e228f58e99550899bd37d9136101687a7a77fc",
+  "training_batch_stream_sha256": "fa6ceb1bbc245fbbea647c8a9edf05b0177ddf109b4228da2f4743e0941c670f",
+  "successful_native_updates": 64,
+  "successful_semantic_updates": 64,
+  "amp_skips": 0,
+  "first_training_batch_sha256": "979404c972a7c65b9386840f46b5f2653d28c33e5229ddeb0e19a4d4120a7e25",
+  "seconds_elapsed": 28.02,
+  "last_telemetry": {
+    "step": 64,
+    "native_loss": 5.315077781677246,
+    "native_grad_norm_before_clip": 34.7913818359375,
+    "native_step_success": true,
+    "scaler_scale": 1.0,
+    "valid_gt": 69,
+    "assignments": {
+      "num_fg_total": 347,
+      "num_gt_total": 69,
+      "uncovered_gt": 0,
+      "core_positives": 0,
+      "candidate_edges": 0,
+      "covered_gt": 69,
+      "coverage_source": "derived_from_unique_gt_uid",
+      "positive_iou_mean": 0.6915827393531799,
+      "positive_iou_lt_0p1": 0,
+      "positive_iou_lt_0p3": 4
+    },
+    "pos_per_level": {
+      "P3": 265,
+      "P4": 80,
+      "P5": 2
+    },
+    "semantic_step": {
+      "prototype": 3.1895813941955566,
+      "teacher": 0.014383993111550808,
+      "candidate": 1.2243152856826782,
+      "gate": 1.5810891389846802,
+      "candidate_improvement": 0.00018358230590820312,
+      "clean_fg_guard": 0.0005586332990787923,
+      "pert_fg_guard": 0.0005598742282018065,
+      "clean_bin_guard": 0.0008897808729670942,
+      "pert_bin_guard": 0.0008112734067253768,
+      "clean_class_guard": 0.0012265011901035905,
+      "pert_class_guard": 0.0011744386283680797,
+      "clean_gate_fg_loss": 0.7097276449203491,
+      "pert_gate_fg_loss": 0.688185453414917,
+      "clean_gate_bg_loss": 0.7361198663711548,
+      "pert_gate_bg_loss": 0.7292885184288025,
+      "reason": "success"
+    },
+    "semantic_utility": {
+      "candidate_fg_improvement": 0.00014150142669677734,
+      "candidate_bg_improvement": -0.0015101432800292969,
+      "candidate_total_improvement": -0.0013686418533325195,
+      "gate_fg_improvement": 7.271766662597656e-05,
+      "gate_bg_improvement": -0.000657200813293457,
+      "gate_total_improvement": -0.0005844831466674805,
+      "mean_abs_candidate_delta": 0.00958206132054329,
+      "mean_gate_acceptance": 0.375038206577301,
+      "max_abs_candidate_delta": 0.11380814015865326,
+      "mean_baseline_foreground_loss": 1.0308773517608643,
+      "mean_baseline_background_loss": 0.7233879566192627
+    }
+  },
+  "clean_validation": "subset_only"
+}

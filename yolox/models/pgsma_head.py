@@ -114,6 +114,7 @@ class PGSMAHead(TDE_Head):
         obj_target = torch.zeros_like(obj)
         flat_pos = []; flat_lab = []; flat_quality = []; flat_uid = []
         fg_mask = torch.zeros((bsz, total), device=bboxes.device, dtype=torch.bool)
+        gt_by_image = []; flat_sizes = []
         total_gt = 0; uncovered = 0; edge_total = 0; core_count = 0
         for b in range(bsz):
             image_labels = labels[b] if torch.is_tensor(labels) else labels[b]
@@ -121,6 +122,7 @@ class PGSMAHead(TDE_Head):
             valid_gt = ((image_labels[:, 3] > 0) & (image_labels[:, 4] > 0) &
                         torch.isfinite(image_labels).all(dim=1))
             boxes = image_labels[valid_gt, 1:5]
+            gt_by_image.append(boxes.detach())
             classes = image_labels[valid_gt, 0].long()
             n_gt = len(boxes)
             if classes.numel() and ((classes < 0).any() or (classes >= self.num_classes).any()):
@@ -162,6 +164,7 @@ class PGSMAHead(TDE_Head):
                 flat_pos.append(ai + b * total)
                 flat_lab.append(classes[gi]); flat_quality.append(quality)
                 flat_uid.append(gi + total_gt)
+                flat_sizes.append(boxes[gi,2:4].amin(dim=1).detach())
             total_gt += n_gt
         n_fg = sum(len(x) for x in flat_pos)
         empty = torch.empty(0, dtype=torch.long, device=bboxes.device)
@@ -171,9 +174,11 @@ class PGSMAHead(TDE_Head):
             'fg_labels': torch.cat(flat_lab).detach() if flat_lab else empty,
             'fg_quality': torch.cat(flat_quality).detach() if flat_quality else bboxes.new_empty(0),
             'gt_uid': torch.cat(flat_uid).detach() if flat_uid else empty,
-            # hard-negative selection based on detached native objectness only;
-            # no hidden semantic influence on source labels.
-            'bg_ids': self._hard_background(obj.detach(), fg_mask, valid_anchor_mask),
+            'fg_sizes': torch.cat(flat_sizes).detach() if flat_sizes else bboxes.new_empty(0),
+            # Semantic negatives must not be sampled inside/near annotated GT.
+            # This does NOT change native assignment, loss or objectness targets.
+            'bg_ids': self._hard_background(obj.detach(), fg_mask, valid_anchor_mask,
+                                            centers=centers, gt_by_image=gt_by_image),
         }
         self.last_assignment_stats = dict(num_fg_total=n_fg, num_gt_total=total_gt,
                                           uncovered_gt=uncovered, core_positives=core_count,
@@ -218,17 +223,44 @@ class PGSMAHead(TDE_Head):
                 'core_positives': core_count}
 
     @staticmethod
-    def _hard_background(obj, positives, valid_mask, max_neg=256):
+    @torch.no_grad()
+    def _hard_background(obj, positives, valid_mask, max_neg=256,
+                         centers=None, gt_by_image=None, halo=1.25):
+        """Native-objectness top-k for semantics, GT-halo filtered.
+
+        GT coordinates are cxcywh in effective training input pixels. Only
+        semantic negative mining is changed. Chunked geometry prevents a huge
+        anchors-by-GTs allocation on high-resolution UAV imagery.
+        """
         b, n, _ = obj.shape
         mask = ~positives
         if valid_mask is not None:
             mask &= valid_mask.to(mask.device).bool()
-        # Per-image top-k of hardest native objectness background anchors.
+        if not (centers is None and gt_by_image is None):
+            if centers is None or gt_by_image is None or len(gt_by_image) != b:
+                raise ValueError('centers and one GT tensor per image required together')
+            if centers.shape != (n,2):
+                raise ValueError('centers must have shape [num_anchors,2]')
+            if not (1.0 <= float(halo) <= 3.0):
+                raise ValueError('GT halo outside [1,3]')
         out=[]
         for i in range(b):
             ids = torch.nonzero(mask[i], as_tuple=False).flatten()
+            if ids.numel() and centers is not None:
+                gt = gt_by_image[i].detach().float()
+                if gt.numel():
+                    survivors = []
+                    for id_chunk in ids.split(2048):
+                        xy = centers[id_chunk].float()
+                        inside = torch.zeros(len(id_chunk),device=xy.device,dtype=torch.bool)
+                        for g in gt.split(64):
+                            inside |= ((xy[:,None,:]-g[None,:,:2]).abs() <=
+                                       (g[None,:,2:4]*float(halo)/2)).all(-1).any(-1)
+                        survivors.append(id_chunk[~inside])
+                    ids = torch.cat(survivors)
             if ids.numel():
-                k = min(max_neg, ids.numel())
-                chosen = torch.topk(obj[i, ids, 0], k=k, sorted=False).indices
-                out.append(ids[chosen] + i*n)
-        return torch.cat(out).detach() if out else torch.empty(0, device=obj.device,dtype=torch.long)
+                k = min(int(max_neg), ids.numel())
+                chosen = torch.topk(obj[i,ids,0],k=k,sorted=False).indices
+                out.append(ids[chosen]+i*n)
+        return (torch.cat(out).detach() if out else
+                torch.empty(0,device=obj.device,dtype=torch.long))

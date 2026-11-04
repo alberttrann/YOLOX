@@ -1,0 +1,183 @@
+{
+  "status": "QUALIFICATION_WARNINGS",
+  "runs": [
+    {
+      "variant": "native_simota_continue",
+      "native_recipe": "simota_per_positive",
+      "train_steps": 512,
+      "successful_native_updates": 512,
+      "successful_semantic_updates": 0,
+      "clean_subset_coco_final": {
+        "AP50_95": 0.21314477100493678,
+        "AP50": 0.3971528969382313,
+        "AP75": 0.20687140717387267,
+        "AR100": 0.32694634172628817,
+        "AP_small_COCO": 0.0821571120107772,
+        "AP_medium_COCO": 0.2506094012730968,
+        "AP_large_COCO": 0.5265852494880024
+      },
+      "clean_subset_coco_native_final": {
+        "AP50_95": 0.21314477100493678,
+        "AP50": 0.3971528969382313,
+        "AP75": 0.20687140717387267,
+        "AR100": 0.32694634172628817,
+        "AP_small_COCO": 0.0821571120107772,
+        "AP_medium_COCO": 0.2506094012730968,
+        "AP_large_COCO": 0.5265852494880024
+      },
+      "selected_vs_native_AP_AR_delta": {
+        "AP50_95": 0.0,
+        "AP50": 0.0,
+        "AP75": 0.0,
+        "AR100": 0.0
+      },
+      "selected_vs_native_post_nms_recall_at_iou50_delta": {
+        "lt4": 0.0,
+        "4to8": 0.0,
+        "8to16": 0.0,
+        "16to32": 0.0,
+        "ge32": 0.0
+      },
+      "initial_AP50_95": 0.1887402869725521,
+      "last_training_metrics": {
+        "step": 512,
+        "native_loss": 5.372365951538086,
+        "native_grad_norm_before_clip": 48.141212463378906,
+        "native_step_success": true,
+        "scaler_scale": 1.0,
+        "valid_gt": 35,
+        "assignments": {
+          "num_fg_total": 185,
+          "num_gt_total": 35,
+          "uncovered_gt": 0,
+          "core_positives": 0,
+          "candidate_edges": 0,
+          "covered_gt": 35,
+          "coverage_source": "derived_from_unique_gt_uid",
+          "positive_iou_mean": 0.7264447212219238,
+          "positive_iou_lt_0p1": 1,
+          "positive_iou_lt_0p3": 3
+        },
+        "pos_per_level": {
+          "P3": 97,
+          "P4": 66,
+          "P5": 22
+        },
+        "semantic_step": null,
+        "semantic_utility": null
+      },
+      "first_batch_sha256": "979404c972a7c65b9386840f46b5f2653d28c33e5229ddeb0e19a4d4120a7e25",
+      "training_batch_stream_sha256": "5931dada7b475ce97a21ac5412b6664bf519471a9805f25fdcbc48cffc228f27",
+      "native_state_sha256": "4e3cc584b0ca4f2ce38634b1d214c67ab5274e1711f097daa7b1514044ba8ae0"
+    },
+    {
+      "variant": "pgsma_simota",
+      "native_recipe": "simota_per_positive",
+      "train_steps": 512,
+      "successful_native_updates": 512,
+      "successful_semantic_updates": 512,
+      "clean_subset_coco_final": {
+        "AP50_95": 0.21977102277991187,
+        "AP50": 0.39792618193917445,
+        "AP75": 0.21634446659468975,
+        "AR100": 0.3271728933127406,
+        "AP_small_COCO": 0.08359785721700254,
+        "AP_medium_COCO": 0.2589369236048216,
+        "AP_large_COCO": 0.5232438126956599
+      },
+      "clean_subset_coco_native_final": {
+        "AP50_95": 0.21976855691557565,
+        "AP50": 0.3979387297795839,
+        "AP75": 0.21633862361236234,
+        "AR100": 0.3271728933127406,
+        "AP_small_COCO": 0.08353880265770991,
+        "AP_medium_COCO": 0.25895613585518124,
+        "AP_large_COCO": 0.523240047930741
+      },
+      "selected_vs_native_AP_AR_delta": {
+        "AP50_95": 2.4658643362207577e-06,
+        "AP50": -1.2547840409438127e-05,
+        "AP75": 5.8429823274197545e-06,
+        "AR100": 0.0
+      },
+      "selected_vs_native_post_nms_recall_at_iou50_delta": {
+        "lt4": 0.0,
+        "4to8": 0.0,
+        "8to16": 0.0,
+        "16to32": 0.0,
+        "ge32": 0.0
+      },
+      "initial_AP50_95": 0.1887402869725521,
+      "last_training_metrics": {
+        "step": 512,
+        "native_loss": 5.31304931640625,
+        "native_grad_norm_before_clip": 47.59530258178711,
+        "native_step_success": true,
+        "scaler_scale": 1.0,
+        "valid_gt": 35,
+        "assignments": {
+          "num_fg_total": 188,
+          "num_gt_total": 35,
+          "uncovered_gt": 0,
+          "core_positives": 0,
+          "candidate_edges": 0,
+          "covered_gt": 35,
+          "coverage_source": "derived_from_unique_gt_uid",
+          "positive_iou_mean": 0.7302697896957397,
+          "positive_iou_lt_0p1": 1,
+          "positive_iou_lt_0p3": 3
+        },
+        "pos_per_level": {
+          "P3": 95,
+          "P4": 72,
+          "P5": 21
+        },
+        "semantic_step": {
+          "prototype": 1.733866810798645,
+          "teacher": 0.0004927906556986272,
+          "candidate": 1.0411041975021362,
+          "gate": 1.541703224182129,
+          "candidate_improvement": 0.0001322329044342041,
+          "clean_fg_guard": 0.0006098738522268832,
+          "pert_fg_guard": 0.0005762828513979912,
+          "clean_bin_guard": 0.0012477785348892212,
+          "pert_bin_guard": 0.001268342137336731,
+          "clean_class_guard": 0.0024145671632140875,
+          "pert_class_guard": 0.002432273468002677,
+          "clean_gate_fg_loss": 0.6907258033752441,
+          "pert_gate_fg_loss": 0.7032249569892883,
+          "clean_gate_bg_loss": 0.5929607152938843,
+          "pert_gate_bg_loss": 0.5890591144561768,
+          "reason": "success"
+        },
+        "semantic_utility": {
+          "candidate_fg_improvement": 0.0001862645149230957,
+          "candidate_bg_improvement": 0.0038823485374450684,
+          "candidate_total_improvement": 0.004068613052368164,
+          "gate_fg_improvement": 5.6684017181396484e-05,
+          "gate_bg_improvement": 0.0024333596229553223,
+          "gate_total_improvement": 0.0024900436401367188,
+          "mean_abs_candidate_delta": 0.006566754542291164,
+          "mean_gate_acceptance": 0.618607223033905,
+          "max_abs_candidate_delta": 0.05190379172563553,
+          "mean_baseline_foreground_loss": 0.8408528566360474,
+          "mean_baseline_background_loss": 0.7795893549919128
+        }
+      },
+      "first_batch_sha256": "979404c972a7c65b9386840f46b5f2653d28c33e5229ddeb0e19a4d4120a7e25",
+      "training_batch_stream_sha256": "5931dada7b475ce97a21ac5412b6664bf519471a9805f25fdcbc48cffc228f27",
+      "native_state_sha256": "a65060f2ddf4cdec816b13031efac37f75614077e14d27691d0d8558610355c0"
+    }
+  ],
+  "warnings": [
+    "Same native recipe and matched source/data but different final native state; audit optimizer/RNG isolation"
+  ],
+  "qualification": "PILOT_DIAGNOSTICS_ONLY_NOT_FINAL_MODEL_SELECTION",
+  "full_80_epoch_permission": false,
+  "notes": [
+    "COCO AP/AR reported for a small sampled clean-source image subset, not full validation",
+    "Effective-size R@IoU.50 is a separate post-NMS recall diagnostic, not COCO AR",
+    "For semantic causality compare same warmed checkpoint and same data-stream hash",
+    "Repeated seeds/complete clean-val eval and held-out adverse/UAV tests remain necessary"
+  ]
+}

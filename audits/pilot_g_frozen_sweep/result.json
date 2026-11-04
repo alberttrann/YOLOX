@@ -1,0 +1,116 @@
+{
+  "status": "CHECKS_PASSED",
+  "checkpoint_sha256": "8456caae57c73837c82280334c11c0648a16585bd4c360360308ccfc5d2be493",
+  "model_state_unchanged": true,
+  "model_state_sha256": "8f1cb2faa1781da8c40ca350d8a3fa2518be7fbc38016b6ea15d5974f8d749b2",
+  "calibration_images": 128,
+  "confirmation_images": 128,
+  "selection": {
+    "selected": "ungated_1500",
+    "rules": "AP and AR nonregression; COCO small/medium/large AP >= native-.005; effective-bin R@0.5 >= native-.005 for each bin with >=30 GTs; maximize dAP+.5*dAR+.1*dAP75",
+    "rankings": [
+      {
+        "key": "gated_0250",
+        "eligible": false,
+        "reasons": [
+          "AR100_regression"
+        ],
+        "objective_delta": -0.0001214248389175443
+      },
+      {
+        "key": "gated_0500",
+        "eligible": false,
+        "reasons": [
+          "AR100_regression"
+        ],
+        "objective_delta": 6.300567196797502e-05
+      },
+      {
+        "key": "gated_1000",
+        "eligible": false,
+        "reasons": [
+          "AR100_regression"
+        ],
+        "objective_delta": 6.226789072956151e-05
+      },
+      {
+        "key": "gated_1500",
+        "eligible": false,
+        "reasons": [
+          "AP50_95_regression",
+          "AR100_regression"
+        ],
+        "objective_delta": -0.000244942188442851
+      },
+      {
+        "key": "ungated_0250",
+        "eligible": false,
+        "reasons": [
+          "AR100_regression"
+        ],
+        "objective_delta": 4.977028634073344e-05
+      },
+      {
+        "key": "ungated_0500",
+        "eligible": false,
+        "reasons": [
+          "AP50_95_regression",
+          "AR100_regression"
+        ],
+        "objective_delta": -0.00025131856162659006
+      },
+      {
+        "key": "ungated_1000",
+        "eligible": false,
+        "reasons": [
+          "AP50_95_regression",
+          "AR100_regression"
+        ],
+        "objective_delta": -0.00020984784307607752
+      },
+      {
+        "key": "ungated_1500",
+        "eligible": true,
+        "reasons": [],
+        "objective_delta": 0.00024572316223480105
+      }
+    ],
+    "fallback_to_native": false
+  },
+  "confirmation_native": {
+    "AP50_95": 0.21310454004566176,
+    "AP50": 0.3946603973236434,
+    "AP75": 0.18169146641493938,
+    "AR100": 0.32753089414116954,
+    "AP_small_COCO": 0.11020754169438189,
+    "AP_medium_COCO": 0.2269329378487154,
+    "AP_large_COCO": 0.4783375851363131
+  },
+  "confirmation_selected": {
+    "AP50_95": 0.2131475841491601,
+    "AP50": 0.39454317768026914,
+    "AP75": 0.18173509108378463,
+    "AR100": 0.3276841299462128,
+    "AP_small_COCO": 0.11020232796080244,
+    "AP_medium_COCO": 0.22736062820868919,
+    "AP_large_COCO": 0.47814748482979874
+  },
+  "confirmation_original_gated_1": {
+    "AP50_95": 0.21310307212534974,
+    "AP50": 0.3945988550468287,
+    "AP75": 0.18169325442355716,
+    "AR100": 0.32754696227003594,
+    "AP_small_COCO": 0.11021535441946048,
+    "AP_medium_COCO": 0.2270781641026949,
+    "AP_large_COCO": 0.4782244224206879
+  },
+  "limitations": [
+    "One checkpoint and one deterministic clean-source split",
+    "No adverse-domain evidence; do not tune on the adverse test set",
+    "96 earlier pilot images excluded, but clean validation remains source-domain",
+    "Per-image paired bootstrap covers scale recall only, not COCO AP confidence interval",
+    "COCO small AP is area-based and differs from effective min-side scale recall",
+    "Pre-NMS support classification is diagnostic, not proof of a unique NMS cause",
+    "No training, no parameter updates, no full 80-epoch permission"
+  ]
+}

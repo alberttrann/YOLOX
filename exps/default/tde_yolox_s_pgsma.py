@@ -29,7 +29,7 @@ class Exp(VNext2Exp):
         self.pgsma_modes = 4
         self.pgsma_correction = 'direct'
         self.pgsma_variant = 'pgsma'  # or 'memory' for a separately trained control
-        self.scpa = True
+        self.scpa = False  # SimOTA is the current favored controlled matcher; keep SCPA as explicit ablation.
         self.per_gt_normalization = False
         self.semantic_lr = 0.001
         # NO unverified long training should be started with this setting;

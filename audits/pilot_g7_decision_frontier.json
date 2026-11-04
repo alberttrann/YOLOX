@@ -1,0 +1,72 @@
+{
+  "status": "CHECKS_PASSED",
+  "eval_images": 128,
+  "failure_mode_decomposition": {
+    "lt4": {
+      "total_gt": 15,
+      "tp_native": 0,
+      "localization_limited": 14,
+      "objectness_limited": 0,
+      "classification_limited": 0,
+      "nms_limited": 1
+    },
+    "4to8": {
+      "total_gt": 246,
+      "tp_native": 2,
+      "localization_limited": 222,
+      "objectness_limited": 11,
+      "classification_limited": 3,
+      "nms_limited": 8
+    },
+    "8to16": {
+      "total_gt": 823,
+      "tp_native": 20,
+      "localization_limited": 685,
+      "objectness_limited": 90,
+      "classification_limited": 10,
+      "nms_limited": 18
+    },
+    "16to32": {
+      "total_gt": 654,
+      "tp_native": 12,
+      "localization_limited": 427,
+      "objectness_limited": 202,
+      "classification_limited": 8,
+      "nms_limited": 5
+    },
+    "ge32": {
+      "total_gt": 717,
+      "tp_native": 18,
+      "localization_limited": 318,
+      "objectness_limited": 378,
+      "classification_limited": 2,
+      "nms_limited": 1
+    }
+  },
+  "coco_metrics": {
+    "native": {
+      "AP50_95": 0.18771888429340866,
+      "AP50": 0.36226001818295084,
+      "AP75": 0.1701881482355084,
+      "AR100": 0.29272108562912824,
+      "AP_small": 0.08134882463659188,
+      "AP_medium": 0.22910852669946888,
+      "AP_large": 0.35744092353334717
+    },
+    "pgsma": null,
+    "oracle_cls": {
+      "AP50_95": 0.18606957300499513,
+      "AP50": 0.3608614855924033,
+      "AP75": 0.16781618644200982,
+      "AR100": 0.292712987151642,
+      "AP_small": 0.07923658205115082,
+      "AP_medium": 0.22869597844010764,
+      "AP_large": 0.35750374047011846
+    }
+  },
+  "theoretical_classification_headroom": {
+    "delta_AP50_95": -0.0016493112884135297,
+    "delta_AR100": -8.098477486229161e-06,
+    "delta_AP_small": -0.002112242585441057
+  }
+}

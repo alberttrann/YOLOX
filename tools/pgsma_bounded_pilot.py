@@ -67,8 +67,21 @@ def load_weights(model,path,pilot_checkpoint=False):
             raise RuntimeError('Semantic pilot requires a checkpoint from a successful bounded NATIVE pilot')
         if int(metadata.get('successful_native_updates',0))<=0:
             raise RuntimeError('Native warm-start checkpoint has no successful training updates')
-        if mismatches or set(good)!=set(target):
-            raise RuntimeError('Pilot warm-start must exactly match current PG-SMA model state')
+        # A native control checkpoint has NOT trained a semantic gate. A new
+        # gate architecture is expected to be initialized independently, while
+        # EVERY native tensor must still load with exactly matching geometry.
+        # Never silently accept an incomplete or incompatible native warmstart.
+        semantic_prefix='head.pgsma_engine.'
+        native_keys={k for k in target if not k.startswith(semantic_prefix)}
+        missing_native=native_keys-set(good)
+        mismatch_native=[k for k in mismatches if not k.startswith(semantic_prefix)]
+        unexpected_native=[k for k in weights if not k.startswith(semantic_prefix) and k not in target]
+        if missing_native or mismatch_native or unexpected_native:
+            raise RuntimeError('Native warm-start mismatch: missing='+repr(sorted(missing_native)[:8])+
+                ' size='+repr(mismatch_native[:8])+' unexpected='+repr(unexpected_native[:8]))
+        # Do NOT initialize the new gate/predictor/prototypes from a historical
+        # native pilot's random, never-trained semantic state.
+        good={k:v for k,v in good.items() if not k.startswith(semantic_prefix)}
     else:
         # Original COCO checkpoint contains 80-class heads and additional new vNext3 weights.
         # Check coverage of SOURCE pretrained tensors, not new target tensors.
@@ -101,6 +114,73 @@ def capture_rng():
 def restore_rng(state):
     random.setstate(state[0]);np.random.set_state(state[1]);torch.set_rng_state(state[2])
     if state[3] is not None:torch.cuda.set_rng_state_all(state[3])
+
+
+def state_digest(model, semantic_prefix='head.pgsma_engine.'):
+    """Bitwise digests for native model weights AND persistent buffers."""
+    groups={'backbone':hashlib.sha256(), 'head':hashlib.sha256(),
+            'other':hashlib.sha256(), 'all':hashlib.sha256()}
+    for name,tensor in sorted(model.state_dict().items()):
+        if name.startswith(semantic_prefix):
+            continue
+        part='backbone' if name.startswith('backbone.') else 'head' if name.startswith('head.') else 'other'
+        value=tensor.detach().cpu().contiguous()
+        raw=name.encode('utf8')+b'\x00'+str(value.dtype).encode('ascii')+b'\x00'+str(tuple(value.shape)).encode('ascii')+b'\x00'+value.numpy().tobytes()
+        for key in (part,'all'):
+            groups[key].update(raw)
+    return {key:v.hexdigest() for key,v in groups.items()}
+
+
+def grad_digest(model, native_params):
+    """Fingerprint native gradients; call before and after clipping."""
+    names={id(p):name for name,p in model.named_parameters()}
+    digest=hashlib.sha256()
+    for param in sorted(native_params,key=lambda p:names[id(p)]):
+        name=names[id(param)]
+        digest.update(name.encode('utf8')+b'\x00')
+        if param.grad is None:
+            digest.update(b'NO_GRAD')
+        else:
+            grad=param.grad.detach().cpu().contiguous()
+            digest.update(grad.numpy().tobytes())
+    return digest.hexdigest()
+
+
+def optimizer_digest(model, optimizer):
+    """Fingerprint momentum/state to distinguish optimizer drift from model drift."""
+    names={id(p):name for name,p in model.named_parameters()}
+    digest=hashlib.sha256()
+    for group in optimizer.param_groups:
+        for param in group['params']:
+            digest.update(names[id(param)].encode('utf8')+b'\x00')
+            for key,value in sorted(optimizer.state[param].items()):
+                digest.update(str(key).encode('utf8')+b'\x00')
+                if torch.is_tensor(value):
+                    digest.update(value.detach().cpu().contiguous().numpy().tobytes())
+                else:
+                    digest.update(repr(value).encode('utf8'))
+    return digest.hexdigest()
+
+
+def rng_digest(state):
+    h=hashlib.sha256()
+    h.update(repr(state[0]).encode('utf8'))
+    h.update(repr(state[1]).encode('utf8'))
+    h.update(state[2].cpu().numpy().tobytes())
+    if state[3] is not None:
+        for item in state[3]:
+            h.update(item.cpu().numpy().tobytes())
+    return h.hexdigest()
+
+
+def append_parity_row(path, payload):
+    with open(path,'a',encoding='utf8') as output:
+        output.write(json.dumps(payload,sort_keys=True,allow_nan=False)+'\n')
+
+
+def parity_capture_steps(steps):
+    return {step for step in (0,1,2,4,8,16,32,64,128,256,384,512,768,1024,1536,2048)
+            if step<=steps}
 
 
 def make_scaler(enabled):
@@ -199,6 +279,14 @@ def run(args):
     if args.variant not in ('memory','pgsma','native_scpa','native_simota_continue','memory_simota','pgsma_simota') and args.warmstart:
         raise RuntimeError('Warm-start unsupported for this pilot variant')
     if args.seed<0 or args.seed>2147483647:raise ValueError('Seed must be in [0,2^31-1]')
+    if args.strict_determinism:
+        if os.environ.get('CUBLAS_WORKSPACE_CONFIG') not in (':4096:8', ':16:8'):
+            raise RuntimeError('Set CUBLAS_WORKSPACE_CONFIG=:4096:8 in PowerShell BEFORE launching Python')
+        torch.backends.cudnn.deterministic=True
+        torch.backends.cudnn.benchmark=False
+        torch.backends.cudnn.allow_tf32=False
+        torch.backends.cuda.matmul.allow_tf32=False
+        torch.use_deterministic_algorithms(True)
     out=Path(args.out_dir)
     if out.exists() and any(out.iterdir()):
         raise RuntimeError(f'Refusing nonempty output directory {out}; use a new run name')
@@ -215,6 +303,9 @@ def run(args):
     exp.per_gt_normalization=(args.variant=='native_scpa_instance')
     exp.pgsma_variant='memory' if args.variant in ('memory','memory_simota') else 'pgsma' if args.variant in ('pgsma','pgsma_simota') else 'native'
     model=exp.get_model()
+    if args.candidate_objective != 'v2' and args.variant != 'pgsma_simota':
+        raise RuntimeError('Experimental candidate objectives apply only to pgsma_simota bounded pilots')
+    model.semantic.candidate_objective = args.candidate_objective
     inference_mode=configure_variant(model,args.variant)
     checkpoint_info=load_weights(model,args.warmstart or args.checkpoint,
                                  pilot_checkpoint=bool(args.warmstart))
@@ -259,6 +350,8 @@ def run(args):
               'semantic_lr':args.semantic_lr if semantic_optimizer else None,
               'checkpoint':checkpoint_info,'warmstart':bool(args.warmstart),
               'native_recipe':native_recipe(args.variant),
+              'semantic_recipe':'source_dualview_fg_guard_halo_utility_gate_v2',
+              'candidate_objective':args.candidate_objective,
               'mosaic_enabled':not args.no_mosaic,'mosaic_prob':exp.mosaic_prob if not args.no_mosaic else 0.0,
               'eval_images':len(eval_indices),'eval_indices':eval_indices,
               'clean_val_json_sha256':labels_file_digest,
@@ -283,6 +376,14 @@ def run(args):
     finally:
         restore_rng(state)
     logs=[];valid_updates=0;semantic_updates=0;overflow_count=0;first_digest=None;last_metrics={}
+    trace_path=out/'native_parity_trace.jsonl'
+    traced_steps=parity_capture_steps(args.steps) if args.trace_parity else set()
+    if args.trace_parity:
+        append_parity_row(trace_path,{'step':0,'phase':'post_initial_validation',
+                         'model':state_digest(model),
+                         'optimizer':optimizer_digest(model,native_optimizer),
+                         'rng':rng_digest(capture_rng()),
+                         'strict_determinism':bool(args.strict_determinism)})
     stream_digest=hashlib.sha256()
     import time
     started=time.monotonic()
@@ -293,6 +394,18 @@ def run(args):
                 batches=iter(train_loader);batch=next(batches)
             images,targets=batch[:2]
             gt_count=verify_batch(images,targets,exp)
+            # Full-input fingerprint only on parity-traced steps. The ordinary
+            # stream fingerprint samples RGB pixels and is NOT a proof that
+            # every training input pixel is equal.
+            full_input_digest=None
+            if step in traced_steps:
+                h=hashlib.sha256()
+                for t in (images,targets):
+                    v=t.detach().cpu().contiguous()
+                    h.update(str(tuple(v.shape)).encode('ascii'))
+                    h.update(str(v.dtype).encode('ascii'))
+                    h.update(v.numpy().tobytes())
+                full_input_digest=h.hexdigest()
             # Cheap reproducibility fingerprint from GTs and sparse RGB pixels.
             # Not a cryptographic proof of bitwise equality across full images.
             small=hashlib.sha256()
@@ -315,25 +428,56 @@ def run(args):
                 raise FloatingPointError('Native forward produced nonfinite loss')
             correction_mode='memory' if args.variant in ('memory','memory_simota') else 'pgsma'
             sem_metrics=None;utility=None
+            trace_row = {'step':step,'phase':'native_update',
+                         'full_input_sha256':full_input_digest,
+                         'native_loss':finite_scalar(loss.detach(),'native_loss'),
+                         'iou_loss':finite_scalar(outputs['iou_loss'].detach(),'iou_loss'),
+                         'cls_loss':finite_scalar(outputs['cls_loss'].detach(),'cls_loss'),
+                         'conf_loss':finite_scalar(outputs['conf_loss'].detach(),'conf_loss'),
+                         'native_pre_step':state_digest(model)} if step in traced_steps else None
+            semantic_rng_before=None
             if semantic_optimizer is not None:
-                with torch.cuda.amp.autocast(enabled=False):
-                    success,sem_metrics=semantic_optimizer_step(model,semantic_optimizer,
-                        seed=args.seed+1000003*step,correction_mode=correction_mode)
-                if not success:
-                    raise FloatingPointError(f'Semantic optimizer failed at update {step}: {sem_metrics}')
-                semantic_updates+=1
-                if step%args.log_every==0 or step in (1,args.steps):
-                    utility=semantic_utility_probe(model,args.seed+1000003*step,correction_mode)
+                # Diagnostic isolation: semantic work must not consume global
+                # Python / NumPy / CPU Torch / CUDA Torch random streams.
+                semantic_rng_before=capture_rng() if (args.isolate_semantic_rng or args.trace_parity) else None
+                try:
+                    with torch.cuda.amp.autocast(enabled=False):
+                        success,sem_metrics=semantic_optimizer_step(model,semantic_optimizer,
+                            seed=args.seed+1000003*step,correction_mode=correction_mode)
+                    if not success:
+                        raise FloatingPointError(f'Semantic optimizer failed at update {step}: {sem_metrics}')
+                    semantic_updates+=1
+                    if step%args.log_every==0 or step in (1,args.steps):
+                        utility=semantic_utility_probe(model,args.seed+1000003*step,correction_mode)
+                finally:
+                    if semantic_rng_before is not None:
+                        semantic_rng_after=capture_rng()
+                        if trace_row is not None:
+                            trace_row['semantic_rng_before']=rng_digest(semantic_rng_before)
+                            trace_row['semantic_rng_after']=rng_digest(semantic_rng_after)
+                            trace_row['semantic_rng_changed']=(
+                                trace_row['semantic_rng_before']!=trace_row['semantic_rng_after'])
+                        if args.isolate_semantic_rng:
+                            restore_rng(semantic_rng_before)
                 semantic_optimizer.zero_grad(set_to_none=True)
             native_optimizer.zero_grad(set_to_none=True)
             scaler.scale(loss).backward()
             scaler.unscale_(native_optimizer)
+            if trace_row is not None:
+                trace_row['native_grad_before_clip']=grad_digest(model,native_params)
             bad_native=[p for p in native_params if p.grad is not None and not torch.isfinite(p.grad).all()]
             grad_before=None
             if not bad_native:
                 grad_before=finite_scalar(torch.nn.utils.clip_grad_norm_(native_params,10.0,error_if_nonfinite=True),'grad_norm')
+            if trace_row is not None:
+                trace_row['native_grad_after_clip']=grad_digest(model,native_params)
             before=scaler.get_scale()
             scaler.step(native_optimizer);scaler.update()
+            if trace_row is not None:
+                trace_row['native_post_step']=state_digest(model)
+                trace_row['native_optimizer_post_step']=optimizer_digest(model,native_optimizer)
+                trace_row['rng_after_step']=rng_digest(capture_rng())
+                append_parity_row(trace_path,trace_row)
             after=scaler.get_scale()
             did_step=(not args.amp) or (after>=before)
             if bad_native and did_step:
@@ -400,6 +544,8 @@ def run(args):
         save_pilot_checkpoint(out/'pilot_last.pth',model,native_optimizer,semantic_optimizer,scaler,
             {'variant':args.variant,'steps':args.steps,'successful_native_updates':valid_updates,
              'successful_semantic_updates':semantic_updates,'seed':args.seed,
+             'semantic_recipe':'source_dualview_fg_guard_halo_utility_gate_v2_'+args.candidate_objective,
+             'candidate_objective':args.candidate_objective,
              'clean_val_sha256':labels_file_digest,'source_sha256':checkpoint_info['sha256']})
         atomic_json(out/'result.json',run_info)
         return run_info
@@ -414,12 +560,22 @@ def run(args):
 def main():
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('--variant',choices=VARIANTS,required=True)
+    p.add_argument('--candidate-objective',
+                   choices=('v2','margin_probe','bounded_probe','margin_bg_probe','bounded_bg_probe'),
+                   default='v2',
+                   help='Opt-in causal objective ablation; native training/inference unchanged')
     p.add_argument('--steps',type=int,required=True)
     p.add_argument('--checkpoint',default='weights/yolox_s.pth')
     p.add_argument('--warmstart',default=None,help='Required for memory/pgsma; native pilot checkpoint')
     p.add_argument('--batch-size',type=int,default=1)
     p.add_argument('--device',default='cuda')
     p.add_argument('--amp',action='store_true')
+    p.add_argument('--trace-parity',action='store_true',
+                   help='Write per-stage native model/gradient/optimizer/RNG fingerprints at diagnostic steps')
+    p.add_argument('--strict-determinism',action='store_true',
+                   help='Require deterministic PyTorch/CUDA algorithms; may reveal unsupported ops')
+    p.add_argument('--isolate-semantic-rng',action='store_true',
+                   help='Capture/restore global RNG around semantic optimizer/probe')
     p.add_argument('--no-mosaic',action='store_true')
     p.add_argument('--native-lr',type=float,default=None)
     p.add_argument('--semantic-lr',type=float,default=0.001)

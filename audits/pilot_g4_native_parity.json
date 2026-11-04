@@ -1,0 +1,24 @@
+{
+  "status": "PARITY_MATCH",
+  "common_steps": [
+    0,
+    1,
+    2,
+    4,
+    8,
+    16,
+    32,
+    64,
+    128,
+    256
+  ],
+  "first_divergence": null,
+  "divergent_steps": [],
+  "native_state_final_equal": true,
+  "semantic_rng_consumption": {
+    "left": [],
+    "right": []
+  },
+  "interpretation": "Native-state parity holds at traced points. Validate full per-step trace and compare native-disabled versus semantic-enabled inference on the same model.",
+  "full_training_authorized": false
+}

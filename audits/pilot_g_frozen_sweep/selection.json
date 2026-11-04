@@ -1,0 +1,72 @@
+{
+  "selected": "ungated_1500",
+  "rules": "AP and AR nonregression; COCO small/medium/large AP >= native-.005; effective-bin R@0.5 >= native-.005 for each bin with >=30 GTs; maximize dAP+.5*dAR+.1*dAP75",
+  "rankings": [
+    {
+      "key": "gated_0250",
+      "eligible": false,
+      "reasons": [
+        "AR100_regression"
+      ],
+      "objective_delta": -0.0001214248389175443
+    },
+    {
+      "key": "gated_0500",
+      "eligible": false,
+      "reasons": [
+        "AR100_regression"
+      ],
+      "objective_delta": 6.300567196797502e-05
+    },
+    {
+      "key": "gated_1000",
+      "eligible": false,
+      "reasons": [
+        "AR100_regression"
+      ],
+      "objective_delta": 6.226789072956151e-05
+    },
+    {
+      "key": "gated_1500",
+      "eligible": false,
+      "reasons": [
+        "AP50_95_regression",
+        "AR100_regression"
+      ],
+      "objective_delta": -0.000244942188442851
+    },
+    {
+      "key": "ungated_0250",
+      "eligible": false,
+      "reasons": [
+        "AR100_regression"
+      ],
+      "objective_delta": 4.977028634073344e-05
+    },
+    {
+      "key": "ungated_0500",
+      "eligible": false,
+      "reasons": [
+        "AP50_95_regression",
+        "AR100_regression"
+      ],
+      "objective_delta": -0.00025131856162659006
+    },
+    {
+      "key": "ungated_1000",
+      "eligible": false,
+      "reasons": [
+        "AP50_95_regression",
+        "AR100_regression"
+      ],
+      "objective_delta": -0.00020984784307607752
+    },
+    {
+      "key": "ungated_1500",
+      "eligible": true,
+      "reasons": [],
+      "objective_delta": 0.00024572316223480105
+    }
+  ],
+  "fallback_to_native": false
+}
