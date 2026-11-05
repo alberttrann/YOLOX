@@ -1,0 +1,16 @@
+{
+  "package": "vnext2_ttt_phaseB_paired_views",
+  "scope": "additive only: new tools and tests, never overwrites YOLOX core files",
+  "files": {
+    "ARCHITECTURE_AND_ACCEPTANCE.md": "1737cfdcce0ce79e18a1e31717c82b84c53dd0c4677d21d6ebf27a7c79c1de9e",
+    "PORTABLE_TEST_OUTPUT.txt": "ad76d7c17b708d6eb5c52ee6c2c12fabd4e4b8502af161f0e9a9fb8851fe4c6b",
+    "README.md": "eeb87a18c48b77369a84a5b116a6a6a4706d01d1a0d40bdb9c4379686bcb39ed",
+    "SNAPSHOT_TEST_OUTPUT.txt": "5e37e726b9be6be4185258f8c49cc09ee74a37271a1c0ad96e0440168d521fae",
+    "tests/test_safe_ttt_phaseB_snapshot.py": "bc83221973ef24037d260c29d1225027c38e04d73c6e976bbdd76005a2b8c0be",
+    "tests/test_safe_ttt_phaseB_source_views.py": "41a5f67af6d10ef2980927eb4ce9dcea40de4cbd8eea587c39ede3213f4c2de3",
+    "tools/pilot_safe_ttt_paired_views.py": "d54a567c4b53aa4169aafbfaffd2bb76dbcd8abe8237c9498b458addbc65e451",
+    "tools/summarize_safe_ttt_phaseB.py": "78934ecf4f48ed7746729c0b8c29950e35a2638d0a6010e2e8b8b1c6d045bfc5",
+    "tools/ttt_source_views.py": "efc71940486a3d15fdf311807ffddc8b0f3a769e790535c1c9bd317751d0307e"
+  },
+  "validation": "portable property tests plus older YOLOX-S 64px CPU full-graph smoke. NOT checkpoint/CUDA/AP/AR proof."
+}

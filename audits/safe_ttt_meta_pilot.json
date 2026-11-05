@@ -1,0 +1,264 @@
+{
+  "protocol": {
+    "checkpoint": "YOLOX_outputs/tde_yolox_s_full_vnext2/latest_ckpt.pth",
+    "model_exp": "exps/default/tde_yolox_s.py",
+    "train_indices": [
+      0,
+      1
+    ],
+    "holdout_indices": [
+      10,
+      37
+    ],
+    "steps": 2,
+    "lr": 0.0005,
+    "rank": 8,
+    "basis_gain": 1.0,
+    "step_policy": "normalized",
+    "weights": "ema",
+    "objective_mode": "detector_total",
+    "clean_train_only": true,
+    "native_sha256": "7e7e2d4a8453bde877fa2434853896bdcb6d2776b090e42d84cdea7e7ad20ed3",
+    "fixed_native_matches": true
+  },
+  "before_holdout": [
+    {
+      "index": 10,
+      "native": 1.919098138809204,
+      "adapted": 1.9189846515655518,
+      "delta": -0.00011348724365234375,
+      "cosine": [
+        -0.3195277750492096
+      ],
+      "grad_norm": [
+        1.4098342035140377e-05
+      ],
+      "logit_effects": {
+        "bbox": {
+          "max_absolute_difference": 0.6234970092773438,
+          "mean_absolute_difference": 0.008901787921786308,
+          "relative_l2": 5.920955300098285e-05,
+          "fraction_exactly_changed": 0.9972924590110779
+        },
+        "objectness_logit": {
+          "max_absolute_difference": 0.024866104125976562,
+          "mean_absolute_difference": 0.0014711094554513693,
+          "relative_l2": 0.0001771673560142517,
+          "fraction_exactly_changed": 0.9996692538261414
+        },
+        "class_logits": {
+          "max_absolute_difference": 0.009214401245117188,
+          "mean_absolute_difference": 0.0006854482344351709,
+          "relative_l2": 0.00017172045772895217,
+          "fraction_exactly_changed": 0.9997703433036804
+        }
+      },
+      "scales": {
+        "small": {
+          "box": -9.292364120483398e-05,
+          "classification": -7.18235969543457e-06,
+          "positive_objectness": -1.1086463928222656e-05
+        },
+        "medium": {
+          "box": -3.084540367126465e-06,
+          "classification": 2.7611851692199707e-05,
+          "positive_objectness": -2.0310282707214355e-05
+        },
+        "large": {
+          "box": -1.8011778593063354e-06,
+          "classification": 4.511699080467224e-05,
+          "positive_objectness": 4.101544618606567e-06
+        }
+      }
+    },
+    {
+      "index": 37,
+      "native": 2.3223347663879395,
+      "adapted": 2.3222975730895996,
+      "delta": -3.719329833984375e-05,
+      "cosine": [
+        -0.5334813594818115
+      ],
+      "grad_norm": [
+        1.3518702871806454e-05
+      ],
+      "logit_effects": {
+        "bbox": {
+          "max_absolute_difference": 0.544891357421875,
+          "mean_absolute_difference": 0.009251669049263,
+          "relative_l2": 6.0579222918022424e-05,
+          "fraction_exactly_changed": 0.9976645112037659
+        },
+        "objectness_logit": {
+          "max_absolute_difference": 0.017457962036132812,
+          "mean_absolute_difference": 0.0016637607477605343,
+          "relative_l2": 0.00018948422803077847,
+          "fraction_exactly_changed": 0.9997519254684448
+        },
+        "class_logits": {
+          "max_absolute_difference": 0.00990152359008789,
+          "mean_absolute_difference": 0.0007418862660415471,
+          "relative_l2": 0.00018772621115203947,
+          "fraction_exactly_changed": 0.9997243881225586
+        }
+      },
+      "scales": {
+        "small": {
+          "box": -7.325410842895508e-05,
+          "classification": -5.960464477539062e-07,
+          "positive_objectness": 1.233816146850586e-05
+        },
+        "medium": {
+          "box": -1.3768672943115234e-05,
+          "classification": -1.5720725059509277e-06,
+          "positive_objectness": 1.3690441846847534e-06
+        },
+        "large": {
+          "box": -1.037493348121643e-06,
+          "classification": -1.0030344128608704e-06,
+          "positive_objectness": 4.6584755182266235e-06
+        }
+      }
+    }
+  ],
+  "pilot_steps": [
+    {
+      "native_detection_loss": 1.016239881515503,
+      "adapted_detection_loss": 1.016187071800232,
+      "meta_objective": 1.0161973237991333,
+      "scale_nonregression": {
+        "small": 0.0,
+        "medium": 0.0,
+        "large": 6.124377250671387e-05
+      },
+      "meta_predictor_grad_norm": 0.0005137923632514025,
+      "adapter_grad_norm": 0.0014603857580442053,
+      "preclip_total_grad_norm": 0.0015483583556488156,
+      "step_policy": "normalized",
+      "objective_mode": "detector_total",
+      "per_scale_nonregression_weight": 0.5,
+      "background_weight": 0.1,
+      "step": 1,
+      "source_train_index": 0
+    },
+    {
+      "native_detection_loss": 4.317151069641113,
+      "adapted_detection_loss": 4.317025184631348,
+      "meta_objective": 4.317118167877197,
+      "scale_nonregression": {
+        "small": 0.0,
+        "medium": 0.0003725290298461914
+      },
+      "meta_predictor_grad_norm": 0.0016152858123788083,
+      "adapter_grad_norm": 0.0050988948584245915,
+      "preclip_total_grad_norm": 0.005348897539079189,
+      "step_policy": "normalized",
+      "objective_mode": "detector_total",
+      "per_scale_nonregression_weight": 0.5,
+      "background_weight": 0.1,
+      "step": 2,
+      "source_train_index": 1
+    }
+  ],
+  "after_holdout": [
+    {
+      "index": 10,
+      "native": 1.919098138809204,
+      "adapted": 1.919265627861023,
+      "delta": 0.00016748905181884766,
+      "cosine": [
+        -0.44509831070899963
+      ],
+      "grad_norm": [
+        1.3380055861489382e-05
+      ],
+      "logit_effects": {
+        "bbox": {
+          "max_absolute_difference": 0.8766326904296875,
+          "mean_absolute_difference": 0.009340504184365273,
+          "relative_l2": 6.54847826808691e-05,
+          "fraction_exactly_changed": 0.9977265000343323
+        },
+        "objectness_logit": {
+          "max_absolute_difference": 0.023187637329101562,
+          "mean_absolute_difference": 0.001484811888076365,
+          "relative_l2": 0.00017763813957571983,
+          "fraction_exactly_changed": 0.9998345971107483
+        },
+        "class_logits": {
+          "max_absolute_difference": 0.008878707885742188,
+          "mean_absolute_difference": 0.0006952760741114616,
+          "relative_l2": 0.00017473679326940328,
+          "fraction_exactly_changed": 0.9997887015342712
+        }
+      },
+      "scales": {
+        "small": {
+          "box": 1.379847526550293e-05,
+          "classification": -8.046627044677734e-07,
+          "positive_objectness": -1.1533498764038086e-05
+        },
+        "medium": {
+          "box": 2.1904706954956055e-05,
+          "classification": 8.487701416015625e-05,
+          "positive_objectness": 3.968179225921631e-05
+        },
+        "large": {
+          "box": 2.2910535335540771e-07,
+          "classification": 1.1552125215530396e-05,
+          "positive_objectness": -2.7846544981002808e-06
+        }
+      }
+    },
+    {
+      "index": 37,
+      "native": 2.3223347663879395,
+      "adapted": 2.322399616241455,
+      "delta": 6.4849853515625e-05,
+      "cosine": [
+        -0.18944214284420013
+      ],
+      "grad_norm": [
+        1.3937138646724634e-05
+      ],
+      "logit_effects": {
+        "bbox": {
+          "max_absolute_difference": 0.68212890625,
+          "mean_absolute_difference": 0.00933231320232153,
+          "relative_l2": 6.225353718036786e-05,
+          "fraction_exactly_changed": 0.9980984926223755
+        },
+        "objectness_logit": {
+          "max_absolute_difference": 0.020298004150390625,
+          "mean_absolute_difference": 0.0016512003494426608,
+          "relative_l2": 0.00018513012037146837,
+          "fraction_exactly_changed": 0.9999172687530518
+        },
+        "class_logits": {
+          "max_absolute_difference": 0.009319305419921875,
+          "mean_absolute_difference": 0.0007409190875478089,
+          "relative_l2": 0.00018588009697850794,
+          "fraction_exactly_changed": 0.9997703433036804
+        }
+      },
+      "scales": {
+        "small": {
+          "box": -7.927417755126953e-06,
+          "classification": -3.0100345611572266e-06,
+          "positive_objectness": 6.651878356933594e-05
+        },
+        "medium": {
+          "box": -1.0229647159576416e-05,
+          "classification": -1.8849968910217285e-06,
+          "positive_objectness": -1.234002411365509e-05
+        },
+        "large": {
+          "box": -3.1320378184318542e-06,
+          "classification": -7.096678018569946e-07,
+          "positive_objectness": 6.16908073425293e-06
+        }
+      }
+    }
+  ],
+  "native_model_mutations": []
+}

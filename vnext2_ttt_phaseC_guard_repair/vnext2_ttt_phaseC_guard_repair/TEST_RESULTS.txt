@@ -1,0 +1,12 @@
+PASS detector-unit background guard and gradient coefficient
+PASS calibrated background margin semantics
+PASS clean total nonregression separate from shifted view
+PASS scale-specific matched-positive normalization and absent-scale handling
+PASS zero-delta constraints and strict fixed-target accounting
+/mnt/data/vnext2_ttt_phaseB_validation/source/yolox/models/engram_head.py:460: FutureWarning: `torch.cuda.amp.autocast(args...)` is deprecated. Please use `torch.amp.autocast('cuda', args...)` instead.
+  with torch.cuda.amp.autocast(enabled=False):
+/mnt/data/vnext2_ttt_phaseB_validation/source/yolox/models/engram_head.py:359: FutureWarning: `torch.cuda.amp.autocast(args...)` is deprecated. Please use `torch.amp.autocast('cuda', args...)` instead.
+  with torch.cuda.amp.autocast(enabled=False):
+/mnt/data/vnext2_ttt_phaseB_validation/source/yolox/models/losses.py:34: FutureWarning: `torch.cuda.amp.autocast(args...)` is deprecated. Please use `torch.amp.autocast('cuda', args...)` instead.
+  with torch.cuda.amp.autocast(enabled=False):
+PASS Phase C full TDE snapshot 2-episode meta-grad accumulation; gradient_norm 8.74966324917415e-06

@@ -1,0 +1,9 @@
+/mnt/data/vnext2_ttt_phaseB_validation/source/yolox/models/engram_head.py:460: FutureWarning: `torch.cuda.amp.autocast(args...)` is deprecated. Please use `torch.amp.autocast('cuda', args...)` instead.
+  with torch.cuda.amp.autocast(enabled=False):
+/mnt/data/vnext2_ttt_phaseB_validation/source/yolox/models/engram_head.py:359: FutureWarning: `torch.cuda.amp.autocast(args...)` is deprecated. Please use `torch.amp.autocast('cuda', args...)` instead.
+  with torch.cuda.amp.autocast(enabled=False):
+/mnt/data/vnext2_ttt_phaseB_validation/source/yolox/models/losses.py:34: FutureWarning: `torch.cuda.amp.autocast(args...)` is deprecated. Please use `torch.amp.autocast('cuda', args...)` instead.
+  with torch.cuda.amp.autocast(enabled=False):
+PASS paired full YOLOX snapshot clean_weight 0.0 teacher_weight 0.0 meta gradient 1.2262852813790834e-05 task delta 0.0 test delta 0.0
+PASS paired full YOLOX snapshot clean_weight 0.5 teacher_weight 0.0 meta gradient 1.825484216414102e-05 task delta 0.0 test delta 0.0
+PASS paired full YOLOX snapshot clean_weight 0.5 teacher_weight 0.03 meta gradient 1.825484216414102e-05 task delta 0.0 test delta 0.0
