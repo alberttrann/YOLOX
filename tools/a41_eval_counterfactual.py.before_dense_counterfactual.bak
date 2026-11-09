@@ -1,0 +1,214 @@
+"""A4.1: strict same-checkpoint counterfactuals + native COCO detections.
+
+This uses the user's existing evaluator (not a second scoring implementation).
+It captures the COCO detection list from evaluate_prediction before scoring, so
+paired bootstrap and matched-object probes can use the exact same predictions.
+"""
+from __future__ import annotations
+import argparse
+import hashlib
+import json
+import os
+from pathlib import Path
+import sys
+import torch
+
+ROOT=Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:sys.path.insert(0,str(ROOT))
+from yolox.exp import get_exp
+
+
+class AutocastForward(torch.nn.Module):
+    """AMP inference without mutating FP32 model weights.
+
+    YOLOX COCOEvaluator's ``half=True`` calls ``model.half()``. Some TDE
+    modules use float32 intermediates and then call convs; casting their
+    weights to half creates dtype-mismatch failures. Leave model in float32,
+    pass ``half=False`` to evaluator, and autocast only its model forward.
+    """
+    def __init__(self, model, *, device_type='cuda', amp_dtype=torch.float16):
+        super().__init__()
+        self.model = model
+        self.device_type = device_type
+        self.amp_dtype = amp_dtype
+
+    def forward(self, *args, **kwargs):
+        with torch.autocast(device_type=self.device_type, dtype=self.amp_dtype):
+            return self.model(*args, **kwargs)
+
+
+
+def sha256(path):
+    h=hashlib.sha256()
+    with open(path,'rb') as f:
+        for chunk in iter(lambda:f.read(1<<20),b''):h.update(chunk)
+    return h.hexdigest()
+
+
+def category_signature(annotation_path):
+    with open(annotation_path,encoding='utf-8') as f: data=json.load(f)
+    return [(int(c['id']),c['name'].strip().lower()) for c in data['categories']]
+
+
+def check_categories(train,valid):
+    source=category_signature(train)
+    target=category_signature(valid)
+    if source!=target:
+        raise RuntimeError('CATEGORY_MAP_MISMATCH: categories and COCO IDs/order must match exactly. '
+                           'Convert or explicitly harmonize the validation annotations first; '
+                           f'REFERENCE={source} TARGET={target}')
+    return source
+
+
+def apply_branch(model, branch):
+    allowed=('on','fourier-off','memory-off','both-off','spi-off',
+             'context-off','all-new-off')
+    if branch not in allowed:
+        raise ValueError('Unknown A4.1 counterfactual branch: '+branch)
+    head=model.head
+    if branch in ('fourier-off','both-off','all-new-off'):
+        if not hasattr(head,'spectral_adapters'):
+            raise RuntimeError('Fourier branch unavailable')
+        for adapter in head.spectral_adapters:
+            if not hasattr(adapter,'enabled'):
+                raise RuntimeError('Adapter has no exact inference bypass')
+            adapter.enabled=False
+    if branch in ('memory-off','both-off','all-new-off'):
+        if not hasattr(head,'memory_enabled'):
+            raise RuntimeError('Engram branch unavailable')
+        head.memory_enabled=False
+    if branch in ('spi-off','all-new-off'):
+        if not hasattr(model.backbone.spi_highway,'enabled'):
+            raise RuntimeError('SPI branch has no exact inference bypass')
+        model.backbone.spi_highway.enabled=False
+    if branch in ('context-off','all-new-off'):
+        for name in ('C3_p3','C3_p4','C3_n3','C3_n4'):
+            module=getattr(model.backbone,name,None)
+            if module is None or not hasattr(module,'context_enabled'):
+                raise RuntimeError('Context bypass not implemented for '+name)
+            module.context_enabled=False
+
+
+def main(argv=None):
+    p=argparse.ArgumentParser()
+    p.add_argument('--model-exp',required=True)
+    p.add_argument('--data-exp',required=True)
+    p.add_argument('--checkpoint',required=True)
+    p.add_argument('--weights',choices=['ema','raw'],default='ema')
+    p.add_argument('--branches',nargs='+',default=['on','fourier-off','memory-off','both-off'])
+    p.add_argument('--batch-size',type=int,default=8)
+    p.add_argument('--conf',type=float,default=.01)
+    p.add_argument('--nms',type=float,default=.60)
+    p.add_argument('--device',default='cuda')
+    p.add_argument('--fp16',action='store_true',help='Use CUDA AMP autocast (FP32 model weights); NOT full model.half()')
+    p.add_argument('--skip-existing',action='store_true',help='Skip branches only when saved output provenance matches')
+    p.add_argument('--test',action='store_true',help='Use data-exp test_ann rather than val_ann')
+    p.add_argument('--output-dir',required=True)
+    p.add_argument('--dry-run',action='store_true')
+    a=p.parse_args(argv)
+    if not Path(a.checkpoint).is_file():raise FileNotFoundError(a.checkpoint)
+    mexp=get_exp(a.model_exp,None);dexp=get_exp(a.data_exp,None)
+    if getattr(mexp,'fourier_variant',None) not in ('a41','a41_control','a41_mosaic_a4'):
+        raise RuntimeError('A4.1 evaluator accepts A4.1 models only')
+    from yolox.core.a41_trainer import build_a41_provenance, verify_a41_provenance
+    from types import SimpleNamespace
+    provfile=Path(a.checkpoint).parent/'a41_provenance.json'
+    if not provfile.is_file():
+        raise RuntimeError('Missing A4.1 checkpoint provenance: '+str(provfile))
+    previous=json.loads(provfile.read_text(encoding='utf-8'))
+    mexp.exp_name=previous['experiment']
+    current=build_a41_provenance(ROOT,mexp,SimpleNamespace(
+        batch_size=previous['batch_size'],ckpt=previous['train_from_checkpoint']))
+    verify_a41_provenance(previous,current)
+    if hasattr(mexp,'_preflight'):mexp._preflight()
+    for key in ('data_dir','val_ann','test_ann','test_size'):
+        if not hasattr(dexp,key):raise RuntimeError('Missing dataset-only field '+key)
+        setattr(mexp,key,getattr(dexp,key))
+    mexp.test_conf=a.conf;mexp.nmsthre=a.nms
+    active_ann=mexp.test_ann if a.test else mexp.val_ann
+    cats=check_categories(mexp.train_ann,active_ann)
+    if a.dry_run:
+        print(json.dumps({'model_exp':a.model_exp,'data_exp':a.data_exp,
+                          'test_size':mexp.test_size,'categories':cats,
+                          'checkpoint_sha256':sha256(a.checkpoint),'branches':a.branches},indent=2))
+        return
+    device=torch.device(a.device)
+    if device.type=='cuda' and not torch.cuda.is_available():raise RuntimeError('CUDA unavailable')
+    if a.fp16 and device.type!='cuda':raise RuntimeError('--fp16 currently requires CUDA autocast')
+    precision_mode='cuda_autocast_fp16' if a.fp16 else 'fp32'
+    checkpoint_hash=sha256(a.checkpoint)
+    print('P0_PRECISION',precision_mode,'native_evaluator_half=False',flush=True)
+    ckpt=torch.load(a.checkpoint,map_location='cpu',weights_only=False)
+    key='ema_model' if a.weights=='ema' else 'model'
+    if not isinstance(ckpt,dict) or key not in ckpt or not isinstance(ckpt[key],dict):
+        raise RuntimeError('Requested checkpoint '+key+' is unavailable or not a state dict')
+    state={k.removeprefix('module.'):v for k,v in ckpt[key].items()}
+    dest=Path(a.output_dir);dest.mkdir(parents=True,exist_ok=True)
+    for branch in a.branches:
+        branch_dir=dest/branch
+        if a.skip_existing and (branch_dir/'metadata.json').is_file() and (branch_dir/'detections.json').is_file():
+            old=json.loads((branch_dir/'metadata.json').read_text(encoding='utf-8'))
+            expected={'branch':branch,'dataset_exp':a.data_exp,'data_ann':active_ann,
+                      'model_exp':a.model_exp,'checkpoint_sha256':checkpoint_hash,
+                      'weights':a.weights,'categories':cats,'conf':a.conf,
+                      'nms':a.nms,'input_size':list(mexp.test_size),
+                      'batch_size':a.batch_size,'fp16':a.fp16,
+                      'precision_mode':precision_mode,'testdev':a.test}
+            # JSON loads nested categories as lists (not tuples).
+            expected['categories']=[list(c) for c in cats]
+            if all(old.get(k)==v for k,v in expected.items()):
+                print('P0_SKIP_VERIFIED',branch,branch_dir,flush=True)
+                continue
+            raise RuntimeError('Existing P0 outputs have mismatched provenance: '+str(branch_dir)+
+                               '; archive or remove this branch output, do not overwrite it')
+        # Independent model per branch: module enabled flags are not state_dict
+        # tensors and cannot be reset by reloading weights into the SAME model.
+        model_exp=get_exp(a.model_exp,None)
+        model_exp.exp_name=previous['experiment']
+        if hasattr(model_exp,'_preflight'):model_exp._preflight()
+        for key in ('data_dir','val_ann','test_ann','test_size'):
+            setattr(model_exp,key,getattr(mexp,key))
+        model_exp.test_conf=a.conf;model_exp.nmsthre=a.nms
+        model=model_exp.get_model().cpu()
+        model.load_state_dict(state,strict=True)
+        apply_branch(model,branch)
+        # Crucially, DO NOT call model.half(). In CUDA AMP, the conv kernels
+        # cast operands as needed while float32 intermediate paths stay legal.
+        model=model.eval().to(device=device,dtype=torch.float32)
+        eval_model=(AutocastForward(model,device_type='cuda',amp_dtype=torch.float16).eval()
+                    if a.fp16 else model)
+        evaluator=model_exp.get_evaluator(a.batch_size,False,a.test,False)
+        evaluator.per_class_AP=True; evaluator.per_class_AR=True
+        if not hasattr(evaluator,'evaluate_prediction'):
+            raise RuntimeError('Evaluator lacks evaluate_prediction; capture requires adaptation')
+        captured=[]
+        captured_calls=[0]
+        original=evaluator.evaluate_prediction
+        def intercept(*args,**kwargs):
+            captured_calls[0]+=1
+            if not args or not isinstance(args[0],list):
+                raise RuntimeError('Evaluator prediction signature changed; refusing uncaptured AP')
+            captured.extend(args[0])
+            return original(*args,**kwargs)
+        evaluator.evaluate_prediction=intercept
+        with torch.no_grad():
+            # COCOEvaluator half=True would cast the ENTIRE model to float16;
+            # this is precisely what caused the user's float-vs-half conv error.
+            results=evaluator.evaluate(eval_model,False,False,None,None,model_exp.test_size)
+        if captured_calls[0]==0:
+            raise RuntimeError('COCO evaluate_prediction was not called; cannot trust capture')
+        raw=results[-1]
+        branch_dir=dest/branch;branch_dir.mkdir(parents=True,exist_ok=True)
+        (branch_dir/'detections.json').write_text(json.dumps(captured),encoding='utf-8')
+        meta={'a41_provenance_sha256':sha256(provfile),
+              'branch':branch,'dataset_exp':a.data_exp,'data_ann':active_ann,'testdev':a.test,
+              'model_exp':a.model_exp,'checkpoint':a.checkpoint,
+              'checkpoint_sha256':checkpoint_hash,'weights':a.weights,
+              'categories':cats,'conf':a.conf,'nms':a.nms,'input_size':mexp.test_size,
+              'batch_size':a.batch_size,'fp16':a.fp16,'precision_mode':precision_mode,'summary':str(raw),
+              'prediction_count':len(captured)}
+        (branch_dir/'metadata.json').write_text(json.dumps(meta,indent=2),encoding='utf-8')
+        print('CAPTURED',branch,'count=',len(captured),'\n',str(raw))
+
+
+if __name__=='__main__':main()

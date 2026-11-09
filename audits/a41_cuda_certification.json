@@ -1,0 +1,42 @@
+{
+  "experiment": "tdevnext3_a41_dct_grounded",
+  "basis": "dct",
+  "wrapper_type": "MosaicDetection",
+  "underlying_type": "COCODataset",
+  "underlying_preproc": null,
+  "wrapper_preproc": "TrainTransform",
+  "mosaic_prob": 0.5,
+  "sampler_mosaic": true,
+  "target_capacity": 364,
+  "max_epoch": 80,
+  "no_aug_epochs": 15,
+  "synthetic_cuda_or_cpu": {
+    "device": "cuda",
+    "total_loss": 9.724275588989258,
+    "proto_loss": 0.1227378398180008,
+    "nonzero_gradient_family_l1": {
+      "spi_highway.projector": 3.4534599781036377,
+      "spi_highway.router": 1.892954707145691,
+      "C3_p3.global_mixer": 3.997161626815796,
+      "spectral_adapters": 13.737220764160156,
+      "memory_banks": 2.819364547729492
+    },
+    "assignment": {
+      "num_fg_total": 2,
+      "num_gt_total": 2,
+      "uncovered_gt": 0,
+      "assignment_mode": "vnext3_portable",
+      "grounded_memory_pos": 2,
+      "a41_missing_before": 0,
+      "a41_missing_after": 0,
+      "a41_augmenting_paths_attempted": 0,
+      "a41_augmenting_paths_successful": 0,
+      "a41_searches_candidate_capped": 0
+    },
+    "class_grounding": {
+      "positive_assignments": 2,
+      "classes": 2,
+      "proto_weight": 0.05
+    }
+  }
+}

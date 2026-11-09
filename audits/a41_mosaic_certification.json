@@ -1,0 +1,18 @@
+{
+  "experiment": "tdevnext3_a41_dct_grounded",
+  "basis": "dct",
+  "wrapper_type": "MosaicDetection",
+  "underlying_type": "COCODataset",
+  "underlying_preproc": null,
+  "wrapper_preproc": "TrainTransform",
+  "mosaic_prob": 0.5,
+  "sampler_mosaic": true,
+  "target_capacity": 364,
+  "max_epoch": 80,
+  "no_aug_epochs": 15,
+  "empirical_pull_items": {
+    "mosaic_forced": 4,
+    "regular_forced": 1,
+    "sampler_closed": 1
+  }
+}

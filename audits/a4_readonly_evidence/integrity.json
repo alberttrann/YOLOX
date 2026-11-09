@@ -1,0 +1,44 @@
+{
+  "source_data_loader": {
+    "path": "D:\\YOLOX-3rd\\exps\\default\\tde_yolox_s.py",
+    "status": "inspected",
+    "mosaic_detection_constructed": false,
+    "batch_sampler_constructed": true,
+    "get_dataset_called": true,
+    "assessment": "POSSIBLE_NO_MOSAIC_WRAPPER",
+    "note": "Static detection only. Verify actual runtime dataset wrapper if custom factories or monkeypatches exist."
+  },
+  "p0_branches_found": 55,
+  "p0_branches_expected": 55,
+  "p0_missing": [],
+  "diagnostic_warnings": [],
+  "bootstrap_files_found": 31,
+  "manifest_coverage": {
+    "A4": {
+      "manifest_found": true,
+      "basis": "dct",
+      "source_files_recorded": 10,
+      "important_unhashed_files": [
+        "exps/default/tde_yolox_s.py",
+        "yolox/models/fourier_invariance.py",
+        "yolox/models/fourier_backbone.py",
+        "yolox/models/yolo_pafpn.py",
+        "yolox/core/trainer.py",
+        "tools/train_fourier_a4.py"
+      ]
+    },
+    "A4R": {
+      "manifest_found": true,
+      "basis": "orthogonal_control",
+      "source_files_recorded": 10,
+      "important_unhashed_files": [
+        "exps/default/tde_yolox_s.py",
+        "yolox/models/fourier_invariance.py",
+        "yolox/models/fourier_backbone.py",
+        "yolox/models/yolo_pafpn.py",
+        "yolox/core/trainer.py",
+        "tools/train_fourier_a4.py"
+      ]
+    }
+  }
+}

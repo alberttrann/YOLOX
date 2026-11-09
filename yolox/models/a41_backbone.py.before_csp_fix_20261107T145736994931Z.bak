@@ -1,0 +1,192 @@
+"""A4.1 native-preserving SPI and scale-auditable Tribrid replacements.
+
+This implementation is additive: it never edits original YOLOX vNext.2 or
+A4 classes. A4.1 intentionally changes the actual initialization and is NOT
+checkpoint-compatible with A4 optimizer states.
+"""
+import math
+import torch
+from torch import nn
+from .fourier_backbone import NoClippingSPI, prepare_backbone
+from .tribrid_neck import C2f_Tribrid
+from .ttt_modules import UnifiedRMBConv, ContinuousSaliencyAttention
+
+
+def _trid_hidden_channels(block):
+    """Infer C2f split width from actual Conv geometry, not an optional .c.
+
+    The user's deployed C2f_Tribrid may omit .c; its split/concat graph is
+    the ABI used by A41Tribrid.forward. Reject non-C2f layouts explicitly.
+    """
+    def conv(layer, name):
+        node = layer if isinstance(layer, nn.Conv2d) else getattr(layer, 'conv', None)
+        if not isinstance(node, nn.Conv2d):
+            raise RuntimeError(
+                f'Unsupported Tribrid {name}: expected Conv2d or .conv Conv2d, '
+                f'got {type(layer).__module__}.{type(layer).__name__}. '
+                'Do not assume an archived Tribrid layout matches the installed code.'
+            )
+        return node
+    for name in ('cv1', 'cv2', 'm', 'global_mixer', 'gate'):
+        if not hasattr(block, name):
+            raise RuntimeError('Unsupported C2f_Tribrid: missing '+name)
+    first = conv(block.cv1, 'cv1')
+    final = conv(block.cv2, 'cv2')
+    n = len(block.m)
+    split = int(first.out_channels)
+    if split % 2:
+        raise RuntimeError(f'Invalid C2f cv1 split channels: {split} is odd')
+    c = split // 2
+    expected_concat = (2+n) * c
+    if int(final.in_channels) != expected_concat:
+        raise RuntimeError(
+            f'Unsupported C2f Tribrid concat: cv1_out={split}, '
+            f'number_of_bottlenecks={n}, cv2_in={final.in_channels}, '
+            f'expected_cv2_in={expected_concat}; refusing an unsafe wrapper.'
+        )
+    legacy = getattr(block, 'c', None)
+    if legacy is not None and int(legacy) != c:
+        raise RuntimeError(
+            f'Inconsistent Tribrid cached c={legacy} vs structural c={c}'
+        )
+    return c
+
+
+def _rms(x):
+    # No magic pixel-domain threshold; denominator is numerically smoothed.
+    return (x.float().square().mean((-2, -1), keepdim=True) + 1e-12).sqrt()
+
+
+class A41DetailSPI(NoClippingSPI):
+    """P3 + bounded positive detail residual, with live SPI gradients at step zero.
+
+    A4's 0.25*tanh(0)=0 completely blocked its learned projector/router.
+    The corrected gate starts at 0.25*sigmoid(-0.8) ~= 0.0775 and the
+    correction is RMS attenuated per channel. Native P3 is always directly
+    available; the residual cannot overtake its RMS in one step.
+    """
+    def __init__(self, in_channels_dark2, out_channels_p3):
+        super().__init__(in_channels_dark2, out_channels_p3)
+        self.detail_gate_logit = nn.Parameter(torch.tensor(-0.8))
+        self.enabled = True
+        self.telemetry = False
+        self.last_probe = None
+
+    def forward(self, dark2_feat, p3_feat):
+        if not self.enabled:
+            return p3_feat
+        mixed = super().forward(dark2_feat, p3_feat)
+        delta = mixed.float() - p3_feat.float()
+        # Differentiable relative-energy protection, no hard clipping.
+        ratio = _rms(p3_feat) / (_rms(p3_feat) + _rms(delta))
+        coefficient = 0.25 * torch.sigmoid(self.detail_gate_logit.float())
+        correction = coefficient * delta * ratio
+        if self.telemetry:
+            self.last_probe = (p3_feat.detach(), correction.detach())
+        return p3_feat + correction.to(p3_feat.dtype)
+
+
+class A41Tribrid(C2f_Tribrid):
+    """Retains all original named modules/weights, repairs zero-gate starvation.
+
+    The RMBConv kernel parameters are preserved while the depthwise dilation
+    is tied to an explicit pyramid level (P3=2; P4/N4/N5=1).
+    Each pyramid block is separately named for per-level diagnostics.
+    """
+    def __init__(self, original, level_name, initial_gate):
+        if not isinstance(original, C2f_Tribrid):
+            raise TypeError('Expected the installed C2f_Tribrid module')
+        nn.Module.__init__(self)
+        self.c = _trid_hidden_channels(original)
+        # Moving existing modules retains native tensor values and state keys.
+        self.cv1 = original.cv1
+        self.cv2 = original.cv2
+        self.m = original.m
+        self.global_mixer = original.global_mixer
+        # The legacy receptive-field rule uses INTERNAL CHANNEL WIDTH, which
+        # makes P4/N4 incorrectly receive dilation=2 at YOLOX-S. Set actual
+        # dilation by EXPLICIT pyramid resolution while retaining kernels.
+        desired_dilation = 2 if level_name == 'C3_p3' else 1
+        found_rmb = 0
+        found_attention = 0
+        for module in self.global_mixer:
+            if isinstance(module, UnifiedRMBConv):
+                found_rmb += 1
+                dw = module.rep_dw_dilated
+                if getattr(dw, 'deploy', False):
+                    raise RuntimeError('Cannot safely change dilation after RepDWConv deployment')
+                if not hasattr(dw, 'dw_3x3') or dw.dw_3x3.kernel_size != (3, 3):
+                    raise RuntimeError('Unsupported RepDWConv for scale-explicit dilation')
+                dw.dilation = desired_dilation
+                dw.padding = desired_dilation
+                dw.dw_3x3.dilation = (desired_dilation, desired_dilation)
+                dw.dw_3x3.padding = (desired_dilation, desired_dilation)
+            if isinstance(module, ContinuousSaliencyAttention):
+                found_attention += 1
+                # Critical second gate! The original attention output Conv
+                # AND local-value depthwise Conv are zero initialized. Even
+                # nonzero outer Tribrid gates cannot train q/k/v at step zero
+                # unless these inner projections are also made live.
+                with torch.no_grad():
+                    nn.init.kaiming_uniform_(module.proj.weight, a=5 ** 0.5)
+                    module.proj.weight.mul_(0.015)
+                    if module.proj.bias is not None:
+                        nn.init.zeros_(module.proj.bias)
+                    local_w = module.local_v_conv.weight
+                    if local_w.ndim != 4 or any(k % 2 != 1 for k in local_w.shape[-2:]):
+                        raise RuntimeError('Unsupported saliency local-value conv kernel')
+                    local_w.zero_()
+                    local_w[:, :, local_w.shape[-2]//2, local_w.shape[-1]//2] = 0.015
+        if found_rmb != 1 or found_attention != 1:
+            raise RuntimeError('Unsupported Tribrid inner mixer topology')
+        self.rmb_dilation = desired_dilation
+        self.gate = nn.Parameter(original.gate.detach().clone())
+        self.gate.data.fill_(math.atanh(float(initial_gate)))
+        self.level_name = str(level_name)
+        self.context_enabled = True
+        self.telemetry = False
+        self.last_probe = None
+        self.strict_nonfinite = False
+
+    def forward(self, x):
+        y = list(self.cv1(x).chunk(2, dim=1))
+        y.extend(m(y[-1]) for m in self.m)
+        if self.context_enabled:
+            context = self.global_mixer(y[-1])
+            if self.strict_nonfinite and not bool(torch.isfinite(context).all()):
+                raise FloatingPointError('Nonfinite context in '+self.level_name)
+            # Unlike old nan_to_num(), nonfinite values are NOT hidden.
+            ratio = _rms(y[-1]) / (_rms(y[-1]) + _rms(context))
+            residual = 0.20 * torch.tanh(self.gate.float()) * context.float() * ratio
+            if self.telemetry:
+                self.last_probe = (y[-1].detach(), residual.detach())
+            y[-1] = y[-1] + residual.to(y[-1].dtype)
+        return self.cv2(torch.cat(y, dim=1))
+
+    def switch_to_deploy(self):
+        for module in self.global_mixer:
+            if hasattr(module, 'switch_to_deploy'):
+                module.switch_to_deploy()
+
+
+def prepare_a41_neck(neck):
+    """Preserve native dark2 and install separately named A4.1 pathways."""
+    neck = prepare_backbone(neck, remove_spi_clipping=True)
+    old = neck.spi_highway
+    if not isinstance(old, NoClippingSPI):
+        raise RuntimeError('SPI source differs from audited full-fidelity ABI')
+    detail = A41DetailSPI(old.projector.conv.in_channels // 4,
+                          old.router[-1].out_channels // 2)
+    missing, unexpected = detail.load_state_dict(old.state_dict(), strict=False)
+    if missing != ['detail_gate_logit'] or unexpected:
+        raise RuntimeError(f'Unexpected SPI weight migration: {missing} / {unexpected}')
+    neck.spi_highway = detail
+    # Keep 4 explicitly identified level branches; nonzero but bounded context.
+    # Lower P3 context bias preserves high-resolution local features.
+    for name, gate in [('C3_p4', 0.16), ('C3_p3', 0.12),
+                       ('C3_n3', 0.18), ('C3_n4', 0.20)]:
+        old_block = getattr(neck, name, None)
+        if not isinstance(old_block, C2f_Tribrid):
+            raise RuntimeError('Missing audited Tribrid block: '+name)
+        setattr(neck, name, A41Tribrid(old_block, name, gate))
+    return neck

@@ -1,0 +1,76 @@
+{
+  "experiment": "tdevnext3_a4_fourier_grounded",
+  "variant": "a4",
+  "dataset_preflight": {
+    "num_images": 59114,
+    "classes": 9,
+    "max_source_boxes": 91,
+    "lossless_label_capacity": 364,
+    "aspect_min": 1.7777777777777777,
+    "aspect_median": 1.7777777777777777,
+    "aspect_max": 1.7777777777777777,
+    "canvas": [
+      576,
+      1024
+    ]
+  },
+  "classes": [
+    [
+      1,
+      "car"
+    ],
+    [
+      2,
+      "bus"
+    ],
+    [
+      3,
+      "truck"
+    ],
+    [
+      4,
+      "person"
+    ],
+    [
+      5,
+      "rider"
+    ],
+    [
+      6,
+      "bike"
+    ],
+    [
+      7,
+      "motor"
+    ],
+    [
+      8,
+      "traffic light"
+    ],
+    [
+      9,
+      "traffic sign"
+    ]
+  ],
+  "source_annotations": "D:\\YOLOX-3rd\\bdd100k\\bdd100k\\bdd100k\\images\\annotations\\tde_train_clean_coco.json",
+  "ground_truth_count": 1096033,
+  "annotation_sizes_original_pixels": {
+    "medium": 351492,
+    "large": 136370,
+    "small": 608171
+  },
+  "required_target_capacity": 364,
+  "implemented_target_capacity": 364,
+  "heads": [
+    "P3",
+    "P4",
+    "P5"
+  ],
+  "actual_parameter_count": 14177622,
+  "known_gaps": [
+    "heterogeneous-aspect batch collation not implemented",
+    "4K low latency unverified",
+    "oriented annotations not supported",
+    "evaluation maxDets=100 may hide dense UAV detections"
+  ]
+}

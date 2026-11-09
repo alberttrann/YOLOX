@@ -1,0 +1,213 @@
+{
+  "pretrained": "D:\\YOLOX-3rd\\weights\\yolox_s.pth",
+  "batch_size": 8,
+  "variants": {
+    "dct": {
+      "experiment": "tdevnext3_a41_dct_grounded",
+      "fourier_variant": "a41",
+      "matched_state_dict_keys": 456,
+      "matched_float_ratio": 0.630425,
+      "native_stage_coverage": {
+        "stem": {
+          "model_tensors": 6,
+          "matched_tensors": 6,
+          "matched_float_elements": 3584,
+          "model_float_elements": 3584,
+          "ratio": 1.0
+        },
+        "dark2": {
+          "model_tensors": 36,
+          "matched_tensors": 36,
+          "matched_float_elements": 37888,
+          "model_float_elements": 37888,
+          "ratio": 1.0
+        },
+        "dark3": {
+          "model_tensors": 60,
+          "matched_tensors": 60,
+          "matched_float_elements": 232448,
+          "model_float_elements": 232448,
+          "ratio": 1.0
+        },
+        "dark4": {
+          "model_tensors": 116,
+          "matched_tensors": 60,
+          "matched_float_elements": 923648,
+          "model_float_elements": 1660034,
+          "ratio": 0.556403
+        },
+        "dark5": {
+          "model_tensors": 80,
+          "matched_tensors": 48,
+          "matched_float_elements": 3025920,
+          "model_float_elements": 4384002,
+          "ratio": 0.690219
+        },
+        "dark2_bn_buffers": {
+          "in_model": 18,
+          "matched": 18,
+          "unmatched": []
+        }
+      },
+      "optimizer": {
+        "trainable_tensors": 593,
+        "optimizer_tensors": 593,
+        "missing": [],
+        "duplicate": [],
+        "frozen_or_unrecognized_in_optimizer": 0,
+        "groups": [
+          {
+            "tensors": 220,
+            "lr": 0.00125,
+            "weight_decay": 0.0005
+          },
+          {
+            "tensors": 373,
+            "lr": 0.00125,
+            "weight_decay": 0.0
+          }
+        ]
+      },
+      "errors": [],
+      "status": "PASS"
+    },
+    "orth": {
+      "experiment": "tdevnext3_a41_orthogonal_grounded",
+      "fourier_variant": "a41_control",
+      "matched_state_dict_keys": 456,
+      "matched_float_ratio": 0.630425,
+      "native_stage_coverage": {
+        "stem": {
+          "model_tensors": 6,
+          "matched_tensors": 6,
+          "matched_float_elements": 3584,
+          "model_float_elements": 3584,
+          "ratio": 1.0
+        },
+        "dark2": {
+          "model_tensors": 36,
+          "matched_tensors": 36,
+          "matched_float_elements": 37888,
+          "model_float_elements": 37888,
+          "ratio": 1.0
+        },
+        "dark3": {
+          "model_tensors": 60,
+          "matched_tensors": 60,
+          "matched_float_elements": 232448,
+          "model_float_elements": 232448,
+          "ratio": 1.0
+        },
+        "dark4": {
+          "model_tensors": 116,
+          "matched_tensors": 60,
+          "matched_float_elements": 923648,
+          "model_float_elements": 1660034,
+          "ratio": 0.556403
+        },
+        "dark5": {
+          "model_tensors": 80,
+          "matched_tensors": 48,
+          "matched_float_elements": 3025920,
+          "model_float_elements": 4384002,
+          "ratio": 0.690219
+        },
+        "dark2_bn_buffers": {
+          "in_model": 18,
+          "matched": 18,
+          "unmatched": []
+        }
+      },
+      "optimizer": {
+        "trainable_tensors": 593,
+        "optimizer_tensors": 593,
+        "missing": [],
+        "duplicate": [],
+        "frozen_or_unrecognized_in_optimizer": 0,
+        "groups": [
+          {
+            "tensors": 220,
+            "lr": 0.00125,
+            "weight_decay": 0.0005
+          },
+          {
+            "tensors": 373,
+            "lr": 0.00125,
+            "weight_decay": 0.0
+          }
+        ]
+      },
+      "errors": [],
+      "status": "PASS"
+    },
+    "anchor": {
+      "experiment": "tdevnext3_a41_mosaic_a4_anchor",
+      "fourier_variant": "a41_mosaic_a4",
+      "matched_state_dict_keys": 456,
+      "matched_float_ratio": 0.630425,
+      "native_stage_coverage": {
+        "stem": {
+          "model_tensors": 6,
+          "matched_tensors": 6,
+          "matched_float_elements": 3584,
+          "model_float_elements": 3584,
+          "ratio": 1.0
+        },
+        "dark2": {
+          "model_tensors": 36,
+          "matched_tensors": 36,
+          "matched_float_elements": 37888,
+          "model_float_elements": 37888,
+          "ratio": 1.0
+        },
+        "dark3": {
+          "model_tensors": 60,
+          "matched_tensors": 60,
+          "matched_float_elements": 232448,
+          "model_float_elements": 232448,
+          "ratio": 1.0
+        },
+        "dark4": {
+          "model_tensors": 116,
+          "matched_tensors": 60,
+          "matched_float_elements": 923648,
+          "model_float_elements": 1660034,
+          "ratio": 0.556403
+        },
+        "dark5": {
+          "model_tensors": 80,
+          "matched_tensors": 48,
+          "matched_float_elements": 3025920,
+          "model_float_elements": 4384002,
+          "ratio": 0.690219
+        },
+        "dark2_bn_buffers": {
+          "in_model": 18,
+          "matched": 18,
+          "unmatched": []
+        }
+      },
+      "optimizer": {
+        "trainable_tensors": 593,
+        "optimizer_tensors": 593,
+        "missing": [],
+        "duplicate": [],
+        "frozen_or_unrecognized_in_optimizer": 0,
+        "groups": [
+          {
+            "tensors": 220,
+            "lr": 0.00125,
+            "weight_decay": 0.0005
+          },
+          {
+            "tensors": 373,
+            "lr": 0.00125,
+            "weight_decay": 0.0
+          }
+        ]
+      },
+      "errors": [],
+      "status": "PASS"
+    }
+  }
+}

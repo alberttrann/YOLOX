@@ -1,0 +1,68 @@
+{
+  "dct": {
+    "checkpoint_keys": [
+      "best_ap",
+      "curr_ap",
+      "ema_model",
+      "model",
+      "optimizer",
+      "scaler",
+      "start_epoch",
+      "successful_optimizer_steps"
+    ],
+    "model_tensors": 899,
+    "ema_tensors": 899,
+    "has_optimizer": true,
+    "start_epoch": 2,
+    "errors": [],
+    "warnings": [],
+    "checkpoint": "D:\\YOLOX-3rd\\YOLOX_outputs\\tdevnext3_a41_dct_grounded\\epoch_2_ckpt.pth",
+    "provenance_schema": "tdevnext3_a41_provenance_v1",
+    "provenance_experiment": "tdevnext3_a41_dct_grounded",
+    "checkpoint_sha256": "8b9db5ebcdce9d51d71fe5e01158317e50b47541ca42a555523aa63f48d5ebc6"
+  },
+  "orth": {
+    "checkpoint_keys": [
+      "best_ap",
+      "curr_ap",
+      "ema_model",
+      "model",
+      "optimizer",
+      "scaler",
+      "start_epoch",
+      "successful_optimizer_steps"
+    ],
+    "model_tensors": 899,
+    "ema_tensors": 899,
+    "has_optimizer": true,
+    "start_epoch": 2,
+    "errors": [],
+    "warnings": [],
+    "checkpoint": "D:\\YOLOX-3rd\\YOLOX_outputs\\tdevnext3_a41_orthogonal_grounded\\epoch_2_ckpt.pth",
+    "provenance_schema": "tdevnext3_a41_provenance_v1",
+    "provenance_experiment": "tdevnext3_a41_orthogonal_grounded",
+    "checkpoint_sha256": "961ef6c7c4104df54a1cde8d462f351d4ee2769439b3e67cb90b4518dd93d2b5"
+  },
+  "anchor": {
+    "checkpoint_keys": [
+      "best_ap",
+      "curr_ap",
+      "ema_model",
+      "model",
+      "optimizer",
+      "scaler",
+      "start_epoch",
+      "successful_optimizer_steps"
+    ],
+    "model_tensors": 899,
+    "ema_tensors": 899,
+    "has_optimizer": true,
+    "start_epoch": 2,
+    "errors": [],
+    "warnings": [],
+    "checkpoint": "D:\\YOLOX-3rd\\YOLOX_outputs\\tdevnext3_a41_mosaic_a4_anchor\\epoch_2_ckpt.pth",
+    "provenance_schema": "tdevnext3_a41_provenance_v1",
+    "provenance_experiment": "tdevnext3_a41_mosaic_a4_anchor",
+    "checkpoint_sha256": "10818afc893860f7baceef77785c464a5ac2abc9b946b35f8be14a412c44e937"
+  }
+}

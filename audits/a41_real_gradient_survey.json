@@ -1,0 +1,466 @@
+{
+  "sample": "real_training_batch",
+  "losses": {
+    "regression": 2.6437230110168457,
+    "objectness": 12.598060607910156,
+    "classification": 1.3069713115692139,
+    "prototype_aux": 0.11224863678216934
+  },
+  "gradient_l2": {
+    "regression": {
+      "other": {
+        "grad_l2": 254.05205956010926,
+        "finite": true,
+        "trainable_tensors": 74
+      },
+      "native_dark2": {
+        "grad_l2": 325.7656446139728,
+        "finite": true,
+        "trainable_tensors": 18
+      },
+      "native_dark3": {
+        "grad_l2": 274.03836515794507,
+        "finite": true,
+        "trainable_tensors": 30
+      },
+      "native_dark4": {
+        "grad_l2": 224.85031036057194,
+        "finite": true,
+        "trainable_tensors": 62
+      },
+      "native_dark5": {
+        "grad_l2": 148.25976094100994,
+        "finite": true,
+        "trainable_tensors": 44
+      },
+      "SPI_P3_detail": {
+        "grad_l2": 0.027801067200968282,
+        "finite": true,
+        "trainable_tensors": 18
+      },
+      "Tribrid_P4": {
+        "grad_l2": 50.95953982592304,
+        "finite": true,
+        "trainable_tensors": 74
+      },
+      "Tribrid_P3": {
+        "grad_l2": 24.84984387350862,
+        "finite": true,
+        "trainable_tensors": 74
+      },
+      "Tribrid_N4": {
+        "grad_l2": 18.12325815767909,
+        "finite": true,
+        "trainable_tensors": 74
+      },
+      "Tribrid_N5": {
+        "grad_l2": 8.722926526738553,
+        "finite": true,
+        "trainable_tensors": 74
+      },
+      "class_prediction": {
+        "grad_l2": 0.0,
+        "finite": true,
+        "trainable_tensors": 6
+      },
+      "bbox_regression": {
+        "grad_l2": 5.767868612759185,
+        "finite": true,
+        "trainable_tensors": 6
+      },
+      "objectness": {
+        "grad_l2": 0.0,
+        "finite": true,
+        "trainable_tensors": 6
+      },
+      "Engram_prototypes": {
+        "grad_l2": 0.0,
+        "finite": true,
+        "trainable_tensors": 3
+      },
+      "Engram_query": {
+        "grad_l2": 0.0,
+        "finite": true,
+        "trainable_tensors": 9
+      },
+      "Fourier_P3_P5": {
+        "grad_l2": 0.0,
+        "finite": true,
+        "trainable_tensors": 21
+      }
+    },
+    "objectness": {
+      "other": {
+        "grad_l2": 221.25850044687806,
+        "finite": true,
+        "trainable_tensors": 74
+      },
+      "native_dark2": {
+        "grad_l2": 202.9154789625905,
+        "finite": true,
+        "trainable_tensors": 18
+      },
+      "native_dark3": {
+        "grad_l2": 174.32028250067225,
+        "finite": true,
+        "trainable_tensors": 30
+      },
+      "native_dark4": {
+        "grad_l2": 145.878144118985,
+        "finite": true,
+        "trainable_tensors": 62
+      },
+      "native_dark5": {
+        "grad_l2": 103.32176856392302,
+        "finite": true,
+        "trainable_tensors": 44
+      },
+      "SPI_P3_detail": {
+        "grad_l2": 0.01985565640311643,
+        "finite": true,
+        "trainable_tensors": 18
+      },
+      "Tribrid_P4": {
+        "grad_l2": 34.15386912045564,
+        "finite": true,
+        "trainable_tensors": 74
+      },
+      "Tribrid_P3": {
+        "grad_l2": 17.309007213680164,
+        "finite": true,
+        "trainable_tensors": 74
+      },
+      "Tribrid_N4": {
+        "grad_l2": 10.711962577504178,
+        "finite": true,
+        "trainable_tensors": 74
+      },
+      "Tribrid_N5": {
+        "grad_l2": 6.671977685775775,
+        "finite": true,
+        "trainable_tensors": 74
+      },
+      "class_prediction": {
+        "grad_l2": 0.0,
+        "finite": true,
+        "trainable_tensors": 6
+      },
+      "bbox_regression": {
+        "grad_l2": 0.0,
+        "finite": true,
+        "trainable_tensors": 6
+      },
+      "objectness": {
+        "grad_l2": 25.202624756168863,
+        "finite": true,
+        "trainable_tensors": 6
+      },
+      "Engram_prototypes": {
+        "grad_l2": 0.0,
+        "finite": true,
+        "trainable_tensors": 3
+      },
+      "Engram_query": {
+        "grad_l2": 0.0,
+        "finite": true,
+        "trainable_tensors": 9
+      },
+      "Fourier_P3_P5": {
+        "grad_l2": 0.0,
+        "finite": true,
+        "trainable_tensors": 21
+      }
+    },
+    "classification": {
+      "other": {
+        "grad_l2": 34.606376307547514,
+        "finite": true,
+        "trainable_tensors": 74
+      },
+      "native_dark2": {
+        "grad_l2": 49.02123410533661,
+        "finite": true,
+        "trainable_tensors": 18
+      },
+      "native_dark3": {
+        "grad_l2": 43.22776864956159,
+        "finite": true,
+        "trainable_tensors": 30
+      },
+      "native_dark4": {
+        "grad_l2": 36.18172626820813,
+        "finite": true,
+        "trainable_tensors": 62
+      },
+      "native_dark5": {
+        "grad_l2": 26.03836865067952,
+        "finite": true,
+        "trainable_tensors": 44
+      },
+      "SPI_P3_detail": {
+        "grad_l2": 0.004877521323927968,
+        "finite": true,
+        "trainable_tensors": 18
+      },
+      "Tribrid_P4": {
+        "grad_l2": 8.578214438498149,
+        "finite": true,
+        "trainable_tensors": 74
+      },
+      "Tribrid_P3": {
+        "grad_l2": 4.050457131445045,
+        "finite": true,
+        "trainable_tensors": 74
+      },
+      "Tribrid_N4": {
+        "grad_l2": 3.2777407342452993,
+        "finite": true,
+        "trainable_tensors": 74
+      },
+      "Tribrid_N5": {
+        "grad_l2": 0.8669593605300528,
+        "finite": true,
+        "trainable_tensors": 74
+      },
+      "class_prediction": {
+        "grad_l2": 1.2489003786972948,
+        "finite": true,
+        "trainable_tensors": 6
+      },
+      "bbox_regression": {
+        "grad_l2": 0.0,
+        "finite": true,
+        "trainable_tensors": 6
+      },
+      "objectness": {
+        "grad_l2": 0.0,
+        "finite": true,
+        "trainable_tensors": 6
+      },
+      "Engram_prototypes": {
+        "grad_l2": 0.006073220128148344,
+        "finite": true,
+        "trainable_tensors": 3
+      },
+      "Engram_query": {
+        "grad_l2": 0.0027985345561154663,
+        "finite": true,
+        "trainable_tensors": 9
+      },
+      "Fourier_P3_P5": {
+        "grad_l2": 0.10956908839328976,
+        "finite": true,
+        "trainable_tensors": 21
+      }
+    },
+    "prototype_aux": {
+      "other": {
+        "grad_l2": 0.0,
+        "finite": true,
+        "trainable_tensors": 74
+      },
+      "native_dark2": {
+        "grad_l2": 0.0,
+        "finite": true,
+        "trainable_tensors": 18
+      },
+      "native_dark3": {
+        "grad_l2": 0.0,
+        "finite": true,
+        "trainable_tensors": 30
+      },
+      "native_dark4": {
+        "grad_l2": 0.0,
+        "finite": true,
+        "trainable_tensors": 62
+      },
+      "native_dark5": {
+        "grad_l2": 0.0,
+        "finite": true,
+        "trainable_tensors": 44
+      },
+      "SPI_P3_detail": {
+        "grad_l2": 0.0,
+        "finite": true,
+        "trainable_tensors": 18
+      },
+      "Tribrid_P4": {
+        "grad_l2": 0.0,
+        "finite": true,
+        "trainable_tensors": 74
+      },
+      "Tribrid_P3": {
+        "grad_l2": 0.0,
+        "finite": true,
+        "trainable_tensors": 74
+      },
+      "Tribrid_N4": {
+        "grad_l2": 0.0,
+        "finite": true,
+        "trainable_tensors": 74
+      },
+      "Tribrid_N5": {
+        "grad_l2": 0.0,
+        "finite": true,
+        "trainable_tensors": 74
+      },
+      "class_prediction": {
+        "grad_l2": 0.0,
+        "finite": true,
+        "trainable_tensors": 6
+      },
+      "bbox_regression": {
+        "grad_l2": 0.0,
+        "finite": true,
+        "trainable_tensors": 6
+      },
+      "objectness": {
+        "grad_l2": 0.0,
+        "finite": true,
+        "trainable_tensors": 6
+      },
+      "Engram_prototypes": {
+        "grad_l2": 0.02867108294727352,
+        "finite": true,
+        "trainable_tensors": 3
+      },
+      "Engram_query": {
+        "grad_l2": 0.04851914977997112,
+        "finite": true,
+        "trainable_tensors": 9
+      },
+      "Fourier_P3_P5": {
+        "grad_l2": 0.0,
+        "finite": true,
+        "trainable_tensors": 21
+      }
+    }
+  },
+  "gradient_cosines": {
+    "classification_vs_regression": {
+      "other": -0.06535203509830789,
+      "native_dark2": 0.09517022478605813,
+      "native_dark3": 0.05755903738008576,
+      "native_dark4": 0.08518583764193434,
+      "native_dark5": 0.08014938808964046,
+      "SPI_P3_detail": 0.11167810524415349,
+      "Tribrid_P4": 0.028789724943752124,
+      "Tribrid_P3": 0.0313668617415191,
+      "Tribrid_N4": -0.011361723353811144,
+      "Tribrid_N5": 0.010144996996113102,
+      "class_prediction": null,
+      "bbox_regression": null,
+      "objectness": null,
+      "Engram_prototypes": null,
+      "Engram_query": null,
+      "Fourier_P3_P5": null
+    },
+    "classification_vs_objectness": {
+      "other": 0.013066058632093761,
+      "native_dark2": -0.10852848550447512,
+      "native_dark3": -0.021237048248481164,
+      "native_dark4": -0.04128410171831951,
+      "native_dark5": -0.03139326903407839,
+      "SPI_P3_detail": -0.1041701835083562,
+      "Tribrid_P4": -0.028570834507644503,
+      "Tribrid_P3": 0.0006698274177590742,
+      "Tribrid_N4": 0.02434514340881577,
+      "Tribrid_N5": 0.028157825926157048,
+      "class_prediction": null,
+      "bbox_regression": null,
+      "objectness": null,
+      "Engram_prototypes": null,
+      "Engram_query": null,
+      "Fourier_P3_P5": null
+    },
+    "prototype_aux_vs_classification": {
+      "other": null,
+      "native_dark2": null,
+      "native_dark3": null,
+      "native_dark4": null,
+      "native_dark5": null,
+      "SPI_P3_detail": null,
+      "Tribrid_P4": null,
+      "Tribrid_P3": null,
+      "Tribrid_N4": null,
+      "Tribrid_N5": null,
+      "class_prediction": null,
+      "bbox_regression": null,
+      "objectness": null,
+      "Engram_prototypes": 0.01945233578240789,
+      "Engram_query": 0.10988775538832359,
+      "Fourier_P3_P5": null
+    },
+    "prototype_aux_vs_regression": {
+      "other": null,
+      "native_dark2": null,
+      "native_dark3": null,
+      "native_dark4": null,
+      "native_dark5": null,
+      "SPI_P3_detail": null,
+      "Tribrid_P4": null,
+      "Tribrid_P3": null,
+      "Tribrid_N4": null,
+      "Tribrid_N5": null,
+      "class_prediction": null,
+      "bbox_regression": null,
+      "objectness": null,
+      "Engram_prototypes": null,
+      "Engram_query": null,
+      "Fourier_P3_P5": null
+    }
+  },
+  "residual_l2_ratios": {
+    "SPI": 0.0017099460386251811,
+    "C3_p3": 0.006492724626020913,
+    "C3_p4": 0.008769897480486831,
+    "C3_n3": 0.009754283597111491,
+    "C3_n4": 0.010570533477876334,
+    "spectral_P3": 0.001987338957359838,
+    "spectral_P4": 0.002049335190136335,
+    "spectral_P5": 0.0018806198397713517,
+    "Engram_P3": 0.03980539071258663,
+    "Engram_P4": 0.040884804855745624,
+    "Engram_P5": 0.04106300264364271
+  },
+  "assignment": {
+    "num_fg_total": 38,
+    "num_gt_total": 38,
+    "uncovered_gt": 0,
+    "assignment_mode": "vnext3_portable",
+    "grounded_memory_pos": 38,
+    "a41_missing_before": 3,
+    "a41_missing_after": 0,
+    "a41_augmenting_paths_attempted": 0,
+    "a41_augmenting_paths_successful": 0,
+    "a41_searches_candidate_capped": 0
+  },
+  "assignment_by_relative_size": {
+    "tiny_relative": [
+      22,
+      22
+    ],
+    "middle_relative": [
+      14,
+      14
+    ],
+    "large_relative": [
+      2,
+      2
+    ],
+    "overall": [
+      38,
+      38
+    ]
+  },
+  "grounding": {
+    "positive_assignments": 38,
+    "classes": 5,
+    "proto_weight": 0.05
+  },
+  "caveats": [
+    "single-batch gradients do not establish general complementarity",
+    "relative size bins are NOT COCO small/medium/large",
+    "no optimization, no AP/AR claim"
+  ]
+}

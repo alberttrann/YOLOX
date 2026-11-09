@@ -1,0 +1,27 @@
+{
+  "status": "PASS",
+  "exp": "tdevnext3_a41_sem_box",
+  "mode": "legacy",
+  "device": "cuda",
+  "inputs": [
+    2,
+    3,
+    64,
+    96
+  ],
+  "optimizer_missing": [],
+  "aux_trainable_parameters": 206025,
+  "total_loss": 9.916559219360352,
+  "semantic_weighted": 0.33327165246009827,
+  "semantic_decoder_grad_l2": 0.8396885991096497,
+  "shared_sem_grad_l2": 0.5705235004425049,
+  "shared_det_grad_l2": 1596.18359375,
+  "semantic_to_detection_shared_grad_ratio": 0.00035742974848033824,
+  "grad_ratio_warning": false,
+  "inference_sem_head_executed": false,
+  "predictions_shape": [
+    2,
+    126,
+    14
+  ]
+}

@@ -1,0 +1,27 @@
+{
+  "status": "PASS",
+  "exp": "tdevnext3_a41_sem_harmonic",
+  "mode": "gaussian_harmonic",
+  "device": "cuda",
+  "inputs": [
+    2,
+    3,
+    64,
+    96
+  ],
+  "optimizer_missing": [],
+  "aux_trainable_parameters": 206025,
+  "total_loss": 9.94450569152832,
+  "semantic_weighted": 0.21418392658233643,
+  "semantic_decoder_grad_l2": 0.6280308365821838,
+  "shared_sem_grad_l2": 0.4840555787086487,
+  "shared_det_grad_l2": 818.3998413085938,
+  "semantic_to_detection_shared_grad_ratio": 0.000591465875573314,
+  "grad_ratio_warning": false,
+  "inference_sem_head_executed": false,
+  "predictions_shape": [
+    2,
+    126,
+    14
+  ]
+}

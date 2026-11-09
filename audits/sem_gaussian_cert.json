@@ -1,0 +1,27 @@
+{
+  "status": "PASS",
+  "exp": "tdevnext3_a41_sem_gaussian",
+  "mode": "gaussian",
+  "device": "cuda",
+  "inputs": [
+    2,
+    3,
+    64,
+    96
+  ],
+  "optimizer_missing": [],
+  "aux_trainable_parameters": 206025,
+  "total_loss": 9.649162292480469,
+  "semantic_weighted": 0.2307206094264984,
+  "semantic_decoder_grad_l2": 0.5857356190681458,
+  "shared_sem_grad_l2": 0.35869187116622925,
+  "shared_det_grad_l2": 560.9461669921875,
+  "semantic_to_detection_shared_grad_ratio": 0.0006394408096048633,
+  "grad_ratio_warning": false,
+  "inference_sem_head_executed": false,
+  "predictions_shape": [
+    2,
+    126,
+    14
+  ]
+}
